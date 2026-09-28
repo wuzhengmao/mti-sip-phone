@@ -1,0 +1,209 @@
+// Package config 负责应用配置的加载、保存与密码加密存储。
+//
+// 配置文件位置遵循各平台规范（os.UserConfigDir）：
+//   - Windows：%APPDATA%\mti-sip-phone\config.json
+//   - Linux：  ~/.config/mti-sip-phone/config.json
+package config
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// Account SIP 账户配置。
+// Password 为运行时明文，仅存在于内存；落盘时加密为 PasswordEnc，不写明文。
+type Account struct {
+	Enabled     bool   `json:"enabled"`     // 是否启用该账户
+	Server      string `json:"server"`      // SIP 服务器地址，如 10.168.4.40
+	Port        int    `json:"port"`        // SIP 服务器端口，默认 5060
+	Expires     int    `json:"expires"`     // 注册到期时间（秒），默认 300（REQ-ACC-018）
+	RPort       bool   `json:"rport"`       // 启用 rport（NAT 穿透），默认 true（REQ-ACC-016）
+	STUNEnabled bool   `json:"stunEnabled"` // 启用 STUN 公网地址探测（REQ-ACC-017）
+	STUNServer  string `json:"stunServer"`  // STUN 服务器地址，默认 stun.l.google.com:19302
+	Proxy       string `json:"proxy"`       // 出站 SIP 代理（host:port，可选，REQ-ACC-019）
+	Transport   string `json:"transport"`   // 传输协议：udp / tcp
+	Account     string `json:"account"`     // 账号（AOR 用户部分）
+	AuthUser    string `json:"authUser"`    // 认证 ID，为空时使用 Account
+	DisplayName string `json:"displayName"` // 显示名
+	PasswordEnc string `json:"passwordEnc"` // 加密后的密码（base64，AES-256-GCM）
+	Password    string `json:"-"`           // 明文密码，仅内存，不落盘
+}
+
+// WSConfig 本地 WebSocket 服务配置。
+type WSConfig struct {
+	Port int `json:"port"` // 监听端口，默认 8765，仅绑定 127.0.0.1；被占用时自动 +1
+}
+
+// LogConfig 日志配置。
+type LogConfig struct {
+	Level   string `json:"level"`   // debug / info / warn / error
+	Dir     string `json:"dir"`     // 日志目录，为空时使用 <配置目录>/logs
+	File    bool   `json:"file"`    // 是否写入文件，默认 true
+	Console bool   `json:"console"` // 是否输出控制台，默认 false（写文件时不输出控制台）
+	SIPTrace bool  `json:"sipTrace"` // 是否记录 SIP 信令（收发报文全文），默认 false
+}
+
+// AudioConfig 音频设备配置。
+type AudioConfig struct {
+	MicID         string `json:"micId"`         // 麦克风设备 ID，空 = 系统默认
+	SpeakerID     string `json:"speakerId"`     // 扬声器设备 ID，空 = 系统默认
+	RingSpeakerID string `json:"ringSpeakerId"` // 振铃音专用扬声器 ID，空 = 系统默认
+}
+
+// UIConfig 界面配置。
+type UIConfig struct {
+	IncomingAlwaysOnTop bool `json:"incomingAlwaysOnTop"` // 来电窗口置顶
+	CallAlwaysOnTop     bool `json:"callAlwaysOnTop"`     // 通话面板置顶
+}
+
+// Config 应用配置。
+type Config struct {
+	Version    int         `json:"version"` // 配置结构版本
+	Account    Account     `json:"account"`
+	WS         WSConfig    `json:"ws"`
+	Log        LogConfig   `json:"log"`
+	Audio      AudioConfig `json:"audio"`
+	UI         UIConfig    `json:"ui"`
+	AutoStart  bool        `json:"autoStart"`  // 开机自动启动，默认 true
+	RecentDial []string    `json:"recentDial"` // 最近呼叫号码（去重，最多 5 个，供拨号下拉）
+}
+
+// Default 返回默认配置。
+func Default() *Config {
+	return &Config{
+		Version: 1,
+		AutoStart: true,
+		Account: Account{
+			Enabled:    true,
+			Port:       5060,
+			Expires:    300,
+			RPort:      true,
+			STUNServer: "stun.l.google.com:19302",
+			Transport:  "udp",
+		},
+		WS: WSConfig{
+			Port: 8765,
+		},
+		Log: LogConfig{
+			Level: "info",
+			File:  true,
+		},
+		UI: UIConfig{
+			IncomingAlwaysOnTop: true,
+			CallAlwaysOnTop:     true,
+		},
+	}
+}
+
+// randomToken 生成 n 字节随机数的十六进制字符串。
+func randomToken(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("生成随机 token 失败: %v", err))
+	}
+	return hex.EncodeToString(b)
+}
+
+// Load 加载配置；文件不存在时创建默认配置并保存。
+func Load(path string) (*Config, error) {
+	cfg := Default()
+
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		if err := save(cfg, path); err != nil {
+			return nil, fmt.Errorf("创建默认配置失败: %w", err)
+		}
+		return cfg, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取配置失败: %w", err)
+	}
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("配置解析失败（JSON 格式错误）: %w", err)
+	}
+	// 兼容旧配置：无 autoStart 字段时按默认启用
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err == nil {
+		if _, ok := raw["autoStart"]; !ok {
+			cfg.AutoStart = true
+		}
+	}
+
+	// 解密密码
+	if cfg.Account.PasswordEnc != "" {
+		plain, err := decryptPassword(cfg.Account.PasswordEnc)
+		if err != nil {
+			// 密码解密失败不阻断启动，但提示用户重新输入
+			cfg.Account.Password = ""
+			fmt.Fprintf(os.Stderr, "警告: 账户密码解密失败(%v)，请在设置中重新输入\n", err)
+		} else {
+			cfg.Account.Password = plain
+		}
+	}
+
+	// 补默认值
+	if cfg.Account.Port == 0 {
+		cfg.Account.Port = 5060
+	}
+	if cfg.Account.Expires == 0 {
+		cfg.Account.Expires = 300
+	}
+	if cfg.Account.STUNServer == "" {
+		cfg.Account.STUNServer = "stun.l.google.com:19302"
+	}
+	if cfg.Account.Transport == "" {
+		cfg.Account.Transport = "udp"
+	}
+	if cfg.WS.Port == 0 {
+		cfg.WS.Port = 8765
+	}
+	if cfg.Log.Level == "" {
+		cfg.Log.Level = "info"
+	}
+	// 旧配置兼容：file 与 console 均未设置时按默认（写文件）
+	if !cfg.Log.File && !cfg.Log.Console {
+		cfg.Log.File = true
+	}
+	return cfg, nil
+}
+
+// Save 保存配置到磁盘（原子写入，密码加密后落盘）。
+func (c *Config) Save(path string) error { return save(c, path) }
+
+func save(c *Config, path string) error {
+	// 密码加密：仅内存明文参与序列化前加密
+	if c.Account.Password != "" {
+		enc, err := encryptPassword(c.Account.Password)
+		if err != nil {
+			return fmt.Errorf("密码加密失败: %w", err)
+		}
+		c.Account.PasswordEnc = enc
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("创建配置目录失败: %w", err)
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	// 原子写：先写临时文件再重命名，避免中途断电损坏配置
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// ConfigDir 返回配置目录（按平台规范）。
+func ConfigDir() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "mti-sip-phone"), nil
+}

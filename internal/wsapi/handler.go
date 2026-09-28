@@ -1,0 +1,204 @@
+package wsapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"mti-sip-phone/internal/core"
+	"mti-sip-phone/internal/logx"
+)
+
+// 读超时：心跳周期内无消息则断开
+const readTimeout = 60 * time.Second
+
+// serveConn 处理单个 WS 连接：事件转发 + 请求分发。
+func (s *Server) serveConn(ctx context.Context, conn *websocket.Conn) {
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wmu sync.Mutex // websocket.Conn 并发写需要串行化
+
+	// 事件转发：订阅总线，事件 → 客户端
+	sub := s.app.Bus().Subscribe()
+	defer s.app.Bus().Unsubscribe(sub)
+	go func() {
+		for ev := range sub {
+			if !s.forwardEvent(connCtx, conn, &wmu, ev) {
+				cancel() // 发送失败：连接已断开，结束整个连接
+				return
+			}
+		}
+	}()
+
+	// 连接建立即推送当前状态快照（system.state 事件），客户端无需等待
+	go func() {
+		wmu.Lock()
+		defer wmu.Unlock()
+		msg := Message{Type: "event", Event: "system.state", Data: s.app.State()}
+		_ = writeMsg(connCtx, conn, msg)
+	}()
+
+	// 心跳：定期 Ping 探测连接活性并保持链路畅通。
+	// 读超时由客户端心跳消息（SDK 每 25 秒发空消息）重置，此处 Ping
+	// 用于探测死连接（等 pong 失败即断开）——此前无任何心跳，空闲
+	// 60 秒触发读超时断开后由 SDK 自动重连（用户反馈"过段时间断开
+	// 又重连"——bug 修复）。
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-connCtx.Done():
+				return
+			case <-ticker.C:
+				pingCtx, pingCancel := context.WithTimeout(connCtx, 10*time.Second)
+				if err := conn.Ping(pingCtx); err != nil {
+					pingCancel()
+					logx.Logger().Debug("WS 心跳失败，断开连接", "err", err)
+					cancel()
+					return
+				}
+				pingCancel()
+			}
+		}
+	}()
+
+	// 读循环：解析请求并分发
+	for {
+		readCtx, readCancel := context.WithTimeout(connCtx, readTimeout)
+		typ, data, err := conn.Read(readCtx)
+		readCancel()
+		if err != nil {
+			cancel()
+			// 心跳超时或正常关闭，不记错误日志
+			if !errors.Is(err, context.Canceled) {
+				logx.Logger().Debug("WS 连接断开", "err", err)
+			}
+			return
+		}
+		if typ != websocket.MessageText {
+			continue
+		}
+
+		var msg Message
+		if err := json.Unmarshal(data, &msg); err != nil {
+			s.reply(conn, &wmu, errMessage(nil, CodeInvalidParams, fmt.Errorf("消息不是合法 JSON")))
+			continue
+		}
+		if msg.Method == "" {
+			// 客户端发来非请求消息（如心跳），忽略
+			continue
+		}
+		go s.dispatch(connCtx, conn, &wmu, msg)
+	}
+}
+
+// forwardEvent 将总线事件封装为 WS 事件消息发送，返回是否成功。
+func (s *Server) forwardEvent(ctx context.Context, conn *websocket.Conn, wmu *sync.Mutex, ev core.Event) bool {
+	msg := Message{Type: "event", Event: ev.Name, Data: ev.Data}
+	wmu.Lock()
+	defer wmu.Unlock()
+	if err := writeMsg(ctx, conn, msg); err != nil {
+		logx.Logger().Debug("事件发送失败", "event", ev.Name, "err", err)
+		return false
+	}
+	return true
+}
+
+// dispatch 按方法名分发请求。
+func (s *Server) dispatch(ctx context.Context, conn *websocket.Conn, wmu *sync.Mutex, msg Message) {
+	var resp Message
+	switch msg.Method {
+	case MethodDial:
+		var p struct {
+			Target string `json:"target"`
+		}
+		if err := json.Unmarshal(msg.Params, &p); err != nil || p.Target == "" {
+			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 target"))
+			break
+		}
+		callID, err := s.app.Dial(ctx, p.Target)
+		if err != nil {
+			resp = errMessage(msg.ID, codeOf(err), err)
+			break
+		}
+		resp = okMessage(msg.ID, map[string]string{"callId": callID})
+
+	case MethodAnswer, MethodHangup, MethodReject, MethodMute:
+		var p struct {
+			CallID string `json:"callId"`
+			Code   int    `json:"code"`
+			Muted  bool   `json:"muted"`
+		}
+		if err := json.Unmarshal(msg.Params, &p); err != nil || p.CallID == "" {
+			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 callId"))
+			break
+		}
+		var err error
+		switch msg.Method {
+		case MethodAnswer:
+			err = s.app.Answer(p.CallID)
+		case MethodHangup:
+			err = s.app.Hangup(p.CallID)
+		case MethodReject:
+			err = s.app.Reject(p.CallID, p.Code)
+		case MethodMute:
+			err = s.app.Mute(p.CallID, p.Muted)
+		}
+		if err != nil {
+			resp = errMessage(msg.ID, codeOf(err), err)
+			break
+		}
+		resp = okMessage(msg.ID, map[string]any{"callId": p.CallID})
+
+	case MethodGetState:
+		resp = okMessage(msg.ID, s.app.State())
+
+	default:
+		resp = errMessage(msg.ID, CodeUnknownMethod, fmt.Errorf("未知方法: %s", msg.Method))
+	}
+
+	wmu.Lock()
+	defer wmu.Unlock()
+	if err := writeMsg(ctx, conn, resp); err != nil {
+		logx.Logger().Debug("响应发送失败", "method", msg.Method, "err", err)
+	}
+}
+
+// reply 发送响应（解析失败等场景，无需关联具体连接上下文）。
+func (s *Server) reply(conn *websocket.Conn, wmu *sync.Mutex, msg Message) {
+	wmu.Lock()
+	defer wmu.Unlock()
+	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = writeMsg(writeCtx, conn, msg)
+}
+
+// codeOf 将 Go error 映射为协议错误码。
+func codeOf(err error) string {
+	switch {
+	case errors.Is(err, core.ErrTelephonyNotReady):
+		return CodeNotReady
+	case errors.Is(err, core.ErrCallNotFound):
+		return CodeCallNotFound
+	default:
+		return CodeInternal
+	}
+}
+
+// writeMsg 序列化并写入消息。
+func writeMsg(ctx context.Context, conn *websocket.Conn, msg Message) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return conn.Write(writeCtx, websocket.MessageText, data)
+}

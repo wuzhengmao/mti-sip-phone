@@ -1,0 +1,15 @@
+# 构建产物
+bin/
+dist/
+*.exe
+
+# 本地运行数据
+logs/
+config.json
+
+# IDE
+.idea/
+.vscode/
+
+# 调试抓包产物
+rtp_rx.wav

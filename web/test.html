@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mti-sip-phone 测试页面</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --border: #e2e5ea; --text: #1f2329;
+    --primary: #2563eb; --primary-hover: #1d4ed8;
+    --green: #16a34a; --red: #dc2626; --gray: #6b7280; --warn: #d97706;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: var(--gray); font-size: 13px; margin-bottom: 20px; }
+  /* minmax(0,1fr) 允许列收缩：防止日志长行把右列最小宽度撑大、挤压左列 */
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; max-width: 1000px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  }
+  .card h2 { font-size: 15px; margin-bottom: 12px; }
+  .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 12px; background: #eef0f3; color: var(--gray);
+  }
+  .badge.ok { background: #dcfce7; color: var(--green); }
+  .badge.err { background: #fee2e2; color: var(--red); }
+  .badge.warn { background: #fef3c7; color: var(--warn); }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  label { font-size: 13px; color: var(--gray); min-width: 70px; }
+  input[type=text], input[type=number] {
+    flex: 1; min-width: 120px; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: 6px; font-size: 14px; outline: none;
+  }
+  input:focus { border-color: var(--primary); }
+  button {
+    padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 14px; background: var(--primary); color: #fff; transition: background .15s;
+  }
+  button:hover { background: var(--primary-hover); }
+  button:disabled { background: #cbd5e1; cursor: not-allowed; }
+  button.green { background: var(--green); }
+  button.red { background: var(--red); }
+  button.gray { background: #6b7280; }
+  button.ghost { background: #fff; color: var(--text); border: 1px solid var(--border); }
+  #callArea {
+    background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px;
+    padding: 14px; margin-bottom: 12px;
+  }
+  #callArea .caller { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  #callArea .hint { font-size: 12px; color: var(--gray); margin-bottom: 10px; }
+  #timer { font-variant-numeric: tabular-nums; color: var(--gray); font-size: 13px; }
+  #log {
+    height: 560px; overflow-y: auto; background: #0f172a; color: #cbd5e1;
+    border-radius: 8px; padding: 10px; font-family: Consolas, Monaco, monospace;
+    font-size: 12px; line-height: 1.7;
+    /* 长行（如状态快照 JSON）强制换行，防止撑破 grid 列宽 */
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  #log .t { color: #64748b; }
+  #log .ev { color: #93c5fd; }
+  #log .ok { color: #86efac; }
+  #log .err { color: #fca5a5; }
+  #log .info { color: #cbd5e1; }
+  .state-line { font-size: 13px; color: var(--gray); margin-top: 6px; word-break: break-all; }
+</style>
+</head>
+<body>
+<h1>mti-sip-phone 测试页面</h1>
+<p class="sub">通过本地 WebSocket 控制 SIP 软电话：网页拨号、接听、挂断（使用 JS SDK 实现）</p>
+
+<div class="grid">
+  <!-- 左列：连接、拨号与通话控制 -->
+  <div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>连接状态
+        <span id="connBadge" class="badge">未连接</span>
+        <span id="regBadge" class="badge">未注册</span>
+      </h2>
+      <div class="row">
+        <label>WS 地址</label>
+        <input type="text" id="wsUrl" readonly>
+      </div>
+      <div class="row">
+        <label>本机号码</label>
+        <input type="text" id="localAccount" readonly placeholder="未配置">
+      </div>
+      <div class="state-line" id="stateLine"></div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h2>拨号</h2>
+      <div class="row">
+        <label>号码</label>
+        <input type="text" id="dialTarget" placeholder="如 1001 或 sip:1001@10.168.4.40">
+        <button id="btnDial">拨号</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h2>URI 拉起软电话</h2>
+      <div class="row">
+        <label>服务器</label>
+        <input type="text" id="uriServer" placeholder="如 10.168.4.40:15060">
+      </div>
+      <div class="row">
+        <label>账号</label>
+        <input type="text" id="uriAccount" placeholder="如 2999">
+      </div>
+      <div class="row">
+        <label>密码</label>
+        <input type="text" id="uriPassword" placeholder="认证密码">
+      </div>
+      <div class="row">
+        <button id="btnGenUri" class="ghost">生成拉起链接</button>
+      </div>
+      <div class="state-line" id="uriLine" style="display:none">
+        点击链接（浏览器将提示打开软电话）：<br>
+        <a id="sipLink" href="#"></a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>通话控制</h2>
+      <div id="callArea" style="display:none">
+        <div class="caller" id="callName"></div>
+        <div class="hint" id="callHint"></div>
+        <div class="row">
+          <button id="btnAnswer" class="green">接听</button>
+          <button id="btnReject" class="red">拒接</button>
+          <button id="btnMute" class="ghost">保持</button>
+          <button id="btnHangup" class="red">挂断</button>
+          <span id="timer"></span>
+        </div>
+      </div>
+      <p id="noCall" class="state-line">当前没有进行中的通话</p>
+    </div>
+  </div>
+
+  <!-- 右列：事件日志 -->
+  <div>
+    <div class="card">
+      <h2>事件日志</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/sdk/sip-phone-sdk.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var log = $('log');
+
+  function addLog(cls, text) {
+    var div = document.createElement('div');
+    var time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    div.innerHTML = '<span class="t">[' + time + ']</span> <span class="' + cls + '">' + escapeHtml(text) + '</span>';
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  // WS 地址（同源连接，无 token 鉴权）
+  var wsBase = (location.protocol === 'http:' || location.protocol === 'https:')
+    ? 'ws://' + location.host + '/ws' : 'ws://127.0.0.1:8765/ws';
+  $('wsUrl').value = wsBase;
+
+  var sdk = new SipPhoneSDK({
+    url: wsBase,
+    autoReconnect: true
+  });
+
+  var currentCall = null; // { callId, direction, state }
+  var timerHandle = null;
+  var establishedAt = null;
+
+  // ---------------- 事件订阅 ----------------
+  sdk.on('connected', function () {
+    $('connBadge').textContent = '已连接';
+    $('connBadge').className = 'badge ok';
+    addLog('ok', '已连接软电话');
+  });
+  sdk.on('disconnected', function () {
+    $('connBadge').textContent = '未连接';
+    $('connBadge').className = 'badge';
+    addLog('err', '连接断开');
+  });
+
+  // 注册状态显示：文字 + 徽章颜色 + 本机号码（事件与状态快照共用，
+  // 保证颜色与文字一致——此前状态快照只更新文字不更新颜色，已注册
+  // 却显示灰色背景，直到下一次注册事件才变绿——bug 修复）
+  function updateRegister(reg) {
+    if (!reg) { return; }
+    var text = { registered: '已注册', registering: '注册中', unregistered: '未注册', failed: '注册失败' }[reg.state] || reg.state;
+    $('regBadge').textContent = text;
+    $('regBadge').className = 'badge ' + (reg.state === 'registered' ? 'ok' : (reg.state === 'failed' ? 'err' : (reg.state === 'registering' ? 'warn' : '')));
+    if (reg.account) {
+      $('localAccount').value = reg.account;
+    }
+    return text;
+  }
+
+  sdk.on('register.state', function (data) {
+    var text = updateRegister(data);
+    addLog('info', '注册状态: ' + text + (data.reason ? '（' + data.reason + '）' : ''));
+  });
+
+  sdk.on('call.incoming', function (data) {
+    currentCall = data.call;
+    showCall(data.call);
+    addLog('ev', '来电振铃: ' + data.call.remote + '（callId: ' + data.call.id + '）');
+  });
+  sdk.on('call.dialing', function (data) {
+    currentCall = data.call;
+    showCall(data.call);
+    addLog('ev', '呼出中: ' + data.call.remote + '（callId: ' + data.call.id + '）');
+  });
+  sdk.on('call.ringing', function (data) {
+    if (currentCall && currentCall.id === data.call.id) { currentCall = data.call; showCall(data.call); }
+    addLog('ev', '呼出振铃: ' + data.call.remote);
+  });
+  sdk.on('call.established', function (data) {
+    currentCall = data.call;
+    showCall(data.call);
+    startTimer();
+    addLog('ok', '通话建立: ' + data.call.remote);
+  });
+  sdk.on('call.terminated', function (data) {
+    addLog('info', '通话结束: ' + (data.reason || ''));
+    resetCall(data);
+  });
+  sdk.on('call.failed', function (data) {
+    addLog('err', '呼叫失败: ' + (data.reason || ''));
+    resetCall(data);
+  });
+  sdk.on('call.muted', function (data) {
+    var btn = $('btnMute');
+    btn.textContent = data.muted ? '取消保持' : '保持';
+    addLog('info', data.muted ? '已保持' : '已取消保持');
+  });
+
+  sdk.on('system.state', function (state) {
+    // 连接建立时收到的状态快照
+    addLog('info', '收到状态快照: ' + JSON.stringify(state));
+    if (state.register) {
+      updateRegister(state.register);
+    }
+    if (state.calls && state.calls.length > 0) {
+      var active = state.calls[state.calls.length - 1];
+      currentCall = active;
+      if (active.state !== 'terminated') {
+        showCall(active);
+        if (active.state === 'established') { startTimer(); }
+      }
+    }
+  });
+
+  // ---------------- 控制按钮 ----------------
+
+  $('btnDial').onclick = function () {
+    var target = $('dialTarget').value.trim();
+    if (!target) { addLog('err', '请输入号码'); return; }
+    addLog('info', '发起呼叫: ' + target);
+    sdk.dial(target).then(function (res) {
+      addLog('ok', '呼叫已发起（callId: ' + res.callId + '）');
+    }).catch(function (e) {
+      addLog('err', '拨号失败: ' + e.message);
+    });
+  };
+
+  // 生成 sip:// 拉起链接：点击后浏览器调用系统协议唤起软电话
+  //（软电话未运行时由系统启动；运行中则转发参数并更新注册配置）
+  $('btnGenUri').onclick = function () {
+    var server = $('uriServer').value.trim();
+    var account = $('uriAccount').value.trim();
+    var password = $('uriPassword').value;
+    if (!server || !account) { addLog('err', '请输入服务器与账号'); return; }
+    if (server.indexOf(':') < 0) { server += ':5060'; }
+    var uri = 'sip://' + account + ':' + encodeURIComponent(password) + '@' + server;
+    var link = $('sipLink');
+    link.href = uri;
+    link.textContent = uri;
+    $('uriLine').style.display = '';
+    addLog('info', '已生成拉起链接，点击后浏览器会唤起软电话（首次需确认允许）');
+  };
+
+  $('btnAnswer').onclick = function () {
+    if (!currentCall) { return; }
+    sdk.answer(currentCall.id).catch(function (e) { addLog('err', '接听失败: ' + e.message); });
+  };
+  $('btnReject').onclick = function () {
+    if (!currentCall) { return; }
+    sdk.reject(currentCall.id).catch(function (e) { addLog('err', '拒接失败: ' + e.message); });
+  };
+  $('btnHangup').onclick = function () {
+    if (!currentCall) { return; }
+    sdk.hangup(currentCall.id).catch(function (e) { addLog('err', '挂断失败: ' + e.message); });
+  };
+  $('btnMute').onclick = function () {
+    if (!currentCall) { return; }
+    var muted = $('btnMute').textContent === '保持';
+    sdk.mute(currentCall.id, muted).catch(function (e) { addLog('err', '保持切换失败: ' + e.message); });
+  };
+
+  // ---------------- 界面状态 ----------------
+  function showCall(call) {
+    $('callArea').style.display = 'block';
+    $('noCall').style.display = 'none';
+    var name = call.remoteName || call.remote || '';
+    var label = call.direction === 'incoming' ? '来电：' : '去电：';
+    $('callName').textContent = label + name;
+    $('callHint').textContent = call.direction === 'incoming' ? '对方正在呼叫您' : '正在呼叫对方...';
+
+    var ringing = call.state === 'ringing';
+    var incoming = call.direction === 'incoming';
+    $('btnAnswer').style.display = (ringing && incoming) ? '' : 'none';
+    $('btnReject').style.display = (ringing && incoming) ? '' : 'none';
+    $('btnMute').style.display = (call.state === 'established') ? '' : 'none';
+    // 来电振铃时隐藏挂断（拒接即挂断）；呼出中/通话中显示挂断
+    $('btnHangup').style.display = (ringing && incoming) ? 'none' : '';
+
+    if (call.state === 'established') {
+      $('callHint').textContent = '通话中';
+    }
+  }
+
+  function resetCall(data) {
+    stopTimer();
+    currentCall = null;
+    $('callArea').style.display = 'none';
+    $('noCall').style.display = '';
+    $('btnMute').textContent = '保持';
+  }
+
+  function startTimer() {
+    stopTimer();
+    establishedAt = Date.now();
+    timerHandle = setInterval(function () {
+      var sec = Math.floor((Date.now() - establishedAt) / 1000);
+      var m = Math.floor(sec / 60), s = sec % 60;
+      $('timer').textContent = (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+    }, 500);
+  }
+  function stopTimer() {
+    if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
+    $('timer').textContent = '';
+  }
+
+  // 初始连接（无 token 鉴权，直接连）
+  sdk.connect().catch(function (e) {
+    addLog('err', '初始连接失败: ' + e.message);
+  });
+})();
+</script>
+</body>
+</html>
