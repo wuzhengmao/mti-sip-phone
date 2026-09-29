@@ -39,7 +39,7 @@ go build -tags noaudio -o bin/sip-phone ./cmd/sip-phone                       # 
 启动后：
 
 - 系统托盘常驻：单击托盘图标唤出主界面（拨号 / 配置），关闭窗口=最小化到托盘
-- 测试页面：http://127.0.0.1:8765/ （token 自动注入，开箱即用）
+- 测试页面：http://127.0.0.1:8765/ （WS 端口可配置，被占用自动 +1；无 token 鉴权）
 - 配置文件：`%APPDATA%/mti-sip-phone/config.json`（Windows）/ `~/.config/mti-sip-phone/config.json`（Linux）
 - 日志文件：配置目录下 `logs/sip-phone.log`（按大小滚动，含 SIP 信令）
 - sip:// 协议：网页链接 `sip://账号:密码@服务器:5060` 拉起软电话并写入注册信息
@@ -76,7 +76,7 @@ go build -tags noaudio -o bin/sip-phone ./cmd/sip-phone                       # 
 ```html
 <script src="http://127.0.0.1:8765/sdk/sip-phone-sdk.js"></script>
 <script>
-  const sdk = new SipPhoneSDK({ token: '<软电话设置界面的 token>' });
+  const sdk = new SipPhoneSDK();
   sdk.on('call.incoming', (data) => {
     if (confirm('接听 ' + data.call.remote + ' 的来电？')) {
       sdk.answer(data.call.id);
@@ -95,10 +95,16 @@ internal/
   config/         配置加载与密码加密存储
   logx/           日志（滚动文件 + 脱敏 + SIP 信令跟踪）
   core/           应用状态机、事件总线、电话能力抽象接口
-  wsapi/          本地 WS 控制服务（鉴权 + CORS + 事件推送）
-  sip/            SIP 协议栈与媒体层（开发中）
+  wsapi/          本地 WS 控制服务（事件推送 + 心跳）
+  sip/            SIP 协议栈（注册/呼叫/保持信令与竞态处理）
+  media/          媒体引擎（RTP/RTCP、PCMA/PCMU、抖动缓冲、SDP 协商）
+  audio/          音频设备（malgo 全双工、设备枚举/选择、提示音）
+  ui/             Fyne 界面（拨号盘/设置页/通话面板/托盘）
+  protocol/       sip:// 协议解析与系统协议注册
+  single/         单实例 + 参数转发
+  autostart/      开机自启
 web/
   test.html       测试页面（内嵌进二进制）
   sdk/            JS SDK 与类型声明
-docs/             ws-protocol.md 等设计文档
+docs/             需求、WS 协议、变更记录
 ```
