@@ -14,10 +14,6 @@ func moveCallWindowToCorner(w fyne.Window) {}
 
 func findWindowByTitlePrefix(prefix string) uintptr { return 0 }
 
-func getWindowPos(hwnd uintptr) (x, y int) { return 0, 0 }
-
-func setWindowPosXY(hwnd uintptr, x, y int) {}
-
 func flashWindowEx(hwnd uintptr)     {}
 func stopFlashWindowEx(hwnd uintptr) {}
 func setForegroundWindow(hwnd uintptr) {}

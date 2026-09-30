@@ -124,7 +124,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// 允许任意来源网页连接（本机任意端口的页面都是合法客户端），安全性由 token 保证
+		// 允许任意来源网页连接（本机任意端口的页面都是合法客户端），安全性由仅回环监听保证
 		InsecureSkipVerify: true,
 	})
 	if err != nil {

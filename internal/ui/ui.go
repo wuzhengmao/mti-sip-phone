@@ -320,7 +320,7 @@ func (a *App) buildDialPage() {
 	)
 }
 
-// buildSettingsPage 设置页：账户、音频设备、日志、网页接入 token（REQ-UI-006/012）。
+// buildSettingsPage 设置页：账户、音频设备、日志、网页接入（REQ-UI-006/012）。
 func (a *App) buildSettingsPage() {
 	// ---- 顶部栏：返回按钮 ----
 	backBtn := widget.NewButtonWithIcon("返回", theme.NavigateBackIcon(), a.showDialPage)
@@ -356,7 +356,7 @@ func (a *App) buildSettingsPage() {
 		}
 	})
 
-	// 表单项采用「label 在上、输入框在下」的堆叠布局（与 token 一致），
+	// 表单项采用「label 在上、输入框在下」的堆叠布局，
 	// 避免 Grid 双列在窄窗口下把主窗口撑宽（REQ-UI-019）
 	// STUN（REQ-ACC-017）：默认 stun.l.google.com:19302，可修改；
 	// 启用开关与地址输入框联动——勾选后才能编辑地址
@@ -498,7 +498,7 @@ func parseHostPort(addr string, defaultPort int) (string, int) {
 }
 
 // formItem 表单项：label 在上、控件在下的堆叠布局（防止窄窗口被撑宽）。
-// 控件包一层 HScroll：长内容（如 token、长地址）横向滚动而非撑宽窗口。
+// 控件包一层 HScroll：长内容（如长地址）横向滚动而非撑宽窗口。
 func formItem(label string, obj fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewVBox(
 		widget.NewLabel(label),

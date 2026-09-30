@@ -6,8 +6,6 @@
 package config
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -97,15 +95,6 @@ func Default() *Config {
 			CallAlwaysOnTop:     true,
 		},
 	}
-}
-
-// randomToken 生成 n 字节随机数的十六进制字符串。
-func randomToken(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("生成随机 token 失败: %v", err))
-	}
-	return hex.EncodeToString(b)
 }
 
 // Load 加载配置；文件不存在时创建默认配置并保存。

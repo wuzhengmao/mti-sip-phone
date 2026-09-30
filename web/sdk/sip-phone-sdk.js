@@ -5,7 +5,7 @@
  * 与事件监听（来电振铃、通话建立、挂断、注册状态变化等）。
  *
  * 用法：
- *   const sdk = new SipPhoneSDK({ token: 'xxx' });   // 测试页面由软电话注入 token，无需手动传
+ *   const sdk = new SipPhoneSDK();   // 本地 WS 无鉴权参数
  *   sdk.on('call.incoming', (data) => console.log('来电', data.call.remote));
  *   await sdk.connect();
  *   await sdk.dial('1001');
@@ -67,10 +67,9 @@
       }
       this._closed = false;
       return new Promise((resolve, reject) => {
-        const token = this.token ? '?token=' + encodeURIComponent(this.token) : '';
         let ws;
         try {
-          ws = new WebSocket(this.url + token);
+          ws = new WebSocket(this.url);
         } catch (e) {
           reject(e);
           return;
