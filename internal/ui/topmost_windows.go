@@ -117,7 +117,15 @@ func setCallWindowClamp(hwnd uintptr, width, height int32) {
 		return
 	}
 	user32 := syscall.NewLazyDLL("user32.dll")
+	// SetWindowLongPtrW 是 64 位专属导出：32 位 user32.dll 里没有这个
+	// 符号（32 位的 SetWindowLongPtr 只是指向 SetWindowLongW 的宏），
+	// LazyProc.Call 找不到过程会直接 panic——GUI 子系统无控制台，
+	// 表现为"呼出弹出通话面板即崩溃"（32 位构建历史 bug）。
+	// 32 位下 LONG_PTR 与 LONG 同宽，退化用 SetWindowLongW 语义等价。
 	setWindowLongPtr := user32.NewProc("SetWindowLongPtrW")
+	if setWindowLongPtr.Find() != nil {
+		setWindowLongPtr = user32.NewProc("SetWindowLongW")
+	}
 	const gwlWndProc = ^uintptr(3) // GWLP_WNDPROC = -4
 	callWndProcOriginal, _, _ = setWindowLongPtr.Call(
 		hwnd, gwlWndProc, syscall.NewCallback(callWndProc))
@@ -319,29 +327,6 @@ func ringBorderFlash(hwnd uintptr, stop <-chan struct{}) {
 		}
 	}
 }
-
-// getWindowPos 获取窗口位置。
-func getWindowPos(hwnd uintptr) (x, y int) {
-	user32 := syscall.NewLazyDLL("user32.dll")
-	getWindowRect := user32.NewProc("GetWindowRect")
-	type rect struct{ left, top, right, bottom int32 }
-	var r rect
-	getWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
-	return int(r.left), int(r.top)
-}
-
-// setWindowPosXY 移动窗口到指定位置。
-func setWindowPosXY(hwnd uintptr, x, y int) {
-	user32 := syscall.NewLazyDLL("user32.dll")
-	setWindowPos := user32.NewProc("SetWindowPos")
-	const (
-		hwndTopMost = ^uintptr(0)
-		swpNoSize   = 0x0001
-		swpShowWin  = 0x0040
-	)
-	setWindowPos.Call(hwnd, hwndTopMost, uintptr(x), uintptr(y), 0, 0, swpNoSize|swpShowWin)
-}
-
 
 // findWindowByTitlePrefix 按标题前缀查找**本进程**的顶层窗口。
 // 进程过滤必不可少：其他进程窗口标题可能包含应用名（如浏览器标签页

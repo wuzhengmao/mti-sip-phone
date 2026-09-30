@@ -37,8 +37,10 @@ rem 3) Windows 386: GUI+audio if 32-bit MinGW exists, else headless fallback
 set "GCC32="
 if exist "C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe" set "GCC32=C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe"
 if exist "%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe" set "GCC32=%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe"
+rem NOTE: no parentheses or trailing "..." in echo lines inside if/else blocks,
+rem cmd.exe mis-parses them as a command group and aborts with a syntax error.
 if defined GCC32 (
-    echo [3/5] Building dist\sip-phone-windows-386.exe (GUI, audio, static)...
+    echo [3/5] Building dist\sip-phone-windows-386.exe - GUI tray, audio, static
     set CGO_ENABLED=1
     set CC=%GCC32%
     set GOOS=windows
@@ -46,7 +48,7 @@ if defined GCC32 (
     go build -ldflags "-s -w -H=windowsgui -extldflags -static" -o dist\sip-phone-windows-386.exe .\cmd\sip-phone
     if errorlevel 1 goto :err
 ) else (
-    echo [3/5] i686 gcc not found, building dist\sip-phone-windows-386-headless.exe...
+    echo [3/5] i686 gcc not found, building dist\sip-phone-windows-386-headless.exe
     set CGO_ENABLED=0
     set GOOS=windows
     set GOARCH=386
@@ -69,16 +71,17 @@ go build -tags "headless noaudio" -ldflags "-s -w" -o dist\sip-phone-linux-arm64
 if errorlevel 1 goto :err
 
 echo Build OK:
-echo   dist\sip-phone-windows-amd64.exe          (GUI tray, audio)
-echo   dist\sip-phone-console.exe                (console, headless/debug)
-if defined GCC32 (
-    echo   dist\sip-phone-windows-386.exe            (GUI tray, audio, static)
-) else (
-    echo   dist\sip-phone-windows-386-headless.exe   (pure Go, WS service only)
-)
-echo   dist\sip-phone-linux-amd64-headless       (pure Go, WS service only)
-echo   dist\sip-phone-linux-arm64-headless       (pure Go, WS service only)
-echo GUI builds for linux need building on Linux (./build.sh).
+echo   dist\sip-phone-windows-amd64.exe          - GUI tray, audio
+echo   dist\sip-phone-console.exe                - console, headless/debug
+if defined GCC32 goto :sum_gui
+echo   dist\sip-phone-windows-386-headless.exe   - pure Go, WS service only
+goto :sum_linux
+:sum_gui
+echo   dist\sip-phone-windows-386.exe            - GUI tray, audio, static
+:sum_linux
+echo   dist\sip-phone-linux-amd64-headless       - pure Go, WS service only
+echo   dist\sip-phone-linux-arm64-headless       - pure Go, WS service only
+echo GUI builds for linux need building on Linux - see ./build.sh
 exit /b 0
 
 :err

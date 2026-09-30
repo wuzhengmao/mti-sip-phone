@@ -27,7 +27,8 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频）
 #   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
-#   dist/sip-phone-windows-386-headless.exe   32 位无界面版（WS 服务，纯 Go）
+#   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链；缺失时改出
+#                                             dist/sip-phone-windows-386-headless.exe 纯 Go 回退版）
 #   dist/sip-phone-linux-amd64-headless       无界面版（WS 服务，纯 Go）
 #   dist/sip-phone-linux-arm64-headless       无界面版（WS 服务，纯 Go）
 build.bat
@@ -50,8 +51,10 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 **交叉编译说明**：fyne 的 OpenGL 绑定依赖 CGO，无目标平台 gcc 工具链时
 无法交叉编译 GUI 产物；构建脚本的交叉目标均使用 `-tags "headless noaudio"`
 （跳过界面层与音频后端，纯 Go，仅 WS 服务）。各平台的 GUI 版请在对应
-平台本机构建（Windows amd64 见 build.bat；Linux 见 build.sh；Windows 386
-需 MSYS2 `mingw-w64-i686-gcc`）。
+平台本机构建（Windows amd64 见 build.bat；Linux 见 build.sh）。Windows 386
+GUI 需 32 位 MinGW，build.bat 依次探测 `C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe`
+（MSYS2 `mingw-w64-i686-gcc`）与 `%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe`
+（WinLibs i686 posix-dwarf-ucrt 解压即用）；两者都缺则回退出 386 无界面版。
 
 > 注意：`internal/protocol` 的 Windows 注册表实现按构建标签拆分在
 > `register_windows.go`（导入 x/sys/windows/registry 会破坏 Linux
@@ -128,4 +131,6 @@ main（组装）
 - **媒体/NAT**：对称 NAT 下 UDP 映射需持续出向流量保活（早期媒体阶段 SetKeepalive 持续发静音帧）；SDP 宣告地址与 socket 绑定地址分离（SetSDPIP）；183→200 可能换 SSRC/端口（引擎已自动处理，勿移除 playPush 的重置逻辑）。
 - **测试 flakiness**：`internal/sip` 全量并行跑时偶发 5s 超时失败（信令测试间资源干扰，与具体改动无关）；分组或单跑稳定。验证方式：`go test -run "<Test名>"` 单跑 + 分组复跑。
 - **malgo 回调帧长不固定**：WASAPI 共享模式下回调 frameCount 不保证等于 20ms（160 样本），不要假设固定帧长读写引擎。
+- **build.bat（cmd 解析）**：`if (...)` 块内的 `echo` 文本不要同时出现括号与尾部 `...`——cmd 会把 `(...)` 当命令组，报「此时不应有 ...。」并中断整个构建（不回显 errorlevel）。多分支输出用 `goto` 标签而不要塞进 if/else 块。
+- **32 位 Win32 调用**：`SetWindowLongPtrW` / `GetWindowLongPtrW` 是 **64 位专属导出**，32 位 user32.dll 里没有该符号，`LazyProc.Call` 找不到过程会直接 panic；GUI 子系统（`-H=windowsgui`）无控制台，panic 无任何可见输出，表现为「一操作就静默崩溃」。`topmost_windows.go` 的 `setCallWindowClamp` 用 `Find()` 失败回退到 `SetWindowLongW`（32 位 LONG_PTR 与 LONG 同宽，语义等价）。新增任何 Win32 调用前先确认该导出在 32 位下存在。
 - **rtp_rx.wav**：根目录与 internal/sip/ 下的抓包调试产物，已被 .gitignore 忽略，勿误提交。
