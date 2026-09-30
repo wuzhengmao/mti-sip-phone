@@ -27,13 +27,15 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频）
 #   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
-#   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链；缺失时改出
-#                                             dist/sip-phone-windows-386-headless.exe 纯 Go 回退版）
-#   dist/sip-phone-linux-amd64-headless       无界面版（WS 服务，纯 Go）
-#   dist/sip-phone-linux-arm64-headless       无界面版（WS 服务，纯 Go）
+#   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标）
 build.bat
 
-# Linux 一键构建（本机 GUI 版 CGO+音频 + 交叉无界面纯 Go 产物，输出 dist/）：
+# Linux 一键构建（本机 GUI 版 + 交叉 Windows GUI / 对侧 Linux 架构版，均 CGO+音频，输出 dist/）：
+#   dist/sip-phone-linux-<本机arch>           本机 Linux 托盘版
+#   dist/sip-phone-linux-<对侧arch>           交叉版（amd64 主机→arm64，arm64 主机→amd64；需对侧
+#                                             架构的交叉 gcc + 图形栈开发包，缺失则跳过并打印准备步骤）
+#   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉，需 x86_64-w64-mingw32-gcc）
+#   dist/sip-phone-windows-386.exe            Windows 386 托盘版（交叉，静态，需 i686-w64-mingw32-gcc）
 ./build.sh
 
 # 测试：CGO 包（audio）需要 gcc。用 build.bat 同款工具链：
@@ -48,13 +50,32 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 
 测试页地址：`http://127.0.0.1:<WS端口>/`（默认 8765，占用自动 +1 并保存配置）。
 
-**交叉编译说明**：fyne 的 OpenGL 绑定依赖 CGO，无目标平台 gcc 工具链时
-无法交叉编译 GUI 产物；构建脚本的交叉目标均使用 `-tags "headless noaudio"`
-（跳过界面层与音频后端，纯 Go，仅 WS 服务）。各平台的 GUI 版请在对应
-平台本机构建（Windows amd64 见 build.bat；Linux 见 build.sh）。Windows 386
-GUI 需 32 位 MinGW，build.bat 依次探测 `C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe`
-（MSYS2 `mingw-w64-i686-gcc`）与 `%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe`
-（WinLibs i686 posix-dwarf-ucrt 解压即用）；两者都缺则回退出 386 无界面版。
+**交叉编译说明**：fyne 的 OpenGL 绑定依赖 CGO，需要**目标平台**的 gcc 工具链。
+
+- **Linux → Windows GUI**：用 mingw-w64 直接交叉（`build.sh` 已内置，
+  `-H=windowsgui`）。glfw 的 C 源码与 mingw 专用头（`glfw/deps/mingw`）随
+  go-gl/glfw 模块自带，malgo 自带 miniaudio.c，链接目标只有 mingw 自带的
+  系统导入库，**无需 Windows SDK**。386 目标加 `-extldflags -static` 免 DLL。
+  Debian/Ubuntu 的 mingw-w64 工具链在 **amd64 与 arm64 主机上都有包**，
+  所以 arm64 构建机同样能出这两个 Windows 产物，无需禁用。
+- **Linux 交叉对侧架构 GUI（amd64 ⇄ arm64）**：glfw 的 Linux 后端会同时编
+  X11 与 Wayland（除非 `-tags x11`/`wayland`），go-gl/gl 又走 `pkg-config: gl`，
+  因此需要目标架构的交叉 gcc（`aarch64-linux-gnu-gcc` / `x86_64-linux-gnu-gcc`）
+  + 目标架构的 11 个 `.pc`（libx11/libxrandr/libxinerama/libxcursor/libxi/
+  libxxf86vm/libgl/libwayland/libxkbcommon 的 `:arm64`/`:amd64` 开发包）。
+  build.sh 会按本机架构自动选目标并检测，缺失时跳过该目标并打印准备步骤；
+  `CROSS_CC` / `CROSS_PKG_CONFIG_LIBDIR` 可覆盖工具链与 pkg-config 目录
+  （自建 sysroot 用）。产物链接构建机 sysroot 的 glibc——目标机 glibc 过旧
+  会报 GLIBC_x.y not found。
+- **Windows → Linux GUI**：无原生交叉路径——glfw 的 Linux 后端同时编 X11 与
+  Wayland（除非 `-tags x11`/`wayland`），外加 `pkg-config: gl`，需要 X11/
+  Wayland/GL 的开发头与 .pc 文件。只能在 Linux 环境里构建：Linux 本机、
+  WSL2，或 Docker 的 fyne-cross。
+- 构建脚本**不再产出无界面产物**（用户不需要）；`-tags "headless noaudio"`
+  仅保留供手动纯 Go 构建与测试。
+- Windows 386 GUI 需 32 位 MinGW，build.bat 依次探测 `C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe`
+  （MSYS2 `mingw-w64-i686-gcc`）与 `%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe`
+  （WinLibs i686 posix-dwarf-ucrt 解压即用）；两者都缺则跳过 386 目标。
 
 > 注意：`internal/protocol` 的 Windows 注册表实现按构建标签拆分在
 > `register_windows.go`（导入 x/sys/windows/registry 会破坏 Linux
@@ -73,7 +94,11 @@ internal/
   media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU 编解码、播放环形缓冲、SDP 协商
   audio/      音频设备：malgo 后端（全双工采集/播放、设备枚举/选择、提示音）
   wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳）
-  ui/         Fyne 界面：主窗口/拨号盘/设置页/通话面板/托盘（topmost_windows.go 为 Win32 置顶等）
+  ui/         Fyne 界面：主窗口/拨号盘/设置页/通话面板/托盘。通话面板的
+              去装饰/右下角吸附/不进任务栏按平台拆分：topmost_windows.go
+              （Win32）、topmost_linux.go（X11：_MOTIF_WM_HINTS 去装饰 +
+              _NET_WM_STATE SKIP_TASKBAR + _NET_WORKAREA 定位）、
+              topmost_other.go（其余平台空实现）
   protocol/   sip:// 协议解析与系统协议注册（Windows 注册表 / Linux .desktop）
   single/     单实例（命名互斥体/flock）+ 第二实例参数转发（随机 token）
   autostart/  开机自启（Windows HKCU Run / Linux XDG autostart，其他平台 no-op）
@@ -128,6 +153,9 @@ main（组装）
   - 事务层对 CANCEL 自动回 200+487；ServerTx 无最终响应时 TerminateGracefully 会立即 Terminate（后续 Respond 必失败）；
   - Timer_I=T4=5s：re-INVITE 事务需手动延迟 Terminate 防止重传风暴。
 - **Fyne**：UI 必须主线程（goroutine 运行会托盘失效+线程告警）；dialog 的 parent 传 nil 直接 panic（主窗口未显示时不要弹 dialog）；`SetSystemTrayWindow` 会覆盖 CloseIntercept（需重新接管）并注册单击回调；Window 无 Visible() 查询 API（主窗口显示状态用全局标识 mainShown 跟踪）。
+- **Fyne 托盘菜单**：菜单最后一项若不带 `IsQuit` 标记，Fyne 会自动补一个本地化的 `Quit` 项（`driver_desktop.go` 的 `addMissingQuitForMenu`，按 `lang.L("Quit")` 比对标签，中文标签匹配不上）。本项目的「退出」项经 `markTrayQuit` 处理——**仅 Linux 打标记**，Windows 保持多一个 Quit 的现状（用户要求）。新增托盘菜单项时注意最后一项的角色。
+- **音频管理器（internal/audio）的线程模型**：后端初始化在后台 goroutine，`NewManager` 最多等 `initWait`(2s) 就返回；所有会碰后端的操作（开关音频流、播放提示音）都排入单 worker 的 FIFO 队列后立即返回，调用方（UI 线程、SIP 线程）不会被设备操作阻塞。**不要持 `m.mu` 调用后端**——miniaudio 的设备操作在音频服务不可达时会长时间阻塞（`PULSE_SERVER=tcp:localhost` 实测 15 秒），持锁会把 UI 线程的 `enqueue`/`SetMic` 一起卡死；正确做法是先取状态快照、释放锁再调后端（见 `startStreamFor`/`stopStream`）。设备枚举 `Devices()` 保持同步，调用方需自行放进后台 goroutine（界面侧见 `refreshDevices`）。
+- **通话面板窗口控制按平台拆分**：`ui_call.go`/`ui.go` 只调用平台函数（`moveCallWindowToCorner`、`callWindowTitle`、`markTrayQuit`、面板尺寸常量），实现分别在 `topmost_windows.go`（Win32）与 `topmost_linux.go`（X11）——**勿把任一侧的逻辑写进共享文件**。Linux 侧靠 `driver.NativeWindow.RunNative` 取 X11 窗口号（回调收到 `driver.X11WindowContext`），需经 `fyne.DoAndWait` 在主线程取；`fyne.DoAndWait` 不可在主线程调用（会 panic），故 `moveCallWindowToCorner` 内部起 goroutine。Wayland 会话下 X11 手段全部无效（不能自定位、去装饰看合成器）。
 - **媒体/NAT**：对称 NAT 下 UDP 映射需持续出向流量保活（早期媒体阶段 SetKeepalive 持续发静音帧）；SDP 宣告地址与 socket 绑定地址分离（SetSDPIP）；183→200 可能换 SSRC/端口（引擎已自动处理，勿移除 playPush 的重置逻辑）。
 - **测试 flakiness**：`internal/sip` 全量并行跑时偶发 5s 超时失败（信令测试间资源干扰，与具体改动无关）；分组或单跑稳定。验证方式：`go test -run "<Test名>"` 单跑 + 分组复跑。
 - **malgo 回调帧长不固定**：WASAPI 共享模式下回调 frameCount 不保证等于 20ms（160 样本），不要假设固定帧长读写引擎。

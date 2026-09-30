@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"math"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -53,16 +54,16 @@ func (a *App) buildCallPanelIfNeeded() {
 	a.callStateLabel = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{})
 	a.callTimerLabel = widget.NewLabelWithStyle("00:00", fyne.TextAlignLeading, fyne.TextStyle{})
 
-	// 紧凑按钮（36×36，REQ-UI-025 修订）：fyne Button 跟随主题内边距
-	// 高达 48px，用自定义 compactButton 缩小面板按钮
-	a.hangupBtn = newCompactButton(IconStopWhite, colorDangerRed, func() {
+	// 紧凑按钮（尺寸取平台常量，REQ-UI-025 修订）：fyne Button 跟随主题
+	// 内边距高达 48px，用自定义 compactButton 缩小面板按钮
+	a.hangupBtn = newCompactButton(IconStopWhite, colorDangerRed, callPanelButtonSize, func() {
 		if a.activeCallID != "" {
 			_ = a.core.Hangup(a.activeCallID)
 		}
 	})
 
 	// 绿色电话：接听
-	a.answerBtn = newCompactButton(IconPhoneWhite, colorSuccessGreen, func() {
+	a.answerBtn = newCompactButton(IconPhoneWhite, colorSuccessGreen, callPanelButtonSize, func() {
 		if a.activeCallID != "" {
 			if err := a.core.Answer(a.activeCallID); err != nil {
 				logx.Logger().Warn("接听失败", "err", err)
@@ -71,7 +72,7 @@ func (a *App) buildCallPanelIfNeeded() {
 	})
 
 	// 黄色 ||：通话保持切换（保持语义：本端停止发送音频，再次点击恢复）
-	a.holdBtn = newCompactButton(IconPauseWhite, colorHoldYellow, func() {
+	a.holdBtn = newCompactButton(IconPauseWhite, colorHoldYellow, callPanelButtonSize, func() {
 		if a.activeCallID == "" {
 			return
 		}
@@ -84,10 +85,10 @@ func (a *App) buildCallPanelIfNeeded() {
 	})
 
 	// 扬声器开关（REQ-UI-023）：默认开=蓝底白图标，关=灰底红图标
-	a.speakerBtn = newCompactButton(IconSpeakerOn, colorHoldBlue, a.toggleSpeaker)
+	a.speakerBtn = newCompactButton(IconSpeakerOn, colorHoldBlue, callPanelButtonSize, a.toggleSpeaker)
 
 	// 麦克风开关（REQ-UI-023）
-	a.micBtn = newCompactButton(IconMicOn, colorHoldBlue, a.toggleMic)
+	a.micBtn = newCompactButton(IconMicOn, colorHoldBlue, callPanelButtonSize, a.toggleMic)
 
 	// 三行内容容器：内容在每次进入状态时由 rebuildCallRows 重建。
 	// 用 Stack：振铃底色闪烁矩形与内容层平铺为兄弟、撑满整个窗口
@@ -98,9 +99,10 @@ func (a *App) buildCallPanelIfNeeded() {
 	// 关闭画布内边距：四周留白由 rebuildCallRows 统一控制，
 	// 避免与主题 padding 叠加导致视觉不一致（REQ-UI-025 修订）
 	w.SetPadded(false)
-	// 尺寸与 topmost_windows.go 的 callPanelWidth/Height 保持一致；
-	// 窗口尺寸由 positionCallWindow 通过窗口过程钳制精确固定
-	w.Resize(fyne.NewSize(260, 126))
+	// 尺寸取平台常量（Windows 见 topmost_windows.go，Linux 见
+	// topmost_linux.go）；Windows 下窗口尺寸再由 positionCallWindow
+	// 通过窗口过程钳制精确固定
+	w.Resize(fyne.NewSize(callPanelWidth, callPanelHeight))
 
 	// 通话面板始终置顶
 	if dw, ok := w.(desktop.Window); ok {
@@ -176,17 +178,14 @@ func (a *App) stopRingShake() {
 	}
 }
 
-// updateCallWindowTitle 通话面板标题："通话面板 - 本机号码"。
+// updateCallWindowTitle 通话面板标题：文案按平台生成（见各平台
+// topmost_*.go 的 callWindowTitle）——Windows 用「通话面板 - 号码」，
+// Linux 用 ASCII 的「SIP - 号码」。
 func (a *App) updateCallWindowTitle() {
 	if a.callW == nil {
 		return
 	}
-	account := a.core.State().Register.Account
-	title := "通话面板"
-	if account != "" {
-		title += " - " + account
-	}
-	a.callW.SetTitle(title)
+	a.callW.SetTitle(callWindowTitle(a.core.State().Register.Account))
 }
 
 // rebuildCallRows 按状态重建通话面板三行内容：
@@ -270,12 +269,14 @@ var (
 	colorIconWhite    = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff} // 挂断态文字（红底白字）
 )
 
-// compactButton 通话面板紧凑按钮（REQ-UI-025 修订）：36×36
+// compactButton 通话面板紧凑按钮（REQ-UI-025 修订）：默认 36×36
 //（20px 图标 + 8px 内边距），圆角底色 + 居中图标，可选文字
 //（主窗体呼叫按钮用，文字颜色固定不随主题变化）。
 // fyne Button 的尺寸跟随主题内边距（拨号盘主题为 12px，按钮高达
 // 48px），且文字颜色随主题（浅色主题下 Success 按钮文字为白色），
 // 均无法单独控制，故用自定义组件。
+// 尺寸由调用方指定：通话面板取平台常量 callPanelButtonSize（面板行高
+// 由它决定），主窗体呼叫按钮固定 36。
 type compactButton struct {
 	widget.BaseWidget
 	bg    *canvas.Rectangle
@@ -284,22 +285,24 @@ type compactButton struct {
 	onTap func()
 }
 
-func newCompactButton(iconRes fyne.Resource, bgColor color.NRGBA, onTap func()) *compactButton {
+func newCompactButton(iconRes fyne.Resource, bgColor color.NRGBA, size float32, onTap func()) *compactButton {
 	b := &compactButton{onTap: onTap}
 	b.bg = canvas.NewRectangle(bgColor)
 	b.bg.CornerRadius = 6
-	b.bg.SetMinSize(fyne.NewSize(36, 36))
+	b.bg.SetMinSize(fyne.NewSize(size, size))
 	b.icon = canvas.NewImageFromResource(iconRes)
 	b.icon.FillMode = canvas.ImageFillContain
-	b.icon.SetMinSize(fyne.NewSize(20, 20))
+	// 图标按比例缩放（36 → 20px，与原值一致）
+	iconSize := float32(math.Round(float64(size) * 0.55))
+	b.icon.SetMinSize(fyne.NewSize(iconSize, iconSize))
 	b.ExtendBaseWidget(b)
 	return b
 }
 
 // newCompactTextButton 带文字的紧凑按钮（主窗体呼叫按钮用）：
-// 文字颜色固定传入值，不随主题变化。
+// 文字颜色固定传入值，不随主题变化。尺寸固定 36，不随平台变化。
 func newCompactTextButton(text string, iconRes fyne.Resource, bgColor, labelColor color.NRGBA, onTap func()) *compactButton {
-	b := newCompactButton(iconRes, bgColor, onTap)
+	b := newCompactButton(iconRes, bgColor, 36, onTap)
 	b.label = canvas.NewText(text, labelColor)
 	b.label.TextSize = 14
 	return b

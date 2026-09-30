@@ -38,11 +38,25 @@ func setTopMost(on bool) {
 	setWindowPos.Call(hwnd, insertAfter, 0, 0, 0, 0, swpNoMove|swpNoSize)
 }
 
+// callWindowTitle 通话面板标题（中文）：findWindowByTitlePrefix 依赖
+// 「通话面板」前缀定位窗口，Windows 下保持原样。
+func callWindowTitle(account string) string {
+	title := "通话面板"
+	if account != "" {
+		title += " - " + account
+	}
+	return title
+}
+
+// markTrayQuit Windows 侧不打 IsQuit 标记（保持现状：Fyne 会补 Quit 项）。
+func markTrayQuit(item *fyne.MenuItem) {}
+
 // 通话面板固定尺寸（DIP，与 buildCallPanelIfNeeded 的 Resize 保持一致）：
 // 126 = 上下 4px 留白 + 行距 2×2px + 三行各 38px（36 紧凑按钮 + 2 行距垫）。
 const (
-	callPanelWidth  = 260
-	callPanelHeight = 126
+	callPanelWidth      = 260
+	callPanelHeight     = 126
+	callPanelButtonSize = 36
 )
 
 // moveCallWindowToCorner 把通话面板移动到屏幕右下角（留 16px 边距），

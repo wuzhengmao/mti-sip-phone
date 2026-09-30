@@ -163,6 +163,13 @@ func (a *App) Run() {
 	a.buildTray()
 	a.subscribeEvents()
 	a.watchWSPortFocus() // WS 端口输入框失焦保存与重启提示
+	// 音频后端在后台初始化（音频服务不可达时可能耗时数十秒）：就绪后
+	// 刷新设置页的设备列表。回调在后台 goroutine，需 fyne.Do 回主线程。
+	if a.audioMgr != nil {
+		a.audioMgr.OnReady(func() {
+			fyne.Do(a.refreshDevices)
+		})
+	}
 	a.fyne.Run()
 }
 
@@ -733,6 +740,10 @@ func (a *App) buildTray() {
 	quit := fyne.NewMenuItem("退出", func() {
 		a.fyne.Quit()
 	})
+	// 标记为退出项（Linux 生效，见 markTrayQuit）：否则 Fyne 会在菜单
+	// 末尾自动补一个本地化的 Quit 项（driver_desktop.go 的
+	// addMissingQuitForMenu），托盘上会出现「退出」与「Quit」两项
+	markTrayQuit(quit)
 	menu := fyne.NewMenu("mti-sip-phone", showMain, fyne.NewMenuItemSeparator(), quit)
 
 	// 初始图标按当前注册状态（默认红色，systray 就绪回调自动设置）
@@ -1113,24 +1124,44 @@ func (a *App) chooseLogDir() {
 }
 
 // refreshDevices 刷新音频设备列表（枚举真实系统设备，REQ-MEDIA-002）。
+// 枚举可能耗时（ALSA 会逐个探测设备），放到后台 goroutine 执行、结果
+// 回到主线程应用；音频后端尚未就绪时先显示占位，就绪后由 OnReady 再刷。
 func (a *App) refreshDevices() {
 	if a.audioMgr == nil {
-		a.micSelect.Options = []string{"音频后端不可用"}
-		a.speakerSelect.Options = []string{"音频后端不可用"}
+		a.applyDeviceLists(nil, nil, "音频后端不可用")
 		return
 	}
-	mics, speakers := a.audioMgr.Devices()
+	if !a.audioMgr.Ready() {
+		a.applyDeviceLists(nil, nil, "音频初始化中…")
+	}
+	go func() {
+		mics, speakers := a.audioMgr.Devices()
+		fyne.Do(func() {
+			a.applyDeviceLists(mics, speakers, "未检测到音频设备")
+		})
+	}()
+}
+
+// applyDeviceLists 在 UI 线程应用设备枚举结果（placeholder 为列表为空时
+// 的占位文案）。可重复调用：设备就绪后会再次调用以回填真实设备。
+func (a *App) applyDeviceLists(mics, speakers []core.AudioDevice, placeholder string) {
 	micNames := make([]string, 0, len(mics))
 	micIDs := make(map[string]string)
 	for _, d := range mics {
 		micNames = append(micNames, d.Name)
 		micIDs[d.Name] = d.ID
 	}
+	if len(micNames) == 0 {
+		micNames = []string{placeholder}
+	}
 	spkNames := make([]string, 0, len(speakers))
 	spkIDs := make(map[string]string)
 	for _, d := range speakers {
 		spkNames = append(spkNames, d.Name)
 		spkIDs[d.Name] = d.ID
+	}
+	if len(spkNames) == 0 {
+		spkNames = []string{placeholder}
 	}
 	a.micSelect.Options = micNames
 	a.speakerSelect.Options = spkNames
@@ -1156,7 +1187,9 @@ func (a *App) refreshDevices() {
 			return // 回填阶段不触发保存
 		}
 		if id, ok := micIDs[name]; ok {
-			_ = a.audioMgr.SetMic(id)
+			if a.audioMgr != nil {
+				a.audioMgr.SetMic(id)
+			}
 			a.cfg.Audio.MicID = id
 			a.persistConfig()
 		}
@@ -1166,7 +1199,9 @@ func (a *App) refreshDevices() {
 			return
 		}
 		if id, ok := spkIDs[name]; ok {
-			_ = a.audioMgr.SetSpeaker(id)
+			if a.audioMgr != nil {
+				a.audioMgr.SetSpeaker(id)
+			}
 			a.cfg.Audio.SpeakerID = id
 			a.persistConfig()
 		}

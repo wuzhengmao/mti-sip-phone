@@ -617,11 +617,14 @@ func (p *Phone) SetRPort(enabled bool) error {
 }
 
 // SetMicrophone 选择麦克风。
+// 切换在音频后台队列中生效（设备重建可能耗时，不能阻塞调用方），
+// 失败经日志体现。
 func (p *Phone) SetMicrophone(deviceID string) error {
 	if p.audio == nil {
 		return fmt.Errorf("音频管理器不可用")
 	}
-	return p.audio.SetMic(deviceID)
+	p.audio.SetMic(deviceID)
+	return nil
 }
 
 // SetSpeaker 选择扬声器。
@@ -629,7 +632,8 @@ func (p *Phone) SetSpeaker(deviceID string) error {
 	if p.audio == nil {
 		return fmt.Errorf("音频管理器不可用")
 	}
-	return p.audio.SetSpeaker(deviceID)
+	p.audio.SetSpeaker(deviceID)
+	return nil
 }
 
 // AudioDevices 返回音频设备列表。

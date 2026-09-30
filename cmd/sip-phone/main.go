@@ -106,11 +106,11 @@ func main() {
 	app := core.New(cfg, nil, bus)
 	app.SetConfigPath(cfgPath)
 
-	// 音频管理器：设备枚举与选择（REQ-MEDIA-002）
-	audioMgr, err := audio.NewManager()
-	if err != nil {
-		logx.Logger().Warn("初始化音频管理器失败，设备枚举不可用", "err", err)
-	}
+	// 音频管理器：设备枚举与选择（REQ-MEDIA-002）。
+	// 后端初始化在后台进行（音频服务不可达时 miniaudio 会长时间阻塞），
+	// 最多等 2 秒即继续启动，就绪后由界面刷新设备列表。
+	audioMgr := audio.NewManager()
+	defer audioMgr.Close()
 	// SIP 软电话：本地监听端口 40000~50000 随机选择空闲端口（REQ-ACC-013 修订），
 	// rport 按配置开关（REQ-ACC-016，默认开启）
 	sip.SetTraceEnabled(cfg.Log.SIPTrace) // SIP 信令记录按配置开关（默认关）
@@ -134,17 +134,15 @@ func main() {
 	}()
 	tel := core.Telephony(phone)
 	defer phone.Close()
-	// 按配置预选音频设备
-	if audioMgr != nil {
-		if cfg.Audio.MicID != "" {
-			_ = audioMgr.SetMic(cfg.Audio.MicID)
-		}
-		if cfg.Audio.SpeakerID != "" {
-			_ = audioMgr.SetSpeaker(cfg.Audio.SpeakerID)
-		}
-		if cfg.Audio.RingSpeakerID != "" {
-			audioMgr.SetRingSpeaker(cfg.Audio.RingSpeakerID)
-		}
+	// 按配置预选音频设备（仅记录选择，音频流在通话时按选择启动）
+	if cfg.Audio.MicID != "" {
+		audioMgr.SetMic(cfg.Audio.MicID)
+	}
+	if cfg.Audio.SpeakerID != "" {
+		audioMgr.SetSpeaker(cfg.Audio.SpeakerID)
+	}
+	if cfg.Audio.RingSpeakerID != "" {
+		audioMgr.SetRingSpeaker(cfg.Audio.RingSpeakerID)
 	}
 	app.SetTel(tel)
 	app.Start(ctx)

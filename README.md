@@ -16,25 +16,30 @@
 ## 构建与运行
 
 依赖：Go 1.23+、gcc（CGO，Windows 用 MinGW-W64 / MSYS2；Linux 用系统 gcc）。
-fyne 的 OpenGL 绑定依赖 CGO——交叉编译 GUI 产物需目标平台的 gcc 工具链，
-因此构建脚本的**交叉目标均为无界面版**（`-tags "headless noaudio"`，
-跳过界面层与音频后端，纯 Go、仅本地 WS 服务）。
+fyne 的 OpenGL 绑定依赖 CGO，需要**目标平台**的 gcc 工具链：Windows GUI 可以在
+Linux 上用 mingw-w64 交叉构建（glfw 的 C 源码与 mingw 专用头随 go-gl/glfw 模块
+自带，malgo 自带 miniaudio.c，无需 Windows SDK）；反向不成立——glfw 的 Linux
+后端需要 X11/Wayland/GL 开发头与 pkg-config，Linux GUI 只能在 Linux 环境
+（Linux 本机 / WSL2 / Docker）里构建。
 
 ```bash
 # Windows：一键构建（自动探测 WinLibs gcc），产物输出到 dist/：
 build.bat
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频）
 #   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
-#   dist/sip-phone-windows-386-headless.exe   32 位无界面版（WS 服务，纯 Go）
-#   dist/sip-phone-linux-amd64-headless       无界面版（WS 服务，纯 Go）
-#   dist/sip-phone-linux-arm64-headless       无界面版（WS 服务，纯 Go）
+#   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标）
 
-# Linux：一键构建（本机 GUI 版 CGO+音频 + 交叉无界面纯 Go 产物，输出 dist/）
+# Linux：一键构建（本机 GUI 版 + 交叉 Windows GUI / 对侧 Linux 架构版，均 CGO+音频，输出 dist/）
+# 交叉 Windows 需 mingw-w64：apt install gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
+# 交叉对侧 Linux 架构（amd64⇄arm64）需对应交叉 gcc + 图形栈开发包（缺啥脚本会打印准备步骤）
 ./build.sh
+#   dist/sip-phone-linux-<本机arch>           本机 Linux 托盘版
+#   dist/sip-phone-linux-<对侧arch>           交叉 Linux 托盘版
+#   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉）
+#   dist/sip-phone-windows-386.exe            Windows 386 托盘版（交叉，静态）
 
 # 手动构建（Windows 需将 MinGW 的 gcc 加入 PATH，或用 CC 指定）
 go build -ldflags "-s -w -H=windowsgui" -o dist/sip-phone.exe ./cmd/sip-phone  # 无控制台
-go build -tags "headless noaudio" -o dist/sip-phone-headless ./cmd/sip-phone   # 无界面纯 Go 交叉编译
 
 # 运行
 dist/sip-phone-windows-amd64.exe        # 托盘常驻；关闭主窗口=隐藏到托盘
@@ -71,11 +76,14 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 
 构建脚本（`build.bat` / `build.sh`）产出的组合：
 
-- **windows/amd64 GUI**：本机 `go build`（CGO+音频，MinGW）
-- **windows/386**：无界面版（纯 Go，WS 服务）；GUI 版需 MSYS2 `mingw-w64-i686-gcc`
-- **linux/amd64、linux/arm64**：无界面版（纯 Go，WS 服务）；GUI 版在 Linux 本机构建（`./build.sh`）
+- **windows/amd64 GUI**：Windows 本机构建（`build.bat`，MinGW，CGO+音频）；也可在 Linux 上用 mingw-w64 交叉（`build.sh`）
+- **windows/386 GUI**：需 32 位 MinGW（MSYS2 `mingw-w64-i686-gcc` 或 WinLibs i686），工具链缺失则该目标跳过
+- **linux/amd64 GUI**：在 Linux 本机构建（`./build.sh`，需 X11/Wayland/GL 开发包）；也可在 arm64 上交叉
+- **linux/arm64 GUI**：在 arm64 本机构建；或在 amd64 上交叉（`./build.sh` 按本机架构自动选目标，需目标架构的交叉 gcc 与 X11/Wayland/GL 开发包，缺啥会打印准备步骤）
 - **windows/arm64**：暂未纳入脚本，需 llvm-mingw（`aarch64-w64-mingw32-gcc`）或 CI `windows-11-arm` runner
-- 无界面/无音频构建标签：`-tags "headless noaudio"`（纯 Go，无 CGO 依赖）
+- 无界面纯 Go 构建（脚本已不产出，标签仍保留）：`-tags "headless noaudio"`（跳过界面层与音频后端，仅本地 WS 服务）
+
+平台差异：通话面板的「无标题栏 + 吸附工作区右下角 + 不进任务栏」在 Windows 用 Win32 实现，Linux 用 X11 实现（`_MOTIF_WM_HINTS` / `_NET_WM_STATE` / `_NET_WORKAREA`），**仅在 X11（含 XWayland）会话生效**——Wayland 不允许客户端自定位窗口、去装饰也由合成器决定。托盘的「退出」项在 Linux 上会标记为退出项（Fyne 不再自动追加 Quit 项），Windows 侧保持原样。
 
 ## 网页接入示例
 
