@@ -90,8 +90,8 @@ func (a *App) buildCallPanelIfNeeded() {
 	a.micBtn = newCompactButton(IconMicOn, colorHoldBlue, a.toggleMic)
 
 	// 三行内容容器：内容在每次进入状态时由 rebuildCallRows 重建。
-	// 用 Stack：振铃闪烁描边矩形与内容平铺为兄弟、撑满整个窗口，
-	// 描边贴窗口最外缘（REQ-UI-025 修订）；内容层为 Border（窗口
+	// 用 Stack：振铃底色闪烁矩形与内容层平铺为兄弟、撑满整个窗口
+	//（REQ-UI-025 修订）；内容层为 Border（窗口
 	// 内容会撑满画布，Border 的中心区→网格→三行等分填满窗口）
 	a.callRows = container.NewStack()
 	w.SetContent(a.callRows)
@@ -109,18 +109,27 @@ func (a *App) buildCallPanelIfNeeded() {
 }
 
 // startRingShake 振铃提醒：FlashWindowEx 任务栏闪烁 + SetForegroundWindow
-// 抢前台 + 边框多色轮换闪烁（无边框窗口为内容描边闪烁，内容不随动）。
+// 抢前台 + 底色灰度轮换闪烁（内容不随动）。
 // 标题保持 "通话面板 - 号码"不变（各状态一致）。
-func (a *App) startRingShake() {
+func (a *App) startRingShake(grays []color.NRGBA) {
 	a.stopRingShake()
 	a.pulseStop = make(chan struct{})
 	stop := a.pulseStop
 
-	// 无边框窗口内容描边闪烁：DWM 着色边框在无边框窗口上不可见，
-	// 改为轮换 ringFlashRect 的描边颜色（REQ-UI-025 修订）
+	// 无边框窗口底色灰度闪烁（DWM 着色边框不可见）：
+	// 16 档往返脉动（1→16→15→…→1），75ms 一档，平滑无跳跃感
+	//（REQ-UI-025 修订）
 	go func() {
-		ticker := time.NewTicker(300 * time.Millisecond)
+		ticker := time.NewTicker(75 * time.Millisecond)
 		defer ticker.Stop()
+		// 往返索引序列：0,1,…,15,14,…,1 循环
+		order := make([]int, 0, 30)
+		for i := 0; i < len(grays); i++ {
+			order = append(order, i)
+		}
+		for i := len(grays) - 2; i >= 1; i-- {
+			order = append(order, i)
+		}
 		i := 0
 		for {
 			select {
@@ -131,7 +140,7 @@ func (a *App) startRingShake() {
 					if a.ringFlashRect == nil {
 						return
 					}
-					a.ringFlashRect.StrokeColor = colorRefToNRGBA(ringBorderColors[i%len(ringBorderColors)])
+					a.ringFlashRect.FillColor = grays[order[i%len(order)]]
 					a.ringFlashRect.Refresh()
 				})
 				i++
@@ -202,10 +211,11 @@ func (a *App) rebuildCallRows(mode int) {
 		a.ringFlashRect = nil
 	case ringingButtons:
 		row1.Add(centerBox(a.answerBtn))
-		// 无边框窗口的 DWM 着色边框不可见：改为在内容上叠加描边矩形
-		// 做边框闪烁（REQ-UI-025 修订）
-		a.ringFlashRect = newRingFlashRect()
-		a.startRingShake()
+		// 无边框窗口的 DWM 着色边框不可见：改为整窗底色灰度闪烁
+		//（REQ-UI-025 修订）
+		grays := a.ringFlashGrays()
+		a.ringFlashRect = newRingFlashRect(grays)
+		a.startRingShake(grays)
 	case incallButtons:
 		a.stopRingShake()
 		a.ringFlashRect = nil
@@ -227,10 +237,10 @@ func (a *App) rebuildCallRows(mode int) {
 	// 内容层：四周 4px 留白的 Border，中心为三行网格
 	border := container.NewBorder(padRect(4), padRect(4), padRect(4), padRect(4), grid)
 
-	// 振铃态：闪烁描边矩形与内容层平铺为兄弟（矩形撑满整个窗口，
-	// 描边贴最外缘；点击命中会跳过非 Tappable 对象，不挡按钮）
+	// 振铃态：底色闪烁矩形与内容层平铺为兄弟（矩形撑满整个窗口，
+	// 必须放在内容层**下方**——在上方会盖住文字与按钮）
 	if a.ringFlashRect != nil {
-		a.callRows.Objects = []fyne.CanvasObject{border, a.ringFlashRect}
+		a.callRows.Objects = []fyne.CanvasObject{a.ringFlashRect, border}
 	} else {
 		a.callRows.Objects = []fyne.CanvasObject{border}
 	}
@@ -252,20 +262,25 @@ func centerBox(obj fyne.CanvasObject) fyne.CanvasObject {
 // 通话面板按钮配色（与主界面主题色观感一致）。
 var (
 	colorDangerRed    = color.NRGBA{R: 0xe5, G: 0x39, B: 0x35, A: 0xff} // 挂断
-	colorSuccessGreen = color.NRGBA{R: 0x43, G: 0xa0, B: 0x47, A: 0xff} // 接听
+	colorSuccessGreen = color.NRGBA{R: 0x43, G: 0xa0, B: 0x47, A: 0xff} // 接听/呼叫
 	colorHoldYellow   = color.NRGBA{R: 0xfb, G: 0xc0, B: 0x2d, A: 0xff} // 保持
 	colorHoldBlue     = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff} // 取消保持/开关开
 	colorSwitchGray   = color.NRGBA{R: 0xbd, G: 0xbd, B: 0xbd, A: 0xff} // 开关关
+	colorIconBlack    = color.NRGBA{R: 0x1a, G: 0x1a, B: 0x1a, A: 0xff} // 呼叫按钮文字（固定黑）
+	colorIconWhite    = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff} // 挂断态文字（红底白字）
 )
 
 // compactButton 通话面板紧凑按钮（REQ-UI-025 修订）：36×36
-//（20px 图标 + 8px 内边距），圆角底色 + 居中图标。
+//（20px 图标 + 8px 内边距），圆角底色 + 居中图标，可选文字
+//（主窗体呼叫按钮用，文字颜色固定不随主题变化）。
 // fyne Button 的尺寸跟随主题内边距（拨号盘主题为 12px，按钮高达
-// 48px），无法单独缩小，故用自定义组件。
+// 48px），且文字颜色随主题（浅色主题下 Success 按钮文字为白色），
+// 均无法单独控制，故用自定义组件。
 type compactButton struct {
 	widget.BaseWidget
 	bg    *canvas.Rectangle
 	icon  *canvas.Image
+	label *canvas.Text // 可选文字
 	onTap func()
 }
 
@@ -281,7 +296,21 @@ func newCompactButton(iconRes fyne.Resource, bgColor color.NRGBA, onTap func()) 
 	return b
 }
 
+// newCompactTextButton 带文字的紧凑按钮（主窗体呼叫按钮用）：
+// 文字颜色固定传入值，不随主题变化。
+func newCompactTextButton(text string, iconRes fyne.Resource, bgColor, labelColor color.NRGBA, onTap func()) *compactButton {
+	b := newCompactButton(iconRes, bgColor, onTap)
+	b.label = canvas.NewText(text, labelColor)
+	b.label.TextSize = 14
+	return b
+}
+
 func (b *compactButton) CreateRenderer() fyne.WidgetRenderer {
+	if b.label != nil {
+		return widget.NewSimpleRenderer(container.NewStack(b.bg,
+			container.NewCenter(container.NewHBox(
+				container.NewCenter(b.icon), container.NewCenter(b.label)))))
+	}
 	return widget.NewSimpleRenderer(container.NewStack(b.bg, container.NewCenter(b.icon)))
 }
 
@@ -289,6 +318,22 @@ func (b *compactButton) CreateRenderer() fyne.WidgetRenderer {
 func (b *compactButton) SetIcon(res fyne.Resource) {
 	b.icon.Resource = res
 	b.icon.Refresh()
+}
+
+// SetText 更新按钮文字（无文字按钮忽略）。
+func (b *compactButton) SetText(text string) {
+	if b.label != nil {
+		b.label.Text = text
+		b.label.Refresh()
+	}
+}
+
+// SetLabelColor 更新文字颜色（呼叫/挂断态切换用）。
+func (b *compactButton) SetLabelColor(c color.NRGBA) {
+	if b.label != nil {
+		b.label.Color = c
+		b.label.Refresh()
+	}
 }
 
 // SetBg 更新底色。
@@ -306,7 +351,7 @@ func (b *compactButton) Tapped(*fyne.PointEvent) {
 func (b *compactButton) Cursor() desktop.Cursor { return desktop.PointerCursor }
 
 // 振铃边框闪烁颜色序列（COLORREF 即 0x00BBGGRR）：红、橙、绿、青、蓝、紫。
-// 无边框通话面板用内容描边闪烁（DWM 着色边框在无边框窗口上不可见）。
+// 保留给 Win32 DWM 边框路径（无边框窗口上不可见，已由底色闪烁替代）。
 var ringBorderColors = []uint32{
 	0x000000FF, // 红
 	0x0000A5FF, // 橙
@@ -316,19 +361,47 @@ var ringBorderColors = []uint32{
 	0x00FF00FF, // 紫
 }
 
-// colorRefToNRGBA COLORREF（0x00BBGGRR）转 color.NRGBA。
-func colorRefToNRGBA(c uint32) color.NRGBA {
-	return color.NRGBA{R: uint8(c), G: uint8(c >> 8), B: uint8(c >> 16), A: 0xFF}
+// ringFlashGrays 从当前主题背景色推导振铃闪烁灰度序列（REQ-UI-025 修订）：
+// 16 档、每档 4 色阶——平滑往返脉动。
+// 方向按背景亮度决定：深色主题（白字）向**更亮**方向走，浅色主题
+//（黑字）向**更暗**方向走；若固定向亮方向走，浅色背景（近白）会
+// 全部封顶在 255 导致不闪烁（历史 bug）。
+func (a *App) ringFlashGrays() []color.NRGBA {
+	bg := a.fyne.Settings().Theme().Color(theme.ColorNameBackground, a.fyne.Settings().ThemeVariant())
+	r, g, b, _ := bg.RGBA()
+	base := color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: 0xff}
+	light := (int(base.R) + int(base.G) + int(base.B)) > 382 // 浅色背景：调暗
+	grays := make([]color.NRGBA, 16)
+	for i := range grays {
+		d := i * 4
+		if light {
+			d = -d
+		}
+		grays[i] = color.NRGBA{
+			R: clampByte(int(base.R) + d),
+			G: clampByte(int(base.G) + d),
+			B: clampByte(int(base.B) + d),
+			A: 0xff,
+		}
+	}
+	return grays
 }
 
-// newRingFlashRect 振铃边框闪烁描边矩形：透明填充 + 1px 彩色描边 +
-// 2px 圆角，随网格铺满面板内缘（REQ-UI-025 修订：细边框+圆角）。
-func newRingFlashRect() *canvas.Rectangle {
-	r := canvas.NewRectangle(color.Transparent)
-	r.StrokeColor = colorRefToNRGBA(ringBorderColors[0])
-	r.StrokeWidth = 1
-	r.CornerRadius = 2
-	return r
+// clampByte 把颜色通道值限制在 0-255。
+func clampByte(v int) uint8 {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return uint8(v)
+}
+
+// newRingFlashRect 振铃底色闪烁矩形：实心填充（序列首色），置于
+// 内容层下方撑满整个窗口，随闪烁序列轮换填充色（REQ-UI-025 修订）。
+func newRingFlashRect(grays []color.NRGBA) *canvas.Rectangle {
+	return canvas.NewRectangle(grays[0])
 }
 
 // padRect 指定尺寸的透明占位矩形。

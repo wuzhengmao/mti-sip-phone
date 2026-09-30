@@ -58,7 +58,7 @@ type App struct {
 	regDot       *statusDot
 	regLabel     *widget.Label // 本机号码显示
 	autoAnswerBtn *widget.Button
-	callBtn      *widget.Button
+	callBtn      *compactButton
 	settingsBtn  *widget.Button
 
 	// 设置页控件
@@ -304,8 +304,10 @@ func (a *App) buildDialPage() {
 
 	// ---- 呼叫按钮：绿色「呼叫」（黑色图标与文字一致，REQ-UI-024 修订），
 	// 宽度拉满居中（Border 底部对象被拉伸全宽）----
-	a.callBtn = widget.NewButtonWithIcon("呼叫", IconPlayBlack, a.onCallButton)
-	a.callBtn.Importance = widget.SuccessImportance
+	// 呼叫按钮用 compactTextButton：文字颜色固定（浅色主题下 fyne
+	// Success 按钮文字为白色、看不清），黑色文字与黑色图标一致
+	//（REQ-UI-024 修订）
+	a.callBtn = newCompactTextButton("呼叫", IconPlayBlack, colorSuccessGreen, colorIconBlack, a.onCallButton)
 
 	a.dialPage = container.NewBorder(
 		topBar,
@@ -690,17 +692,20 @@ func (a *App) setKeypadEnabled(enabled bool) {
 	}
 }
 
-// updateCallButton 按通话状态更新呼叫按钮外观与行为
-//（呼叫态黑图标与文字一致、挂断态白图标，REQ-UI-024 修订）。
+// updateCallButton 按通话状态更新呼叫按钮外观与行为：
+// 呼叫态=绿底黑字黑图标；挂断态=红底白字白图标
+//（文字颜色固定，不随主题变化，REQ-UI-024 修订）。
 func (a *App) updateCallButton() {
 	if a.activeCallID != "" {
 		a.callBtn.SetText("挂断")
 		a.callBtn.SetIcon(IconStopWhite)
-		a.callBtn.Importance = widget.DangerImportance
+		a.callBtn.SetBg(colorDangerRed)
+		a.callBtn.SetLabelColor(colorIconWhite)
 	} else {
 		a.callBtn.SetText("呼叫")
 		a.callBtn.SetIcon(IconPlayBlack)
-		a.callBtn.Importance = widget.SuccessImportance
+		a.callBtn.SetBg(colorSuccessGreen)
+		a.callBtn.SetLabelColor(colorIconBlack)
 	}
 	a.callBtn.Refresh()
 }
@@ -745,9 +750,7 @@ func (a *App) buildTray() {
 	})
 	systray.SetOnTapped(func() {
 		fyne.Do(func() {
-			a.mainW.Show()
-			a.mainShown = true
-			a.bringMainToFront()
+			a.showMain()
 		})
 	})
 	logx.Logger().Info("系统托盘已就绪（单击图标唤出主界面）")
@@ -932,8 +935,13 @@ func (a *App) toggleAutoAnswer() {
 	logx.Logger().Info("自动接听开关", "enabled", a.autoAnswer)
 }
 
-// showMain 显示主窗口（托盘单击唤出）。
+// showMain 显示主窗口（托盘单击/菜单唤出）。
+// 通话期间（呼叫/振铃/通话中）主窗口保持隐藏，通话面板关闭后
+// 才可唤出（REQ-UI-025 修订）。
 func (a *App) showMain() {
+	if a.uiState != uiIdle {
+		return
+	}
 	a.mainW.Show()
 	a.mainShown = true
 	a.mainW.RequestFocus()
