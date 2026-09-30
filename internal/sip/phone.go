@@ -63,7 +63,7 @@ type callSession struct {
 	mediaStarted bool      // 媒体引擎已启动（183 早期媒体可能提前启动）
 }
 
-// UserAgentName 软电话标识（REQ-ACC-014）：格式 "mti-sip-phone v1.0.0"。
+// UserAgentName 软电话标识（REQ-ACC-014）：格式 "mti-sip-phone v1.0.1"。
 func UserAgentName() string {
 	return "mti-sip-phone v" + core.Version
 }
@@ -414,6 +414,27 @@ func (p *Phone) Mute(callID string, muted bool) error {
 	}
 	cs.engine.SetMuted(muted)
 	go p.sendHoldReInvite(cs, muted)
+	return nil
+}
+
+// MuteMic 麦克风静音切换：纯本地停止/恢复发送（不发 SIP 信令，
+// 区别于 Mute 的保持 re-INVITE——对端听到静音但通话保持正常状态）。
+func (p *Phone) MuteMic(callID string, muted bool) error {
+	cs := p.getCall(callID)
+	if cs == nil || cs.engine == nil {
+		return core.ErrCallNotFound
+	}
+	cs.engine.SetMicMuted(muted)
+	return nil
+}
+
+// MuteSpeaker 扬声器静音切换：纯本地停止/恢复播放（继续接收 RTP）。
+func (p *Phone) MuteSpeaker(callID string, muted bool) error {
+	cs := p.getCall(callID)
+	if cs == nil || cs.engine == nil {
+		return core.ErrCallNotFound
+	}
+	cs.engine.SetPlayMuted(muted)
 	return nil
 }
 

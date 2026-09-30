@@ -337,6 +337,36 @@ func (a *App) Mute(callID string, muted bool) error {
 	return nil
 }
 
+// MuteMic 麦克风静音（纯本地，无 SIP 信令；通话面板麦克风开关用）。
+func (a *App) MuteMic(callID string, muted bool) error {
+	if a.getCall(callID) == nil {
+		return ErrCallNotFound
+	}
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	if err := a.tel.MuteMic(callID, muted); err != nil {
+		return err
+	}
+	logx.Logger().Info("麦克风静音", "callId", callID, "muted", muted)
+	return nil
+}
+
+// MuteSpeaker 扬声器静音（纯本地，继续接收；通话面板扬声器开关用）。
+func (a *App) MuteSpeaker(callID string, muted bool) error {
+	if a.getCall(callID) == nil {
+		return ErrCallNotFound
+	}
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	if err := a.tel.MuteSpeaker(callID, muted); err != nil {
+		return err
+	}
+	logx.Logger().Info("扬声器静音", "callId", callID, "muted", muted)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // 下行：电话层（Telephony 实现）通过 EventSink 回调
 // ---------------------------------------------------------------------------
@@ -462,4 +492,4 @@ func (a *App) publishCall(event, callID string, extra ...any) {
 }
 
 // Version 应用版本号（构建时可通过 -ldflags 覆盖）。
-var Version = "1.0.0"
+var Version = "1.0.1"

@@ -39,13 +39,15 @@ func (s *stubTel) Hangup(callID string) error {
 	s.app.OnTerminated(callID, "local_hangup")
 	return nil
 }
-func (s *stubTel) Reject(callID string, code int) error  { return nil }
-func (s *stubTel) Mute(callID string, muted bool) error  { return nil }
-func (s *stubTel) SendDTMF(callID, digit string) error   { return nil }
-func (s *stubTel) SetAutoAnswer(enabled bool) error      { return nil }
-func (s *stubTel) SetRPort(enabled bool) error            { return nil }
-func (s *stubTel) SetMicrophone(deviceID string) error   { return nil }
-func (s *stubTel) SetSpeaker(deviceID string) error      { return nil }
+func (s *stubTel) Reject(callID string, code int) error        { return nil }
+func (s *stubTel) Mute(callID string, muted bool) error        { return nil }
+func (s *stubTel) MuteMic(callID string, muted bool) error     { return nil }
+func (s *stubTel) MuteSpeaker(callID string, muted bool) error { return nil }
+func (s *stubTel) SendDTMF(callID, digit string) error         { return nil }
+func (s *stubTel) SetAutoAnswer(enabled bool) error            { return nil }
+func (s *stubTel) SetRPort(enabled bool) error                 { return nil }
+func (s *stubTel) SetMicrophone(deviceID string) error         { return nil }
+func (s *stubTel) SetSpeaker(deviceID string) error            { return nil }
 func (s *stubTel) AudioDevices() ([]core.AudioDevice, []core.AudioDevice) {
 	return nil, nil
 }
@@ -228,7 +230,6 @@ func TestDialFlow(t *testing.T) {
 		t.Fatalf("挂断应成功，收到: %+v", msg)
 	}
 }
-
 
 // TestDialRejectedWhileActive 单通话限制：已有通话时第二次拨号被拒绝。
 func TestDialRejectedWhileActive(t *testing.T) {
