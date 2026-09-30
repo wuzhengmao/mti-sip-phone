@@ -10,30 +10,35 @@
 
 | 系统 | 架构 |
 | --- | --- |
-| Windows | x86_64 / arm64 |
+| Windows | x86（32 位）/ x86_64 |
 | Linux | x86_64 / arm64 |
 
 ## 构建与运行
 
 依赖：Go 1.23+、gcc（CGO，Windows 用 MinGW-W64 / MSYS2；Linux 用系统 gcc）。
+fyne 的 OpenGL 绑定依赖 CGO——交叉编译 GUI 产物需目标平台的 gcc 工具链，
+因此构建脚本的**交叉目标均为无界面版**（`-tags "headless noaudio"`，
+跳过界面层与音频后端，纯 Go、仅本地 WS 服务）。
 
 ```bash
-# Windows：一键构建（自动探测 WinLibs gcc）
+# Windows：一键构建（自动探测 WinLibs gcc），产物输出到 dist/：
 build.bat
-# 产物：
-#   bin/sip-phone.exe         GUI 子系统，无控制台窗口，静默运行于托盘
-#   bin/sip-phone-console.exe 控制台版，供 -headless 调试
+#   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频）
+#   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
+#   dist/sip-phone-windows-386-headless.exe   32 位无界面版（WS 服务，纯 Go）
+#   dist/sip-phone-linux-amd64-headless       无界面版（WS 服务，纯 Go）
+#   dist/sip-phone-linux-arm64-headless       无界面版（WS 服务，纯 Go）
 
-# Linux：
+# Linux：一键构建（本机 GUI 版 CGO+音频 + 交叉无界面纯 Go 产物，输出 dist/）
 ./build.sh
 
 # 手动构建（Windows 需将 MinGW 的 gcc 加入 PATH，或用 CC 指定）
-go build -ldflags "-s -w -H=windowsgui" -o bin/sip-phone.exe ./cmd/sip-phone  # 无控制台
-go build -tags noaudio -o bin/sip-phone ./cmd/sip-phone                       # 纯 Go 交叉编译
+go build -ldflags "-s -w -H=windowsgui" -o dist/sip-phone.exe ./cmd/sip-phone  # 无控制台
+go build -tags "headless noaudio" -o dist/sip-phone-headless ./cmd/sip-phone   # 无界面纯 Go 交叉编译
 
 # 运行
-./bin/sip-phone                     # 正常模式（托盘 + 主窗口，无控制台）
-./bin/sip-phone-console.exe -headless  # 无界面模式（仅 WS 服务，供 Linux 服务器）
+dist/sip-phone-windows-amd64.exe        # 托盘常驻；关闭主窗口=隐藏到托盘
+dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供服务器）
 ```
 
 启动后：
@@ -64,12 +69,13 @@ go build -tags noaudio -o bin/sip-phone ./cmd/sip-phone                       # 
 
 ## 跨平台出包
 
-目标：Windows / Linux × x86_64 / arm64。本机为 Windows 开发环境：
+构建脚本（`build.bat` / `build.sh`）产出的组合：
 
-- **windows/amd64**：本机 `go build`（需 MinGW）
-- **linux/amd64、linux/arm64**：Docker + `gcc-aarch64-linux-gnu` 交叉编译（或 CI Linux runner 本机构建）
-- **windows/arm64**：llvm-mingw（`aarch64-w64-mingw32-gcc`）或 CI `windows-11-arm` runner
-- 音频层可用 `-tags noaudio` 切空后端做纯 Go 构建
+- **windows/amd64 GUI**：本机 `go build`（CGO+音频，MinGW）
+- **windows/386**：无界面版（纯 Go，WS 服务）；GUI 版需 MSYS2 `mingw-w64-i686-gcc`
+- **linux/amd64、linux/arm64**：无界面版（纯 Go，WS 服务）；GUI 版在 Linux 本机构建（`./build.sh`）
+- **windows/arm64**：暂未纳入脚本，需 llvm-mingw（`aarch64-w64-mingw32-gcc`）或 CI `windows-11-arm` runner
+- 无界面/无音频构建标签：`-tags "headless noaudio"`（纯 Go，无 CGO 依赖）
 
 ## 网页接入示例
 

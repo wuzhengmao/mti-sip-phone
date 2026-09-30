@@ -13,7 +13,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -28,7 +27,6 @@ import (
 	"mti-sip-phone/internal/protocol"
 	"mti-sip-phone/internal/single"
 	"mti-sip-phone/internal/sip"
-	"mti-sip-phone/internal/ui"
 	"mti-sip-phone/internal/wsapi"
 )
 
@@ -195,35 +193,10 @@ func main() {
 		fmt.Printf("测试页面: http://127.0.0.1:%d/\n", cfg.WS.Port)
 	}
 
-	// 9. GUI（无界面模式跳过）。
-	// Fyne 要求 UI 初始化与事件循环运行在主线程（goroutine 中运行会导致
-	// 托盘失效与线程安全检查告警），因此 GUI 模式直接在主线程调用 Run。
+	// 9. GUI（无界面模式跳过；runGUI 按构建标签拆分——
+	// headless 构建不含界面层，供纯 Go 交叉编译）。
 	if !*headless {
-		// 重启回调（REQ-UI-017）：释放单实例锁 → 拉起新进程 → 退出当前。
-		// 必须先释放锁再启动，否则新进程因锁冲突而退出。
-		onRestart := func() {
-			logx.Logger().Info("用户确认重启，正在重启程序")
-			if releaseLock != nil {
-				releaseLock()
-			}
-			exe, err := os.Executable()
-			if err == nil {
-				cmd := exec.Command(exe, os.Args[1:]...)
-				if err := cmd.Start(); err != nil {
-					logx.Logger().Error("拉起新进程失败", "err", err)
-				}
-			} else {
-				logx.Logger().Error("获取可执行文件路径失败", "err", err)
-			}
-		}
-		gui := ui.New(app, audioMgr, cfg, cfgPath, onRestart)
-		// 退出信号 → 请求 Fyne 退出（Run 返回后主流程收尾）
-		go func() {
-			<-ctx.Done()
-			logx.Logger().Info("收到退出信号，正在关闭")
-			gui.Quit()
-		}()
-		gui.Run()
+		runGUI(app, audioMgr, cfg, cfgPath, ctx, releaseLock)
 		stop()
 		shutdown(app, tel) // 退出前注销 SIP（REQ-ACC-009）
 		return

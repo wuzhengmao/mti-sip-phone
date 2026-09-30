@@ -24,7 +24,7 @@ import (
 
 const (
 	maxFileSize = 10 * 1024 * 1024 // 单个日志文件最大 10MB
-	maxFiles    = 3                // 最多保留 3 份（当前 + 2 份 gzip 归档）
+	maxFiles    = 10               // 最多保留 10 份（当前 + 9 份 gzip 归档）
 	logFileName = "sip-phone.log"
 )
 

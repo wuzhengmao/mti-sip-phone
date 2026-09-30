@@ -24,9 +24,16 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 ## 构建、测试与运行
 
 ```bash
-# Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链）
-# 产物：bin/sip-phone.exe（GUI 子系统无控制台，托盘版）+ bin/sip-phone-console.exe（控制台调试版）
+# Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
+#   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频）
+#   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
+#   dist/sip-phone-windows-386-headless.exe   32 位无界面版（WS 服务，纯 Go）
+#   dist/sip-phone-linux-amd64-headless       无界面版（WS 服务，纯 Go）
+#   dist/sip-phone-linux-arm64-headless       无界面版（WS 服务，纯 Go）
 build.bat
+
+# Linux 一键构建（本机 GUI 版 CGO+音频 + 交叉无界面纯 Go 产物，输出 dist/）：
+./build.sh
 
 # 测试：CGO 包（audio）需要 gcc。用 build.bat 同款工具链：
 export CC="<WinLibs mingw64/bin/gcc.exe 路径>"   # build.bat 输出里可见
@@ -34,11 +41,22 @@ export CGO_ENABLED=1
 go test ./internal/media/ ./internal/wsapi/ ./internal/sip/
 
 # 运行
-bin/sip-phone.exe                     # 托盘常驻；关闭主窗口=隐藏到托盘
-bin/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供服务器）
+dist/sip-phone-windows-amd64.exe       # 托盘常驻；关闭主窗口=隐藏到托盘
+dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供服务器）
 ```
 
 测试页地址：`http://127.0.0.1:<WS端口>/`（默认 8765，占用自动 +1 并保存配置）。
+
+**交叉编译说明**：fyne 的 OpenGL 绑定依赖 CGO，无目标平台 gcc 工具链时
+无法交叉编译 GUI 产物；构建脚本的交叉目标均使用 `-tags "headless noaudio"`
+（跳过界面层与音频后端，纯 Go，仅 WS 服务）。各平台的 GUI 版请在对应
+平台本机构建（Windows amd64 见 build.bat；Linux 见 build.sh；Windows 386
+需 MSYS2 `mingw-w64-i686-gcc`）。
+
+> 注意：`internal/protocol` 的 Windows 注册表实现按构建标签拆分在
+> `register_windows.go`（导入 x/sys/windows/registry 会破坏 Linux
+> 交叉编译，勿合并回 protocol.go）。`cmd/sip-phone` 的 GUI 组装同理
+> 拆分在 `gui.go`（构建标签 !headless）。
 
 ## 目录结构与职责
 
