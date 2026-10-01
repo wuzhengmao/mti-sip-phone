@@ -11,8 +11,8 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -32,6 +32,7 @@ const (
 //   - 呼叫：行1 对端号码；行2 "呼叫中"+挂断；行3 拨号时长
 //   - 振铃：行1 对端号码+接听；行2 "来电"+挂断；行3 振铃时长
 //   - 通话：行1 对端号码+保持；行2 "通话中"+挂断；行3 通话时长
+//
 // 行内容按状态动态重建（rebuildCallRows）。
 func (a *App) buildCallPanelIfNeeded() {
 	if a.callW != nil {
@@ -42,7 +43,7 @@ func (a *App) buildCallPanelIfNeeded() {
 	w.SetIcon(IconPhoneGreen) // 任务栏绿色话机（不继承应用红色图标）
 	// 无标题栏、无关闭按钮，仅显示窗体内容（REQ-UI-024 修订）：
 	// fyne 公开 API 无 SetDecorated，窗口装饰在 Show 后由
-	// positionCallWindow（stripCallWindowChrome）通过 Win32 样式移除
+	// positionCallWindow（stripWindowChrome）通过 Win32 样式移除
 	// 关闭面板（Alt+F4 等）= 挂断
 	w.SetCloseIntercept(func() {
 		if a.activeCallID != "" {
@@ -253,7 +254,7 @@ func vPad(obj fyne.CanvasObject, s float32) fyne.CanvasObject {
 
 // centerBox 内容保持自然尺寸并在行内垂直居中——Grid 撑高行时
 // HBox 会把子组件纵向拉伸到行高，包一层 Center 避免按钮被拉长
-//（REQ-UI-025 修订）。
+// （REQ-UI-025 修订）。
 func centerBox(obj fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewCenter(obj)
 }
@@ -270,8 +271,8 @@ var (
 )
 
 // compactButton 通话面板紧凑按钮（REQ-UI-025 修订）：默认 36×36
-//（20px 图标 + 8px 内边距），圆角底色 + 居中图标，可选文字
-//（主窗体呼叫按钮用，文字颜色固定不随主题变化）。
+// （20px 图标 + 8px 内边距），圆角底色 + 居中图标，可选文字
+// （主窗体呼叫按钮用，文字颜色固定不随主题变化）。
 // fyne Button 的尺寸跟随主题内边距（拨号盘主题为 12px，按钮高达
 // 48px），且文字颜色随主题（浅色主题下 Success 按钮文字为白色），
 // 均无法单独控制，故用自定义组件。
@@ -308,17 +309,37 @@ func newCompactTextButton(text string, iconRes fyne.Resource, bgColor, labelColo
 	return b
 }
 
+// newCompactTextOnlyButton 纯文字紧凑按钮（更新提示窗用）：无图标，
+// 文字居中、四周留主题内边距，宽度随文字自适应；圆角比图标按钮更小
+// （提示窗按钮观感更方正）。
+func newCompactTextOnlyButton(text string, bgColor, labelColor color.NRGBA, onTap func()) *compactButton {
+	b := &compactButton{onTap: onTap}
+	b.bg = canvas.NewRectangle(bgColor)
+	b.bg.CornerRadius = 3
+	b.label = canvas.NewText(text, labelColor)
+	b.label.TextSize = 14
+	b.ExtendBaseWidget(b)
+	return b
+}
+
 func (b *compactButton) CreateRenderer() fyne.WidgetRenderer {
-	if b.label != nil {
+	if b.label != nil && b.icon != nil {
 		return widget.NewSimpleRenderer(container.NewStack(b.bg,
 			container.NewCenter(container.NewHBox(
 				container.NewCenter(b.icon), container.NewCenter(b.label)))))
 	}
+	if b.label != nil {
+		return widget.NewSimpleRenderer(container.NewStack(b.bg,
+			container.NewBorder(padRect(3), padRect(3), padRect(8), padRect(8), b.label)))
+	}
 	return widget.NewSimpleRenderer(container.NewStack(b.bg, container.NewCenter(b.icon)))
 }
 
-// SetIcon 更新图标。
+// SetIcon 更新图标（纯文字按钮忽略）。
 func (b *compactButton) SetIcon(res fyne.Resource) {
+	if b.icon == nil {
+		return
+	}
 	b.icon.Resource = res
 	b.icon.Refresh()
 }
@@ -367,7 +388,7 @@ var ringBorderColors = []uint32{
 // ringFlashGrays 从当前主题背景色推导振铃闪烁灰度序列（REQ-UI-025 修订）：
 // 16 档、每档 4 色阶——平滑往返脉动。
 // 方向按背景亮度决定：深色主题（白字）向**更亮**方向走，浅色主题
-//（黑字）向**更暗**方向走；若固定向亮方向走，浅色背景（近白）会
+// （黑字）向**更暗**方向走；若固定向亮方向走，浅色背景（近白）会
 // 全部封顶在 255 导致不闪烁（历史 bug）。
 func (a *App) ringFlashGrays() []color.NRGBA {
 	bg := a.fyne.Settings().Theme().Color(theme.ColorNameBackground, a.fyne.Settings().ThemeVariant())
@@ -555,7 +576,7 @@ func (a *App) restoreIdle() {
 
 // showCallFailed 呼叫失败提示。按用户约定：通话面板关闭后若主窗口
 // 恢复显示，则在主窗口中弹出呼叫失败错误窗口；若主窗口保持隐藏
-//（托盘常驻场景，从未显示），则不弹窗，失败原因仅记录日志——
+// （托盘常驻场景，从未显示），则不弹窗，失败原因仅记录日志——
 // 避免以隐藏/未初始化的窗口为父窗口弹窗导致崩溃。
 func (a *App) showCallFailed(reason string) {
 	a.stopTimer()

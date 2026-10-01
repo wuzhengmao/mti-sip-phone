@@ -210,13 +210,19 @@ import (
 // vPad 每行 +10、行间 +4、标签每行 +8），fyne 会把窗口撑到内容最小
 // 尺寸——所以「只调窗口高度」不起作用（实测被撑到 184→221，行距因此
 // 显得很大）。Windows 侧靠 setCallWindowClamp 把窗口强制在 260×126
-// （内容被压缩，观感才正确）；Linux 侧由 placeCallWindow 的
+// （内容被压缩，观感才正确）；Linux 侧由 placeCornerWindow 的
 // sp_lock_size（X11 尺寸提示 min=max）做同样的事。改这两个常量时两边
 // 一起改，否则两平台观感会分叉。
 const (
 	callPanelWidth      = 260
 	callPanelHeight     = 126
 	callPanelButtonSize = 36
+)
+
+// 更新提示窗尺寸（DIP）：与 Windows 保持一致，改时两边一起改。
+const (
+	updatePanelWidth  = 340
+	updatePanelHeight = 240
 )
 
 // callPanelMargin 面板距工作区右下角的留白（物理像素），与 Windows 一致。
@@ -226,10 +232,23 @@ const callPanelMargin = 16
 // 移出任务栏、保持置顶。窗口句柄在 Show 后异步出现，带重试；
 // 去装饰后边框几何变化，再延后校正两次（节奏同 Windows 实现）。
 func moveCallWindowToCorner(w fyne.Window) {
+	moveWindowToCorner(w, callPanelWidth, callPanelHeight, "通话面板")
+}
+
+// moveUpdateWindowToCorner 把更新提示窗吸附到工作区右下角（同通话面板：
+// 去标题栏、移出任务栏、置顶、尺寸锁定）。尺寸取窗口当前值
+//（内容自适应调整过），而不是固定常量。
+func moveUpdateWindowToCorner(w fyne.Window) {
+	size := w.Canvas().Size()
+	moveWindowToCorner(w, size.Width, size.Height, "更新提示窗")
+}
+
+// moveWindowToCorner 通用"吸附右下角"实现（name 仅用于日志）。
+func moveWindowToCorner(w fyne.Window, wDip, hDip float32, name string) {
 	// 目标物理尺寸 = DIP 尺寸 × 缩放（与 Windows 实现同一算法）
 	scale := w.Canvas().Scale()
-	targetW := int(float32(callPanelWidth) * scale)
-	targetH := int(float32(callPanelHeight) * scale)
+	targetW := int(wDip * scale)
+	targetH := int(hDip * scale)
 	var contentMin fyne.Size // 仅用于日志：内容最小尺寸解释了窗口为何会被撑高
 	if c := w.Content(); c != nil {
 		contentMin = c.MinSize()
@@ -245,16 +264,20 @@ func moveCallWindowToCorner(w fyne.Window) {
 			time.Sleep(50 * time.Millisecond)
 		}
 		if handle == 0 {
-			logx.Logger().Warn("通话面板未取得 X11 窗口句柄，跳过定位")
+			logx.Logger().Warn(name+"未取得 X11 窗口句柄，跳过定位")
 			return
 		}
-		placeCallWindow(handle, targetW, targetH, scale, contentMin)
+		placeCornerWindow(handle, targetW, targetH, scale, contentMin, name)
 		for _, delay := range []time.Duration{150 * time.Millisecond, 350 * time.Millisecond} {
 			time.Sleep(delay)
-			placeCallWindow(handle, targetW, targetH, scale, contentMin)
+			placeCornerWindow(handle, targetW, targetH, scale, contentMin, name)
 		}
 	}()
 }
+
+// updateWindowTitle 更新提示窗标题：Linux 用 ASCII——窗口不进任务栏，
+// 万一被 WM 忽略 skip-taskbar 而显示出来，也不会出现中文乱码。
+func updateWindowTitle() string { return "Update" }
 
 // x11DisplayAvailable 探测 $DISPLAY 是否真的可连接（调用点见 glfw_linux.go
 // 的 preferX11OnWayland：Wayland 会话下是否能把后端固定到 X11）。
@@ -281,14 +304,14 @@ func callPanelHandle(w fyne.Window) uintptr {
 	return handle
 }
 
-// placeCallWindow 对已存在的窗口施加：去装饰 + 移出任务栏 + 置顶 +
+// placeCornerWindow 对已存在的窗口施加：去装饰 + 移出任务栏 + 置顶 +
 // 定位到工作区右下角。targetW/targetH 为期望的物理像素尺寸，仅用于
 // 诊断——实际尺寸被 fyne/WM 改动时打 Warn（该日志是排查"面板行距
 // 不符预期"的第一手线索）。
-func placeCallWindow(handle uintptr, targetW, targetH int, scale float32, contentMin fyne.Size) {
+func placeCornerWindow(handle uintptr, targetW, targetH int, scale float32, contentMin fyne.Size, name string) {
 	d := C.sp_open_display()
 	if d == nil {
-		logx.Logger().Warn("无法连接 X 显示，通话面板定位跳过")
+		logx.Logger().Warn("无法连接 X 显示，" + name + "定位跳过")
 		return
 	}
 	defer C.sp_close_display(d)
@@ -301,11 +324,11 @@ func placeCallWindow(handle uintptr, targetW, targetH int, scale float32, conten
 
 	var w, h C.int
 	if C.sp_geometry(d, win, &w, &h) == 0 {
-		logx.Logger().Warn("读取通话面板窗口尺寸失败，跳过定位")
+		logx.Logger().Warn("读取" + name + "窗口尺寸失败，跳过定位")
 		return
 	}
 	if int(w) != targetW || int(h) != targetH {
-		logx.Logger().Warn("通话面板实际尺寸与目标不一致",
+		logx.Logger().Warn(name+"实际尺寸与目标不一致",
 			"actual", fmt.Sprintf("%dx%d", int(w), int(h)),
 			"target", fmt.Sprintf("%dx%d", targetW, targetH),
 			"scale", scale)
@@ -316,7 +339,7 @@ func placeCallWindow(handle uintptr, targetW, targetH int, scale float32, conten
 	x := wx + ww - w - callPanelMargin
 	y := wy + wh - h - callPanelMargin
 	C.sp_move(d, win, x, y)
-	logx.Logger().Debug("通话面板已吸附右下角",
+	logx.Logger().Debug(name+"已吸附右下角",
 		"x", int(x), "y", int(y), "w", int(w), "h", int(h),
 		"contentMin", fmt.Sprintf("%.0fx%.0f", contentMin.Width, contentMin.Height))
 }

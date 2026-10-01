@@ -13,6 +13,12 @@ const (
 	callPanelButtonSize = 36
 )
 
+// 更新提示窗尺寸（DIP）。
+const (
+	updatePanelWidth  = 340
+	updatePanelHeight = 240
+)
+
 // setTopMost 其他平台的置顶控制：暂用 Fyne 的置顶能力（不可撤销），
 // 后续版本按窗口管理器实现可撤销置顶。
 func setTopMost(on bool) {
@@ -20,6 +26,12 @@ func setTopMost(on bool) {
 }
 
 func moveCallWindowToCorner(w fyne.Window) {}
+
+// moveUpdateWindowToCorner 其他平台不做定位（窗口保持默认居中）。
+func moveUpdateWindowToCorner(w fyne.Window) {}
+
+// updateWindowTitle 更新提示窗标题（与 Windows 一致，中文）。
+func updateWindowTitle() string { return "更新提示" }
 
 // callWindowTitle 通话面板标题（与 Windows 一致，中文）。
 func callWindowTitle(account string) string {

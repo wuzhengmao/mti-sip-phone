@@ -29,21 +29,23 @@ type Error struct {
 
 // 错误码定义。
 const (
-	CodeUnknownMethod = "unknown_method" // 未知方法
-	CodeInvalidParams = "invalid_params" // 参数缺失或非法
-	CodeNotReady      = "not_ready"      // 电话能力尚未接入
-	CodeCallNotFound  = "call_not_found" // 通话不存在
-	CodeInternal      = "internal"       // 内部错误
+	CodeUnknownMethod   = "unknown_method"   // 未知方法
+	CodeInvalidParams   = "invalid_params"   // 参数缺失或非法
+	CodeNotReady        = "not_ready"        // 电话能力尚未接入
+	CodeCallNotFound    = "call_not_found"   // 通话不存在
+	CodeInternal        = "internal"         // 内部错误
+	CodeUpdateNotNewer  = "update_not_newer" // 告知的版本不高于当前版本
 )
 
 // 请求方法名。
 const (
-	MethodDial      = "call.dial"    // 拨号
-	MethodAnswer    = "call.answer"  // 接听
-	MethodHangup    = "call.hangup"  // 挂断
-	MethodReject    = "call.reject"  // 拒接
-	MethodMute      = "call.mute"    // 静音
-	MethodGetState = "system.getState" // 查询状态
+	MethodDial         = "call.dial"           // 拨号
+	MethodAnswer       = "call.answer"         // 接听
+	MethodHangup       = "call.hangup"         // 挂断
+	MethodReject       = "call.reject"         // 拒接
+	MethodMute         = "call.mute"           // 静音
+	MethodGetState     = "system.getState"     // 查询状态
+	MethodNotifyUpdate = "system.notifyUpdate" // 前端告知新版本
 )
 
 // 事件名。
@@ -57,6 +59,7 @@ const (
 	EvCallFailed      = "call.failed"      // 呼叫失败
 	EvCallMuted       = "call.muted"       // 静音状态变化
 	EvRegisterState   = "register.state"   // 注册状态变化
+	EvSystemUpdate    = "system.update"    // 自动更新状态变化（phase/进度/失败原因）
 )
 
 // newError 构造错误信息。

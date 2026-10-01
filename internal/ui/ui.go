@@ -12,19 +12,22 @@ import (
 	"image/color"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
-	"fyne.io/systray"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"fyne.io/systray"
 
 	"mti-sip-phone/internal/audio"
 	"mti-sip-phone/internal/autostart"
@@ -48,18 +51,18 @@ type App struct {
 	callW fyne.Window // 通话面板：呼叫/振铃/通话中显示，置顶右下角
 
 	// 主窗口：内容切换容器（拨号盘 / 设置页）
-	mainContent *fyne.Container
-	dialPage    *fyne.Container
+	mainContent  *fyne.Container
+	dialPage     *fyne.Container
 	settingsPage *fyne.Container
 
 	// 拨号盘控件
-	dialEntry    *widget.Entry // 已废弃：由 dialSelect 替代（保留字段避免大改）
-	dialSelect   *widget.SelectEntry
-	regDot       *statusDot
-	regLabel     *widget.Label // 本机号码显示
+	dialEntry     *widget.Entry // 已废弃：由 dialSelect 替代（保留字段避免大改）
+	dialSelect    *widget.SelectEntry
+	regDot        *statusDot
+	regLabel      *widget.Label // 本机号码显示
 	autoAnswerBtn *widget.Button
-	callBtn      *compactButton
-	settingsBtn  *widget.Button
+	callBtn       *compactButton
+	settingsBtn   *widget.Button
 
 	// 设置页控件
 	settingsScroll    *container.Scroll
@@ -70,20 +73,20 @@ type App struct {
 	accStunServer     *widget.Entry
 	rportCheck        *widget.Check
 	accTransport      *widget.Select
-	accAccount   *widget.Entry
-	accAuthUser  *widget.Entry
-	accPassword  *widget.Entry
-	accDisplay   *widget.Entry
-	accEnabled   *widget.Check
-	micSelect    *widget.Select
-	speakerSelect *widget.Select
+	accAccount        *widget.Entry
+	accAuthUser       *widget.Entry
+	accPassword       *widget.Entry
+	accDisplay        *widget.Entry
+	accEnabled        *widget.Check
+	micSelect         *widget.Select
+	speakerSelect     *widget.Select
 	ringSpeakerSelect *widget.Select
-	logFileCheck *widget.Check
-	sipTraceCheck *widget.Check
-	autoStartCheck *widget.Check // 开机自动启动（REQ-UI-022）
-	logLevelSel  *widget.Select
-	logDirLabel  *widget.Label
-	wsPortEntry  *widget.Entry // 本地 WS 监听端口（默认 8765，修改后重启生效）
+	logFileCheck      *widget.Check
+	sipTraceCheck     *widget.Check
+	autoStartCheck    *widget.Check // 开机自动启动（REQ-UI-022）
+	logLevelSel       *widget.Select
+	logDirLabel       *widget.Label
+	wsPortEntry       *widget.Entry // 本地 WS 监听端口（默认 8765，修改后重启生效）
 
 	// 通话面板控件（呼叫/振铃/通话三态共用）
 	callNameLabel  *widget.Label
@@ -93,9 +96,9 @@ type App struct {
 	hangupBtn      *compactButton
 	answerBtn      *compactButton
 	holdBtn        *compactButton
-	speakerBtn     *compactButton // 扬声器开关（REQ-UI-023）
-	micBtn         *compactButton // 麦克风开关（REQ-UI-023）
-	pulseStop      chan struct{} // 振铃脉动动画停止通道
+	speakerBtn     *compactButton    // 扬声器开关（REQ-UI-023）
+	micBtn         *compactButton    // 麦克风开关（REQ-UI-023）
+	pulseStop      chan struct{}     // 振铃脉动动画停止通道
 	ringFlashRect  *canvas.Rectangle // 振铃边框闪烁描边（无边框窗口用，REQ-UI-025 修订）
 
 	// 主窗口呼叫状态控件
@@ -109,7 +112,11 @@ type App struct {
 	callStartAt  time.Time
 	timerStop    chan struct{}
 	regState     string
-	autoAnswer   bool // 自动接听开关
+	// trayRegistered 托盘图标当前是否为"已注册"绿色。续注册（registering）
+	// 期间不改变它——每次续注册图标都闪一下红色观感很差；只有注册失败
+	// 或未注册才转红（界面圆点仍按 黄=注册中 显示，REQ-UI-018）。
+	trayRegistered bool
+	autoAnswer     bool // 自动接听开关
 
 	// 扬声器/麦克风开关（REQ-UI-023）：会话内记忆——通话面板再次弹出时
 	// 沿用上次状态；不持久化，应用重启后恢复默认都打开。
@@ -121,6 +128,23 @@ type App struct {
 	//（通话结束后仅当通话前可见时恢复显示主窗口）
 	mainShown      bool
 	mainWasVisible bool
+
+	// 自动更新（REQ-UPD-003）：提示行 + 右下角提示窗
+	updateBar          *fyne.Container // 呼叫按钮上方的提示行容器
+	updateBarBtn       *pointerButton  // 提示行按钮：更新 vX 来源 host / 更新中...（手型光标）
+	updW               fyne.Window     // 更新提示窗（懒创建）
+	updTitleLabel      *widget.Label
+	updInfoLabel       *widget.Label
+	updStateLabel      *widget.Label
+	updStateRow        *fyne.Container   // 状态行/进度条共用槽位（高度固定为状态标签高度）
+	updStatePad        *canvas.Rectangle // 槽位占位矩形（撑住行高）
+	updProgress        *widget.ProgressBar
+	updActionBtn       *compactButton
+	updLaterBtn        *compactButton
+	lastUpdate         core.UpdateStatus // 最近一次更新状态（按钮动作按它分派）
+	notifiedVersion    string            // 本次运行已弹窗提醒过的版本（同版本不重复弹）
+	updatePopupPending bool              // 提示窗被通话/通话中收到通知挂起：稍后补弹
+	updShown           bool              // 提示窗当前是否显示（Fyne 无 Visible 查询）
 
 	// loadingForm 表单回填标志：回填期间屏蔽 OnChanged 自动保存，避免
 	// 初始化把旧值覆盖进配置
@@ -320,9 +344,12 @@ func (a *App) buildDialPage() {
 	//（REQ-UI-024 修订）
 	a.callBtn = newCompactTextButton("呼叫", IconPlayBlack, colorSuccessGreen, colorIconBlack, a.onCallButton)
 
+	// 呼叫按钮上方一行：版本更新提示（REQ-UPD-003，默认隐藏）
+	a.buildUpdateBar()
+
 	a.dialPage = container.NewBorder(
 		topBar,
-		a.callBtn,
+		container.NewVBox(a.updateBar, a.callBtn),
 		nil, nil,
 		container.NewVBox(
 			inputRow,
@@ -421,6 +448,7 @@ func (a *App) buildSettingsPage() {
 	a.sipTraceCheck = widget.NewCheck("记录 SIP 信令", a.saveSIPTrace)
 	a.logLevelSel = widget.NewSelect([]string{"debug", "info", "warn", "error"}, nil)
 	logDirBtn := widget.NewButtonWithIcon("选择目录...", theme.FolderOpenIcon(), a.chooseLogDir)
+	logDirOpenBtn := widget.NewButtonWithIcon("打开日志目录", theme.FolderIcon(), a.openLogDir)
 	a.logDirLabel = widget.NewLabel("")
 	logSaveBtn := widget.NewButtonWithIcon("保存日志配置", theme.ConfirmIcon(), a.saveLogConfig)
 
@@ -432,6 +460,7 @@ func (a *App) buildSettingsPage() {
 		formItem("日志目录", a.logDirLabel),
 		logDirBtn,
 		logSaveBtn,
+		logDirOpenBtn, // 打开日志目录放在"保存日志配置"下方
 	)
 
 	// ---- 常规 ----
@@ -628,6 +657,12 @@ func (a *App) setCallUI(state int, remote string) {
 	// 记录一次——状态间切换或重复事件不会覆盖记录）
 	if state != uiIdle && a.uiState == uiIdle {
 		a.mainWasVisible = a.isMainWindowVisible()
+		// 更新提示窗与通话面板都吸附右下角，通话期间先收起提示窗
+		//（通话结束后按 pending 补弹，REQ-UPD-003）
+		if a.updShown {
+			a.hideUpdatePopup()
+			a.updatePopupPending = true
+		}
 	}
 	a.uiState = state
 	switch state {
@@ -649,6 +684,11 @@ func (a *App) setCallUI(state int, remote string) {
 			a.mainShown = true
 			a.mainW.RequestFocus()
 			a.bringMainToFront() // 恢复显示时带到前台
+		}
+		// 通话期间挂起的更新提示窗：通话结束后补弹
+		if a.updatePopupPending {
+			a.updatePopupPending = false
+			a.showUpdatePopup()
 		}
 
 	case uiDialing:
@@ -712,7 +752,7 @@ func (a *App) setKeypadEnabled(enabled bool) {
 
 // updateCallButton 按通话状态更新呼叫按钮外观与行为：
 // 呼叫态=绿底黑字黑图标；挂断态=红底白字白图标
-//（文字颜色固定，不随主题变化，REQ-UI-024 修订）。
+// （文字颜色固定，不随主题变化，REQ-UI-024 修订）。
 func (a *App) updateCallButton() {
 	if a.activeCallID != "" {
 		a.callBtn.SetText("挂断")
@@ -780,10 +820,22 @@ func (a *App) buildTray() {
 
 // trayIcon 按注册状态返回托盘图标：未注册红、已注册绿（REQ-UI-011）。
 func (a *App) trayIcon() fyne.Resource {
-	if a.regState == "registered" {
+	if a.trayRegistered {
 		return IconPhoneGreen
 	}
 	return IconPhoneRed
+}
+
+// setRegState 记录注册状态：托盘图标只在"注册成功"与"失败/未注册"之间
+// 切换，续注册（registering）保持原色。
+func (a *App) setRegState(state string) {
+	a.regState = state
+	switch state {
+	case "registered":
+		a.trayRegistered = true
+	case "failed", "unregistered":
+		a.trayRegistered = false
+	}
 }
 
 // updateWindowTitle 标题栏与托盘悬停提示："mti-sip-phone - 本机号码"。
@@ -816,7 +868,7 @@ func (a *App) subscribeEvents() {
 	// 事件之前已完成（启动即注册），依赖事件流会导致界面状态不准确。
 	// regLabel 显示本机号码（不是状态文本）；状态由圆点颜色表示。
 	st := a.core.State()
-	a.regState = string(st.Register.State)
+	a.setRegState(string(st.Register.State))
 	if a.regDot != nil {
 		a.regDot.setState(a.regState)
 	}
@@ -837,10 +889,14 @@ func (a *App) subscribeEvents() {
 // onEvent 处理核心事件（在 Fyne 主线程执行）。
 func (a *App) onEvent(ev core.Event) {
 	switch ev.Name {
+	case "system.update":
+		if st, ok := ev.Data.(core.UpdateStatus); ok {
+			a.onUpdateStatus(st)
+		}
 	case "register.state":
 		if data, ok := ev.Data.(map[string]any); ok {
 			if state, ok := data["state"].(string); ok {
-				a.regState = state
+				a.setRegState(state)
 				a.regDot.setState(state)
 				if account, ok := data["account"].(string); ok {
 					a.regLabel.SetText(account) // 本机号码
@@ -975,6 +1031,7 @@ func (a *App) showMain() {
 //   - 托盘单击 / 菜单"显示主界面"：true
 //   - 通话面板关闭后拉起主窗口：true
 //   - 点 X 关闭（隐藏到托盘）：false
+//
 // 通话面板显示前记录该标识，关闭后按标识决定是否拉起主窗口。
 // 托盘单击与 X 关闭回调均已由应用接管（见 buildTray），标识可靠。
 func (a *App) isMainWindowVisible() bool {
@@ -1122,16 +1179,86 @@ func (a *App) loadLogConfigIntoForm() {
 	}
 }
 
-// chooseLogDir 选择日志目录。
+// folderDialogResult 系统目录选择对话框的结果：必须把"用户取消"与
+// "系统不可用"分开——取消后再弹一个内置对话框是明显的 bug。
+type folderDialogResult int
+
+const (
+	folderDialogUnavailable folderDialogResult = iota // 系统不支持或打开失败：调用方回退
+	folderDialogPicked                                // 用户选定目录
+	folderDialogCancelled                             // 用户取消：不做任何事
+)
+
+// chooseLogDir 选择日志目录：优先用系统文件夹选择对话框（独立窗口、
+// 可自由缩放）；系统不支持时回退到 Fyne 内置对话框（内嵌在主窗体画布，
+// 空间受 320px 主窗体限制）；用户取消则什么都不做。
+// 系统对话框自身带消息循环会阻塞，必须在后台 goroutine 调用，
+// 结果经 fyne.Do 回主线程。
 func (a *App) chooseLogDir() {
+	go func() {
+		dir, res := showSystemFolderDialog("选择日志目录", a.logDirPath())
+		switch res {
+		case folderDialogPicked:
+			if dir != "" {
+				fyne.Do(func() { a.applyLogDir(dir) })
+			}
+		case folderDialogCancelled:
+			// 用户取消：保持原样
+		default:
+			fyne.Do(a.chooseLogDirFallback)
+		}
+	}()
+}
+
+// chooseLogDirFallback Fyne 内置目录选择对话框（主线程调用）。
+func (a *App) chooseLogDirFallback() {
 	dlg := dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
 		if err != nil || uri == nil {
 			return
 		}
-		a.cfg.Log.Dir = uri.Path()
-		a.logDirLabel.SetText(a.cfg.Log.Dir)
+		a.applyLogDir(uri.Path())
 	}, a.mainW)
 	dlg.Show()
+}
+
+// applyLogDir 应用选中的日志目录（主线程）。
+func (a *App) applyLogDir(dir string) {
+	a.cfg.Log.Dir = dir
+	a.logDirLabel.SetText(dir)
+}
+
+// logDirPath 生效的日志目录：配置了用配置值，否则 <配置目录>/logs
+// （与启动时 logx 的解析保持一致）。
+func (a *App) logDirPath() string {
+	if a.cfg.Log.Dir != "" {
+		return a.cfg.Log.Dir
+	}
+	return filepath.Join(filepath.Dir(a.cfgPath), "logs")
+}
+
+// openLogDir 用系统文件管理器打开日志目录。
+func (a *App) openLogDir() {
+	dir := a.logDirPath()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		a.showInfo("提示", "日志目录不可用：\n"+dir)
+		return
+	}
+	if err := openInFileManager(dir); err != nil {
+		logx.Logger().Warn("打开日志目录失败", "dir", dir, "err", err)
+		a.showInfo("提示", "打开日志目录失败：\n"+err.Error())
+	}
+}
+
+// openInFileManager 在系统文件管理器中打开目录。
+func openInFileManager(path string) error {
+	switch runtime.GOOS {
+	case "windows":
+		// explorer 打开目录后自身会立即退出，忽略其退出码
+		return exec.Command("explorer", path).Start()
+	case "linux":
+		return exec.Command("xdg-open", path).Start()
+	}
+	return fmt.Errorf("当前平台不支持打开文件管理器")
 }
 
 // refreshDevices 刷新音频设备列表（枚举真实系统设备，REQ-MEDIA-002）。

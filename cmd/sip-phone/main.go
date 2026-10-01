@@ -13,9 +13,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,6 +29,7 @@ import (
 	"mti-sip-phone/internal/protocol"
 	"mti-sip-phone/internal/single"
 	"mti-sip-phone/internal/sip"
+	"mti-sip-phone/internal/updater"
 	"mti-sip-phone/internal/wsapi"
 )
 
@@ -78,33 +81,57 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// 自动更新的重启请求：只做标记并取消 ctx，真正的"释放单实例锁 →
+	// 拉起新进程"统一放在退出收尾（spawnNewProcessIfRequested）——必须等
+	// WS/SIP 监听关闭、SIP 注销完成后再启动新进程，否则新进程会把被占用的
+	// WS 端口 +1 写回配置，并与旧进程重复注册。
+	var restartRequested atomic.Bool
+	restart := func() error {
+		restartRequested.Store(true)
+		stop()
+		return nil
+	}
+
 	logx.Logger().Info("mti-sip-phone 启动", "version", core.Version, "config", cfgPath)
 
 	// 4. 注册 sip:// 系统协议（幂等；失败不阻断启动）
-	if exe, err := os.Executable(); err == nil {
-		if err := protocol.RegisterProtocol(exe); err != nil {
+	exePath, exeErr := os.Executable()
+	if exeErr != nil {
+		logx.Logger().Warn("无法获取可执行文件路径，跳过协议注册", "err", exeErr)
+	} else {
+		if err := protocol.RegisterProtocol(exePath); err != nil {
 			logx.Logger().Warn("注册 sip:// 协议失败（可稍后重试）", "err", err)
 		}
 		// 开机自动启动（REQ-UI-022）：按配置同步注册/移除，默认启用
 		if cfg.AutoStart {
-			if err := autostart.Enable(exe); err != nil {
+			if err := autostart.Enable(exePath); err != nil {
 				logx.Logger().Warn("注册开机自启失败", "err", err)
 			} else {
-				logx.Logger().Debug("开机自启已注册", "exe", exe)
+				logx.Logger().Debug("开机自启已注册", "exe", exePath)
 			}
 		} else {
 			if err := autostart.Disable(); err != nil {
 				logx.Logger().Warn("移除开机自启失败", "err", err)
 			}
 		}
-	} else {
-		logx.Logger().Warn("无法获取可执行文件路径，跳过协议注册", "err", err)
 	}
 
 	// 5. 组装核心
 	bus := core.NewBus()
 	app := core.New(cfg, nil, bus)
 	app.SetConfigPath(cfgPath)
+
+	// 自动更新（REQ-UPD-*）：业务前端经 WS 告知新版本，用户在界面上确认后
+	// 下载、替换当前可执行文件并重启。Cleanup 清理上次更新的残留文件，
+	// 必须放在单实例锁之后（避免删到另一实例正在使用的文件）。
+	upd := updater.New(updater.Options{
+		Bus:     bus,
+		ExePath: exePath,
+		Restart: restart,
+		IsBusy:  app.HasActiveCall,
+	})
+	upd.Cleanup()
+	app.SetUpdater(upd)
 
 	// 音频管理器：设备枚举与选择（REQ-MEDIA-002）。
 	// 后端初始化在后台进行（音频服务不可达时 miniaudio 会长时间阻塞），
@@ -194,15 +221,40 @@ func main() {
 	// 9. GUI（无界面模式跳过；runGUI 按构建标签拆分——
 	// headless 构建不含界面层，供纯 Go 交叉编译）。
 	if !*headless {
-		runGUI(app, audioMgr, cfg, cfgPath, ctx, releaseLock)
+		runGUI(app, audioMgr, cfg, cfgPath, ctx, restart)
 		stop()
 		shutdown(app, tel) // 退出前注销 SIP（REQ-ACC-009）
+		spawnNewProcessIfRequested(&restartRequested, exePath, releaseLock)
 		return
 	}
 
 	<-ctx.Done()
 	logx.Logger().Info("收到退出信号，正在关闭")
 	shutdown(app, tel)
+	spawnNewProcessIfRequested(&restartRequested, exePath, releaseLock)
+}
+
+// spawnNewProcessIfRequested 自动更新/重启的收尾：释放单实例锁并拉起新进程。
+// 只能在退出收尾调用（WS/SIP 监听已关闭、SIP 已注销）：先释放锁再启动，
+// 否则新进程因锁冲突转发参数后退出；放在 shutdown 之后则避免 WS 端口漂移
+// 与 SIP 双注册。拉起失败时新版本文件已就位，用户手动启动即可。
+func spawnNewProcessIfRequested(requested *atomic.Bool, exePath string, releaseLock func()) {
+	if !requested.Load() {
+		return
+	}
+	if releaseLock != nil {
+		releaseLock()
+	}
+	if exePath == "" {
+		logx.Logger().Error("无法确定可执行文件路径，重启失败，请手动启动程序")
+		return
+	}
+	cmd := exec.Command(exePath, os.Args[1:]...)
+	if err := cmd.Start(); err != nil {
+		logx.Logger().Error("拉起新进程失败，请手动启动程序", "err", err)
+		return
+	}
+	logx.Logger().Info("已拉起新进程，当前进程退出")
 }
 
 // shutdown 退出清理：注销 SIP 账户（发送 expires=0 的 REGISTER，REQ-ACC-009）。

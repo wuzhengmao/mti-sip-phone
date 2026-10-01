@@ -141,6 +141,27 @@
       </div>
       <p id="noCall" class="state-line">当前没有进行中的通话</p>
     </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>自动更新（演示）</h2>
+      <p class="state-line" id="verLine">当前版本：—</p>
+      <div class="row">
+        <label>版本号</label>
+        <input type="text" id="updVersion" placeholder="如 1.0.3（须高于当前版本）">
+      </div>
+      <div class="row">
+        <label>下载地址</label>
+        <input type="text" id="updUrl" placeholder="http://.../sip-phone-windows-amd64.exe">
+      </div>
+      <div class="row">
+        <label>sha256</label>
+        <input type="text" id="updSha" placeholder="可选，提供则强校验">
+      </div>
+      <div class="row">
+        <button id="btnNotifyUpdate" class="ghost">告知新版本</button>
+      </div>
+      <p class="state-line">模拟业务前端流程：查到更高版本后告知软电话。软电话只会弹窗提示，是否下载/重启由用户在软电话界面上确认。</p>
+    </div>
   </div>
 
   <!-- 右列：事件日志 -->
@@ -186,6 +207,20 @@
   var currentCall = null; // { callId, direction, state }
   var timerHandle = null;
   var establishedAt = null;
+  var buildInfo = { version: '', os: '', arch: '' }; // 软电话版本与平台（状态快照）
+
+  // 版本信息行：当前版本（附更新状态）
+  function updateVersionLine(update) {
+    var text = '当前版本：' + (buildInfo.version || '?') +
+      '（' + (buildInfo.os || '?') + '/' + (buildInfo.arch || '?') + '）';
+    if (update && update.phase && update.phase !== 'idle') {
+      text += ' · 更新: ' + update.phase;
+      if (update.phase === 'downloading' && update.progress) {
+        text += ' ' + update.progress.toFixed(1) + '%';
+      }
+    }
+    $('verLine').textContent = text;
+  }
 
   // ---------------- 事件订阅 ----------------
   sdk.on('connected', function () {
@@ -252,9 +287,25 @@
     addLog('info', data.muted ? '已保持' : '已取消保持');
   });
 
+  // 自动更新状态推送（受理 / 下载进度 / 就绪 / 失败）
+  sdk.on('system.update', function (st) {
+    var msg = '更新状态: ' + st.phase;
+    if (st.info && st.info.version) { msg += ' v' + st.info.version; }
+    if (st.host) { msg += '（来源 ' + st.host + '）'; }
+    if (st.phase === 'downloading' && st.progress) { msg += ' ' + st.progress.toFixed(1) + '%'; }
+    if (st.waitingCall) { msg += '（等通话结束后重启）'; }
+    if (st.error) { msg += ' - ' + st.error; }
+    addLog(st.phase === 'failed' ? 'err' : 'ev', msg);
+    updateVersionLine(st);
+  });
+
   sdk.on('system.state', function (state) {
     // 连接建立时收到的状态快照
     addLog('info', '收到状态快照: ' + JSON.stringify(state));
+    buildInfo.version = state.version || '';
+    buildInfo.os = state.os || '';
+    buildInfo.arch = state.arch || '';
+    updateVersionLine(state.update);
     if (state.register) {
       updateRegister(state.register);
     }
@@ -269,6 +320,22 @@
   });
 
   // ---------------- 控制按钮 ----------------
+
+  // 自动更新演示：模拟业务前端"查到更高版本后告知软电话"
+  $('btnNotifyUpdate').onclick = function () {
+    var info = {
+      version: $('updVersion').value.trim(),
+      url: $('updUrl').value.trim(),
+      sha256: $('updSha').value.trim() || undefined
+    };
+    if (!info.version || !info.url) { addLog('err', '请填写版本号与下载地址'); return; }
+    sdk.notifyUpdate(info).then(function (res) {
+      addLog('ok', '已告知软电话：v' + res.version + '（当前 v' + res.currentVersion +
+        '，状态 ' + res.phase + '）——请在软电话上确认更新');
+    }).catch(function (e) {
+      addLog('err', '告知失败: ' + e.message + (e.code ? '（' + e.code + '）' : ''));
+    });
+  };
 
   $('btnDial').onclick = function () {
     var target = $('dialTarget').value.trim();
