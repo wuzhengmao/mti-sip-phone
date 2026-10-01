@@ -71,6 +71,9 @@ func main() {
 	releaseLock, err := single.Run(lockPath, os.Args[1:])
 	if err != nil {
 		if err == single.ErrAlreadyRunning {
+			// 同时写日志：自更新重启时，新进程若因锁冲突走到这里会静默退出，
+			// 日志是唯一线索（此前只打 stdout，无控制台时看不到）
+			logx.Logger().Warn("检测到已有实例在运行，本进程转发参数后退出", "lock", lockPath, "args", os.Args[1:])
 			fmt.Println("mti-sip-phone 已在运行，参数已转发给现有实例。")
 			os.Exit(0)
 		}
@@ -242,6 +245,7 @@ func spawnNewProcessIfRequested(requested *atomic.Bool, exePath string, releaseL
 	if !requested.Load() {
 		return
 	}
+	logx.Logger().Info("重启收尾：释放单实例锁", "exe", exePath)
 	if releaseLock != nil {
 		releaseLock()
 	}
@@ -250,11 +254,13 @@ func spawnNewProcessIfRequested(requested *atomic.Bool, exePath string, releaseL
 		return
 	}
 	cmd := exec.Command(exePath, os.Args[1:]...)
+	// Unix 侧脱离父进程会话（setsid），避免随父进程/终端退出被终止
+	cmd.SysProcAttr = detachSysProcAttr()
 	if err := cmd.Start(); err != nil {
-		logx.Logger().Error("拉起新进程失败，请手动启动程序", "err", err)
+		logx.Logger().Error("拉起新进程失败，请手动启动程序", "exe", exePath, "err", err)
 		return
 	}
-	logx.Logger().Info("已拉起新进程，当前进程退出")
+	logx.Logger().Info("已拉起新进程，当前进程退出", "pid", cmd.Process.Pid)
 }
 
 // shutdown 退出清理：注销 SIP 账户（发送 expires=0 的 REGISTER，REQ-ACC-009）。
