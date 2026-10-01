@@ -36,6 +36,17 @@ static void sp_close_display(Display *d) {
 	}
 }
 
+// X 显示是否真的可连接：Wayland 会话里 DISPLAY 常被无条件导出，但 Xwayland
+// 未必在跑，此时若强行选 X11 后端会让应用完全起不来，故先探测一次。
+static int sp_display_available(void) {
+	Display *d = XOpenDisplay(NULL);
+	if (d == NULL) {
+		return 0;
+	}
+	XCloseDisplay(d);
+	return 1;
+}
+
 // 工作区（EWMH _NET_WORKAREA 的第一个桌面）：取到返回 1；
 // 属性缺失（非 EWMH WM）时回退整屏尺寸并返回 0。
 static int sp_workarea(Display *d, int *x, int *y, int *w, int *h) {
@@ -98,10 +109,41 @@ static void sp_undecorate(Display *d, Window win) {
 	XFlush(d);
 }
 
-// 向根窗口发 _NET_WM_STATE ClientMessage（action=1 添加状态）
+// 向窗口添加一个 _NET_WM_STATE 状态：既写属性（EWMH 标准形式，XA_ATOM
+// 列表）又发 ClientMessage。
+//
+// 两种形式都要发：ClientMessage 是 X11 窗口管理器处理「运行中变更」的
+// 路径；而 Xwayland 下没有独立的 X11 窗口管理器，消息无人处理（实测任务
+// 栏仍列出通话面板），只能靠属性——合成器（labwc/wlroots 的 XWM）会在
+// 属性变更时读取它。
 static void sp_add_state(Display *d, Window win, const char *name) {
 	Atom state = XInternAtom(d, "_NET_WM_STATE", False);
 	Atom atom = XInternAtom(d, name, False);
+
+	// 1) 属性形式：读出已有列表（最多 8 项）后追加，避免覆盖其它状态
+	Atom list[9];
+	int n = 0;
+	int found = 0;
+	Atom type;
+	int format;
+	unsigned long nitems, after;
+	unsigned char *data = NULL;
+	if (XGetWindowProperty(d, win, state, 0, 8, False, XA_ATOM, &type, &format,
+	                       &nitems, &after, &data) == Success && data != NULL) {
+		unsigned long *v = (unsigned long *)data; // format=32 时按 long 数组返回
+		for (unsigned long i = 0; i < nitems && n < 8; i++) {
+			list[n++] = (Atom)v[i];
+			if ((Atom)v[i] == atom) found = 1;
+		}
+		XFree(data);
+	}
+	if (!found) {
+		list[n++] = atom;
+		XChangeProperty(d, win, state, XA_ATOM, 32, PropModeReplace,
+		                (unsigned char *)list, n);
+	}
+
+	// 2) ClientMessage 形式（action=1 添加状态），发往根窗口
 	XEvent ev;
 	memset(&ev, 0, sizeof(ev));
 	ev.xclient.type = ClientMessage;
@@ -212,6 +254,12 @@ func moveCallWindowToCorner(w fyne.Window) {
 			placeCallWindow(handle, targetW, targetH, scale, contentMin)
 		}
 	}()
+}
+
+// x11DisplayAvailable 探测 $DISPLAY 是否真的可连接（调用点见 glfw_linux.go
+// 的 preferX11OnWayland：Wayland 会话下是否能把后端固定到 X11）。
+func x11DisplayAvailable() bool {
+	return C.sp_display_available() != 0
 }
 
 // callPanelHandle 取通话面板的 X11 窗口号（未创建时返回 0）。

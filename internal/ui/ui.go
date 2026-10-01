@@ -159,6 +159,10 @@ func New(c *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath strin
 // Run 启动界面主循环（阻塞直到退出）。
 // 必须在主 goroutine 调用：Fyne 的 UI 初始化与事件循环要求主线程。
 func (a *App) Run() {
+	// 平台相关的 GLFW 预设置，必须早于第一个窗口创建（Fyne 在
+	// buildMainWindow 时初始化 GLFW）。Linux 侧关闭 libdecor，原因见
+	// glfw_linux.go。
+	prepareGLFW()
 	a.buildMainWindow()
 	a.buildTray()
 	a.subscribeEvents()
