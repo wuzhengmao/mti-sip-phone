@@ -1,10 +1,14 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
+	"image/color"
+	"math"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
@@ -35,8 +39,11 @@ func (a *App) buildCallPanelIfNeeded() {
 	}
 	w := a.fyne.NewWindow("通话")
 	a.callW = w
-	w.SetIcon(IconPhoneGreen) // 标题栏绿色话机（不继承应用红色图标）
-	// 关闭面板 = 挂断
+	w.SetIcon(IconPhoneGreen) // 任务栏绿色话机（不继承应用红色图标）
+	// 无标题栏、无关闭按钮，仅显示窗体内容（REQ-UI-024 修订）：
+	// fyne 公开 API 无 SetDecorated，窗口装饰在 Show 后由
+	// positionCallWindow（stripCallWindowChrome）通过 Win32 样式移除
+	// 关闭面板（Alt+F4 等）= 挂断
 	w.SetCloseIntercept(func() {
 		if a.activeCallID != "" {
 			_ = a.core.Hangup(a.activeCallID)
@@ -47,26 +54,25 @@ func (a *App) buildCallPanelIfNeeded() {
 	a.callStateLabel = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{})
 	a.callTimerLabel = widget.NewLabelWithStyle("00:00", fyne.TextAlignLeading, fyne.TextStyle{})
 
-	// 红色方块：挂断（DangerImportance 红色填充 + 停止图标）
-	a.hangupBtn = widget.NewButtonWithIcon("", theme.MediaStopIcon(), func() {
+	// 紧凑按钮（尺寸取平台常量，REQ-UI-025 修订）：fyne Button 跟随主题
+	// 内边距高达 48px，用自定义 compactButton 缩小面板按钮
+	a.hangupBtn = newCompactButton(IconStopWhite, colorDangerRed, callPanelButtonSize, func() {
 		if a.activeCallID != "" {
 			_ = a.core.Hangup(a.activeCallID)
 		}
 	})
-	a.hangupBtn.Importance = widget.DangerImportance
 
 	// 绿色电话：接听
-	a.answerBtn = widget.NewButtonWithIcon("", IconPhoneBlack, func() {
+	a.answerBtn = newCompactButton(IconPhoneWhite, colorSuccessGreen, callPanelButtonSize, func() {
 		if a.activeCallID != "" {
 			if err := a.core.Answer(a.activeCallID); err != nil {
 				logx.Logger().Warn("接听失败", "err", err)
 			}
 		}
 	})
-	a.answerBtn.Importance = widget.SuccessImportance
 
 	// 黄色 ||：通话保持切换（保持语义：本端停止发送音频，再次点击恢复）
-	a.holdBtn = widget.NewButtonWithIcon("", theme.MediaPauseIcon(), func() {
+	a.holdBtn = newCompactButton(IconPauseWhite, colorHoldYellow, callPanelButtonSize, func() {
 		if a.activeCallID == "" {
 			return
 		}
@@ -77,14 +83,26 @@ func (a *App) buildCallPanelIfNeeded() {
 			logx.Logger().Warn("保持切换失败", "err", err)
 		}
 	})
-	a.holdBtn.Importance = widget.WarningImportance
 
-	// 三行内容容器：内容在每次进入状态时由 rebuildCallRows 重建
-	a.callRows = container.NewVBox()
+	// 扬声器开关（REQ-UI-023）：默认开=蓝底白图标，关=灰底红图标
+	a.speakerBtn = newCompactButton(IconSpeakerOn, colorHoldBlue, callPanelButtonSize, a.toggleSpeaker)
+
+	// 麦克风开关（REQ-UI-023）
+	a.micBtn = newCompactButton(IconMicOn, colorHoldBlue, callPanelButtonSize, a.toggleMic)
+
+	// 三行内容容器：内容在每次进入状态时由 rebuildCallRows 重建。
+	// 用 Stack：振铃底色闪烁矩形与内容层平铺为兄弟、撑满整个窗口
+	//（REQ-UI-025 修订）；内容层为 Border（窗口
+	// 内容会撑满画布，Border 的中心区→网格→三行等分填满窗口）
+	a.callRows = container.NewStack()
 	w.SetContent(a.callRows)
-	// 宽度需容纳完整标题"通话面板 - 1001"（最小化/最大化按钮移除后
-	// 释放非客户区空间，标题不再被截断）
-	w.Resize(fyne.NewSize(260, 156))
+	// 关闭画布内边距：四周留白由 rebuildCallRows 统一控制，
+	// 避免与主题 padding 叠加导致视觉不一致（REQ-UI-025 修订）
+	w.SetPadded(false)
+	// 尺寸取平台常量（Windows 见 topmost_windows.go，Linux 见
+	// topmost_linux.go）；Windows 下窗口尺寸再由 positionCallWindow
+	// 通过窗口过程钳制精确固定
+	w.Resize(fyne.NewSize(callPanelWidth, callPanelHeight))
 
 	// 通话面板始终置顶
 	if dw, ok := w.(desktop.Window); ok {
@@ -93,11 +111,45 @@ func (a *App) buildCallPanelIfNeeded() {
 }
 
 // startRingShake 振铃提醒：FlashWindowEx 任务栏闪烁 + SetForegroundWindow
-// 抢前台 + DWM 边框多色轮换闪烁（内容不随动）。标题保持
-// "通话面板 - 号码"不变（各状态一致）。
-func (a *App) startRingShake() {
+// 抢前台 + 底色灰度轮换闪烁（内容不随动）。
+// 标题保持 "通话面板 - 号码"不变（各状态一致）。
+func (a *App) startRingShake(grays []color.NRGBA) {
 	a.stopRingShake()
 	a.pulseStop = make(chan struct{})
+	stop := a.pulseStop
+
+	// 无边框窗口底色灰度闪烁（DWM 着色边框不可见）：
+	// 16 档往返脉动（1→16→15→…→1），75ms 一档，平滑无跳跃感
+	//（REQ-UI-025 修订）
+	go func() {
+		ticker := time.NewTicker(75 * time.Millisecond)
+		defer ticker.Stop()
+		// 往返索引序列：0,1,…,15,14,…,1 循环
+		order := make([]int, 0, 30)
+		for i := 0; i < len(grays); i++ {
+			order = append(order, i)
+		}
+		for i := len(grays) - 2; i >= 1; i-- {
+			order = append(order, i)
+		}
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				fyne.Do(func() {
+					if a.ringFlashRect == nil {
+						return
+					}
+					a.ringFlashRect.FillColor = grays[order[i%len(order)]]
+					a.ringFlashRect.Refresh()
+				})
+				i++
+			}
+		}
+	}()
+
 	// 窗口句柄可能在 Show 后异步创建，带重试
 	go func() {
 		var hwnd uintptr
@@ -126,64 +178,327 @@ func (a *App) stopRingShake() {
 	}
 }
 
-// updateCallWindowTitle 通话面板标题："通话面板 - 本机号码"。
+// updateCallWindowTitle 通话面板标题：文案按平台生成（见各平台
+// topmost_*.go 的 callWindowTitle）——Windows 用「通话面板 - 号码」，
+// Linux 用 ASCII 的「SIP - 号码」。
 func (a *App) updateCallWindowTitle() {
 	if a.callW == nil {
 		return
 	}
-	account := a.core.State().Register.Account
-	title := "通话面板"
-	if account != "" {
-		title += " - " + account
-	}
-	a.callW.SetTitle(title)
+	a.callW.SetTitle(callWindowTitle(a.core.State().Register.Account))
 }
 
 // rebuildCallRows 按状态重建通话面板三行内容：
 //   - 行1：对端号码（振铃加接听按钮、通话加保持按钮，靠右）
 //   - 行2：状态文字 + 挂断按钮（挂断恒在行2最右）
-//   - 行3：时长
+//   - 行3：时长（通话中加扬声器/麦克风开关，靠右，REQ-UI-023）
 func (a *App) rebuildCallRows(mode int) {
 	if a.callRows == nil {
 		return
 	}
 	a.callRows.Objects = nil
 
-	row1 := container.NewHBox(a.callNameLabel, layout.NewSpacer())
-	row2 := container.NewHBox(a.callStateLabel, layout.NewSpacer(), a.hangupBtn)
-	row3 := container.NewHBox(a.callTimerLabel)
+	row1 := container.NewHBox(centerBox(a.callNameLabel), layout.NewSpacer())
+	row2 := container.NewHBox(centerBox(a.callStateLabel), layout.NewSpacer(), centerBox(a.hangupBtn))
+	// 行3：时长 + 扬声器/麦克风开关（三态都显示，REQ-UI-023 修订）
+	row3 := container.NewHBox(centerBox(a.callTimerLabel), layout.NewSpacer(),
+		centerBox(a.speakerBtn), centerBox(a.micBtn))
 
 	switch mode {
 	case dialingButtons:
 		a.stopRingShake()
+		a.ringFlashRect = nil
 	case ringingButtons:
-		row1.Add(a.answerBtn)
-		a.startRingShake()
+		row1.Add(centerBox(a.answerBtn))
+		// 无边框窗口的 DWM 着色边框不可见：改为整窗底色灰度闪烁
+		//（REQ-UI-025 修订）
+		grays := a.ringFlashGrays()
+		a.ringFlashRect = newRingFlashRect(grays)
+		a.startRingShake(grays)
 	case incallButtons:
 		a.stopRingShake()
-		row1.Add(a.holdBtn)
+		a.ringFlashRect = nil
+		row1.Add(centerBox(a.holdBtn))
+		// 通话建立：把会话内记忆的开关状态下发到当前通话引擎
+		//（引擎按通话创建，每次通话建立需重新下发）
+		a.applySessionAudioState()
 	}
 
-	a.callRows.Add(row1)
-	a.callRows.Add(row2)
-	a.callRows.Add(row3)
+	// 布局（REQ-UI-025 修订）：左右 8px 留白、行间 2px 空隙、上下
+	// 0px——三行由 GridWithRows 三等分撑满窗口（fyne/GLFW 附加的
+	// "幽灵标题栏高度"吸收进行高），行内容垂直居中余量 ≈7px，
+	// 加上下 1px 行距垫 = 8px，与左右留白视觉一致。
+	row1P := vPad(row1, 1)
+	row2P := vPad(row2, 1)
+	row3P := vPad(row3, 1)
+	grid := container.NewGridWithRows(3, row1P, row2P, row3P)
+
+	// 内容层：四周 4px 留白的 Border，中心为三行网格
+	border := container.NewBorder(padRect(4), padRect(4), padRect(4), padRect(4), grid)
+
+	// 振铃态：底色闪烁矩形与内容层平铺为兄弟（矩形撑满整个窗口，
+	// 必须放在内容层**下方**——在上方会盖住文字与按钮）
+	if a.ringFlashRect != nil {
+		a.callRows.Objects = []fyne.CanvasObject{a.ringFlashRect, border}
+	} else {
+		a.callRows.Objects = []fyne.CanvasObject{border}
+	}
 	a.callRows.Refresh()
 }
 
-// setHoldButton 保持状态变化时更新黄色 || 按钮外观与状态文案。
+// vPad 给对象上下加指定透明留白（两行各 1px 拼出 2px 行距）。
+func vPad(obj fyne.CanvasObject, s float32) fyne.CanvasObject {
+	return container.NewBorder(padRect(s), padRect(s), nil, nil, obj)
+}
+
+// centerBox 内容保持自然尺寸并在行内垂直居中——Grid 撑高行时
+// HBox 会把子组件纵向拉伸到行高，包一层 Center 避免按钮被拉长
+//（REQ-UI-025 修订）。
+func centerBox(obj fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewCenter(obj)
+}
+
+// 通话面板按钮配色（与主界面主题色观感一致）。
+var (
+	colorDangerRed    = color.NRGBA{R: 0xe5, G: 0x39, B: 0x35, A: 0xff} // 挂断
+	colorSuccessGreen = color.NRGBA{R: 0x43, G: 0xa0, B: 0x47, A: 0xff} // 接听/呼叫
+	colorHoldYellow   = color.NRGBA{R: 0xfb, G: 0xc0, B: 0x2d, A: 0xff} // 保持
+	colorHoldBlue     = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff} // 取消保持/开关开
+	colorSwitchGray   = color.NRGBA{R: 0xbd, G: 0xbd, B: 0xbd, A: 0xff} // 开关关
+	colorIconBlack    = color.NRGBA{R: 0x1a, G: 0x1a, B: 0x1a, A: 0xff} // 呼叫按钮文字（固定黑）
+	colorIconWhite    = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff} // 挂断态文字（红底白字）
+)
+
+// compactButton 通话面板紧凑按钮（REQ-UI-025 修订）：默认 36×36
+//（20px 图标 + 8px 内边距），圆角底色 + 居中图标，可选文字
+//（主窗体呼叫按钮用，文字颜色固定不随主题变化）。
+// fyne Button 的尺寸跟随主题内边距（拨号盘主题为 12px，按钮高达
+// 48px），且文字颜色随主题（浅色主题下 Success 按钮文字为白色），
+// 均无法单独控制，故用自定义组件。
+// 尺寸由调用方指定：通话面板取平台常量 callPanelButtonSize（面板行高
+// 由它决定），主窗体呼叫按钮固定 36。
+type compactButton struct {
+	widget.BaseWidget
+	bg    *canvas.Rectangle
+	icon  *canvas.Image
+	label *canvas.Text // 可选文字
+	onTap func()
+}
+
+func newCompactButton(iconRes fyne.Resource, bgColor color.NRGBA, size float32, onTap func()) *compactButton {
+	b := &compactButton{onTap: onTap}
+	b.bg = canvas.NewRectangle(bgColor)
+	b.bg.CornerRadius = 6
+	b.bg.SetMinSize(fyne.NewSize(size, size))
+	b.icon = canvas.NewImageFromResource(iconRes)
+	b.icon.FillMode = canvas.ImageFillContain
+	// 图标按比例缩放（36 → 20px，与原值一致）
+	iconSize := float32(math.Round(float64(size) * 0.55))
+	b.icon.SetMinSize(fyne.NewSize(iconSize, iconSize))
+	b.ExtendBaseWidget(b)
+	return b
+}
+
+// newCompactTextButton 带文字的紧凑按钮（主窗体呼叫按钮用）：
+// 文字颜色固定传入值，不随主题变化。尺寸固定 36，不随平台变化。
+func newCompactTextButton(text string, iconRes fyne.Resource, bgColor, labelColor color.NRGBA, onTap func()) *compactButton {
+	b := newCompactButton(iconRes, bgColor, 36, onTap)
+	b.label = canvas.NewText(text, labelColor)
+	b.label.TextSize = 14
+	return b
+}
+
+func (b *compactButton) CreateRenderer() fyne.WidgetRenderer {
+	if b.label != nil {
+		return widget.NewSimpleRenderer(container.NewStack(b.bg,
+			container.NewCenter(container.NewHBox(
+				container.NewCenter(b.icon), container.NewCenter(b.label)))))
+	}
+	return widget.NewSimpleRenderer(container.NewStack(b.bg, container.NewCenter(b.icon)))
+}
+
+// SetIcon 更新图标。
+func (b *compactButton) SetIcon(res fyne.Resource) {
+	b.icon.Resource = res
+	b.icon.Refresh()
+}
+
+// SetText 更新按钮文字（无文字按钮忽略）。
+func (b *compactButton) SetText(text string) {
+	if b.label != nil {
+		b.label.Text = text
+		b.label.Refresh()
+	}
+}
+
+// SetLabelColor 更新文字颜色（呼叫/挂断态切换用）。
+func (b *compactButton) SetLabelColor(c color.NRGBA) {
+	if b.label != nil {
+		b.label.Color = c
+		b.label.Refresh()
+	}
+}
+
+// SetBg 更新底色。
+func (b *compactButton) SetBg(c color.NRGBA) {
+	b.bg.FillColor = c
+	b.bg.Refresh()
+}
+
+func (b *compactButton) Tapped(*fyne.PointEvent) {
+	if b.onTap != nil {
+		b.onTap()
+	}
+}
+
+func (b *compactButton) Cursor() desktop.Cursor { return desktop.PointerCursor }
+
+// 振铃边框闪烁颜色序列（COLORREF 即 0x00BBGGRR）：红、橙、绿、青、蓝、紫。
+// 保留给 Win32 DWM 边框路径（无边框窗口上不可见，已由底色闪烁替代）。
+var ringBorderColors = []uint32{
+	0x000000FF, // 红
+	0x0000A5FF, // 橙
+	0x0000FF00, // 绿
+	0x00FFFF00, // 青
+	0x00FF0000, // 蓝
+	0x00FF00FF, // 紫
+}
+
+// ringFlashGrays 从当前主题背景色推导振铃闪烁灰度序列（REQ-UI-025 修订）：
+// 16 档、每档 4 色阶——平滑往返脉动。
+// 方向按背景亮度决定：深色主题（白字）向**更亮**方向走，浅色主题
+//（黑字）向**更暗**方向走；若固定向亮方向走，浅色背景（近白）会
+// 全部封顶在 255 导致不闪烁（历史 bug）。
+func (a *App) ringFlashGrays() []color.NRGBA {
+	bg := a.fyne.Settings().Theme().Color(theme.ColorNameBackground, a.fyne.Settings().ThemeVariant())
+	r, g, b, _ := bg.RGBA()
+	base := color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: 0xff}
+	light := (int(base.R) + int(base.G) + int(base.B)) > 382 // 浅色背景：调暗
+	grays := make([]color.NRGBA, 16)
+	for i := range grays {
+		d := i * 4
+		if light {
+			d = -d
+		}
+		grays[i] = color.NRGBA{
+			R: clampByte(int(base.R) + d),
+			G: clampByte(int(base.G) + d),
+			B: clampByte(int(base.B) + d),
+			A: 0xff,
+		}
+	}
+	return grays
+}
+
+// clampByte 把颜色通道值限制在 0-255。
+func clampByte(v int) uint8 {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return uint8(v)
+}
+
+// newRingFlashRect 振铃底色闪烁矩形：实心填充（序列首色），置于
+// 内容层下方撑满整个窗口，随闪烁序列轮换填充色（REQ-UI-025 修订）。
+func newRingFlashRect(grays []color.NRGBA) *canvas.Rectangle {
+	return canvas.NewRectangle(grays[0])
+}
+
+// padRect 指定尺寸的透明占位矩形。
+func padRect(s float32) fyne.CanvasObject {
+	r := canvas.NewRectangle(color.Transparent)
+	r.SetMinSize(fyne.NewSize(s, s))
+	return r
+}
+
+// toggleSpeaker 扬声器开关切换（REQ-UI-023）。
+// 引擎存在则立即生效（呼叫状态 183 早期媒体下即可屏蔽回铃音）；
+// 引擎未建立（呼入振铃/呼出 180 阶段）时 ErrCallNotFound 静默忽略，
+// 状态在通话建立时由 applySessionAudioState 统一下发。
+func (a *App) toggleSpeaker() {
+	a.speakerOn = !a.speakerOn
+	a.applySpeakerButton()
+	if a.activeCallID != "" {
+		if err := a.core.MuteSpeaker(a.activeCallID, !a.speakerOn); err != nil && !errors.Is(err, core.ErrCallNotFound) {
+			logx.Logger().Warn("扬声器切换失败", "err", err)
+		}
+	}
+}
+
+// toggleMic 麦克风开关切换（REQ-UI-023）。下发时机同 toggleSpeaker。
+func (a *App) toggleMic() {
+	a.micOn = !a.micOn
+	a.applyMicButton()
+	if a.activeCallID != "" {
+		if err := a.core.MuteMic(a.activeCallID, !a.micOn); err != nil && !errors.Is(err, core.ErrCallNotFound) {
+			logx.Logger().Warn("麦克风切换失败", "err", err)
+		}
+	}
+}
+
+// applySessionAudioState 把会话内记忆的扬声器/麦克风状态应用到当前通话。
+// 通话结束后引擎随之销毁，新通话建立时重新下发（状态本身不重置）。
+// 引擎尚未创建（呼入振铃）时静默跳过，接通后再次调用即可生效。
+func (a *App) applySessionAudioState() {
+	if a.activeCallID == "" {
+		return
+	}
+	if err := a.core.MuteSpeaker(a.activeCallID, !a.speakerOn); err != nil && !errors.Is(err, core.ErrCallNotFound) {
+		logx.Logger().Warn("应用扬声器状态失败", "err", err)
+	}
+	if err := a.core.MuteMic(a.activeCallID, !a.micOn); err != nil && !errors.Is(err, core.ErrCallNotFound) {
+		logx.Logger().Warn("应用麦克风状态失败", "err", err)
+	}
+}
+
+// applySpeakerButton 按开关状态更新扬声器按钮外观（REQ-UI-023 修订）：
+// 开 = 蓝色底 + 白色图标；关 = 灰色底 + 红色图标。
+func (a *App) applySpeakerButton() {
+	if a.speakerBtn == nil {
+		return
+	}
+	if a.speakerOn {
+		a.speakerBtn.SetIcon(IconSpeakerOn)
+		a.speakerBtn.SetBg(colorHoldBlue)
+	} else {
+		a.speakerBtn.SetIcon(IconSpeakerOff)
+		a.speakerBtn.SetBg(colorSwitchGray)
+	}
+	a.speakerBtn.Refresh()
+}
+
+// applyMicButton 按开关状态更新麦克风按钮外观（同扬声器：开蓝底白图标、关灰底红图标）。
+func (a *App) applyMicButton() {
+	if a.micBtn == nil {
+		return
+	}
+	if a.micOn {
+		a.micBtn.SetIcon(IconMicOn)
+		a.micBtn.SetBg(colorHoldBlue)
+	} else {
+		a.micBtn.SetIcon(IconMicOff)
+		a.micBtn.SetBg(colorSwitchGray)
+	}
+	a.micBtn.Refresh()
+}
+
+// setHoldButton 保持状态变化时更新保持按钮外观与状态文案。
 func (a *App) setHoldButton(muted bool) {
 	if a.holdBtn == nil {
 		return
 	}
 	if muted {
-		a.holdBtn.SetIcon(theme.MediaReplayIcon()) // 保持中：恢复图标
-		a.holdBtn.Importance = widget.HighImportance
+		a.holdBtn.SetIcon(IconReplayWhite) // 保持中：恢复图标
+		a.holdBtn.SetBg(colorHoldBlue)
 		if a.callStateLabel != nil {
 			a.callStateLabel.SetText("通话保持中")
 		}
 	} else {
-		a.holdBtn.SetIcon(theme.MediaPauseIcon())
-		a.holdBtn.Importance = widget.WarningImportance
+		a.holdBtn.SetIcon(IconPauseWhite)
+		a.holdBtn.SetBg(colorHoldYellow)
 		if a.callStateLabel != nil {
 			a.callStateLabel.SetText("通话中")
 		}

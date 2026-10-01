@@ -8,6 +8,9 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"fyne.io/fyne/v2"
+
 )
 
 // setTopMost 设置主窗口是否置顶（REQ-UI-008）。
@@ -35,51 +38,172 @@ func setTopMost(on bool) {
 	setWindowPos.Call(hwnd, insertAfter, 0, 0, 0, 0, swpNoMove|swpNoSize)
 }
 
+// callWindowTitle 通话面板标题（中文）：findWindowByTitlePrefix 依赖
+// 「通话面板」前缀定位窗口，Windows 下保持原样。
+func callWindowTitle(account string) string {
+	title := "通话面板"
+	if account != "" {
+		title += " - " + account
+	}
+	return title
+}
+
+// markTrayQuit Windows 侧不打 IsQuit 标记（保持现状：Fyne 会补 Quit 项）。
+func markTrayQuit(item *fyne.MenuItem) {}
+
+// 通话面板固定尺寸（DIP，与 buildCallPanelIfNeeded 的 Resize 保持一致）：
+// 126 = 上下 4px 留白 + 行距 2×2px + 三行各 38px（36 紧凑按钮 + 2 行距垫）。
+const (
+	callPanelWidth      = 260
+	callPanelHeight     = 126
+	callPanelButtonSize = 36
+)
+
 // moveCallWindowToCorner 把通话面板移动到屏幕右下角（留 16px 边距），
-// 并去除最小化/最大化按钮。Fyne Show 后窗口异步创建，带重试。
+// 并去除窗口装饰。Fyne Show 后窗口异步创建，带重试。
 // 注意：必须按"通话面板"前缀查找（此前用精确标题"通话"，标题改为
 // "通话面板 - 号码"后永远匹配不到，定位从未生效——bug 修复）。
-func moveCallWindowToCorner(_ any) {
+func moveCallWindowToCorner(w fyne.Window) {
+	// 目标物理尺寸 = DIP 尺寸 × 系统缩放
+	scale := w.Canvas().Scale()
+	width := uintptr(callPanelWidth * scale)
+	height := uintptr(callPanelHeight * scale)
 	for i := 0; i < 20; i++ {
 		if hwnd := findWindowByTitlePrefix("通话面板"); hwnd != 0 {
-			positionCallWindow(hwnd)
+			positionCallWindow(hwnd, width, height)
+			// Show 后 fyne/GLFW 可能异步再调窗口尺寸，一次校正不够——
+			// 延后两次重新校正位置与尺寸（REQ-UI-025 修订）
+			go func() {
+				time.Sleep(150 * time.Millisecond)
+				if h := findWindowByTitlePrefix("通话面板"); h != 0 {
+					positionCallWindow(h, width, height)
+				}
+				time.Sleep(350 * time.Millisecond)
+				if h := findWindowByTitlePrefix("通话面板"); h != 0 {
+					positionCallWindow(h, width, height)
+				}
+			}()
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 }
 
-// positionCallWindow 定位通话面板：收紧窗口样式 + 移动到工作区右下角 + 置顶。
-func positionCallWindow(hwnd uintptr) {
-	stripMinMaxButtons(hwnd)
+// positionCallWindow 定位通话面板：收紧窗口样式 + 固定尺寸 + 移动到
+// 工作区右下角 + 置顶。尺寸通过窗口过程子类化钳制——GLFW 每次
+// SetSize 附加的"幽灵标题栏高度"在 WM_WINDOWPOSCHANGING 中被强制
+// 拉回目标值，窗口尺寸精确可控（REQ-UI-025 修订）。
+func positionCallWindow(hwnd, width, height uintptr) {
+	stripCallWindowChrome(hwnd)
+	setCallWindowClamp(hwnd, int32(width), int32(height))
 
 	user32 := syscall.NewLazyDLL("user32.dll")
-	getWindowRect := user32.NewProc("GetWindowRect")
 	setWindowPos := user32.NewProc("SetWindowPos")
 
-	type rect struct{ left, top, right, bottom int32 }
-	var winRect, workRect rect
-	getWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&winRect)))
-
 	// 工作区尺寸（不含任务栏）：SystemParametersInfo SPI_GETWORKAREA
+	type rect struct{ left, top, right, bottom int32 }
+	var workRect rect
 	systemParametersInfo := user32.NewProc("SystemParametersInfoW")
 	const spiGetWorkArea = 0x0030
 	systemParametersInfo.Call(spiGetWorkArea, 0, uintptr(unsafe.Pointer(&workRect)), 0)
 
-	w := winRect.right - winRect.left
-	h := winRect.bottom - winRect.top
-	x := workRect.right - w - 16
-	y := workRect.bottom - h - 16
+	x := workRect.right - int32(width) - 16
+	y := workRect.bottom - int32(height) - 16
 	const (
 		hwndTopMost = ^uintptr(0)
-		swpNoSize   = 0x0001
 		swpShowWin  = 0x0040
 	)
-	setWindowPos.Call(hwnd, hwndTopMost, uintptr(x), uintptr(y), 0, 0, swpNoSize|swpShowWin)
+	setWindowPos.Call(hwnd, hwndTopMost, uintptr(x), uintptr(y), width, height, swpShowWin)
 }
 
-// stripMinMaxButtons 从窗口样式中移除最小化/最大化按钮（通话面板不需要）。
-func stripMinMaxButtons(hwnd uintptr) {
+// 窗口过程子类化：钳制窗口尺寸（对抗 GLFW 的幽灵标题栏高度）。
+// 仅需安装一次（窗口只创建一次，重复调用仅更新目标尺寸）。
+var (
+	callWndProcOriginal uintptr
+	callClampWidth      int32
+	callClampHeight     int32
+)
+
+// setCallWindowClamp 安装/更新通话面板窗口尺寸钳制。
+func setCallWindowClamp(hwnd uintptr, width, height int32) {
+	callClampWidth, callClampHeight = width, height
+	if callWndProcOriginal != 0 {
+		return
+	}
+	user32 := syscall.NewLazyDLL("user32.dll")
+	// SetWindowLongPtrW 是 64 位专属导出：32 位 user32.dll 里没有这个
+	// 符号（32 位的 SetWindowLongPtr 只是指向 SetWindowLongW 的宏），
+	// LazyProc.Call 找不到过程会直接 panic——GUI 子系统无控制台，
+	// 表现为"呼出弹出通话面板即崩溃"（32 位构建历史 bug）。
+	// 32 位下 LONG_PTR 与 LONG 同宽，退化用 SetWindowLongW 语义等价。
+	setWindowLongPtr := user32.NewProc("SetWindowLongPtrW")
+	if setWindowLongPtr.Find() != nil {
+		setWindowLongPtr = user32.NewProc("SetWindowLongW")
+	}
+	const gwlWndProc = ^uintptr(3) // GWLP_WNDPROC = -4
+	callWndProcOriginal, _, _ = setWindowLongPtr.Call(
+		hwnd, gwlWndProc, syscall.NewCallback(callWndProc))
+}
+
+// callWndProc 通话面板窗口过程：拦截 WM_WINDOWPOSCHANGING，
+// 把带尺寸的请求钳制为目标尺寸，其余消息原样转发。
+func callWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
+	const (
+		wmWindowPosChanging = 0x0046
+		wmGetMinMaxInfo     = 0x0024
+		swpNoSize           = 0x0001
+	)
+	user32 := syscall.NewLazyDLL("user32.dll")
+	callWindowProc := user32.NewProc("CallWindowProcW")
+
+	// WM_GETMINMAXINFO 必须先转发给原过程（GLFW 会按自己的窗口状态
+	// 写入最小/最大跟踪尺寸），转发后再覆盖为目标尺寸——否则 GLFW
+	// 的写入会顶掉我们的钳制（此前窗口被顶回 335 的根因）
+	if msg == wmGetMinMaxInfo && lParam != 0 {
+		r, _, _ := callWindowProc.Call(callWndProcOriginal, hwnd, uintptr(msg), wParam, lParam)
+		mmi := (*minMaxInfo)(unsafe.Pointer(lParam))
+		mmi.maxSizeX = callClampWidth
+		mmi.maxSizeY = callClampHeight
+		mmi.minTrackX = callClampWidth
+		mmi.minTrackY = callClampHeight
+		mmi.maxTrackX = callClampWidth
+		mmi.maxTrackY = callClampHeight
+		return r
+	}
+
+	if msg == wmWindowPosChanging && lParam != 0 {
+		wp := (*windowPos)(unsafe.Pointer(lParam))
+		if wp.flags&swpNoSize == 0 {
+			wp.cx = callClampWidth
+			wp.cy = callClampHeight
+		}
+	}
+	r, _, _ := callWindowProc.Call(callWndProcOriginal, hwnd, uintptr(msg), wParam, lParam)
+	return r
+}
+
+// windowPos WINDOWPOS 结构（x64 布局，共 36 字节）。
+type windowPos struct {
+	hwnd            uintptr
+	hwndInsertAfter uintptr
+	x, y, cx, cy    int32
+	flags           uint32
+}
+
+// minMaxInfo MINMAXINFO 结构（x64 布局）：五个 POINT（各两个 LONG）。
+type minMaxInfo struct {
+	reservedX, reservedY     int32
+	maxSizeX, maxSizeY       int32
+	maxPosX, maxPosY         int32
+	minTrackX, minTrackY     int32
+	maxTrackX, maxTrackY     int32
+}
+
+// stripCallWindowChrome 移除通话面板的窗口装饰（REQ-UI-024 修订）：
+// 标题栏、系统菜单（关闭按钮）、可调边框与最小化/最大化按钮——
+// 面板只显示窗体内容，位置由程序自动放置右下角。
+// fyne 公开 API 无 SetDecorated，这里直接改 Win32 窗口样式。
+func stripCallWindowChrome(hwnd uintptr) {
 	user32 := syscall.NewLazyDLL("user32.dll")
 	getWindowLong := user32.NewProc("GetWindowLongW")
 	setWindowLong := user32.NewProc("SetWindowLongW")
@@ -87,6 +211,9 @@ func stripMinMaxButtons(hwnd uintptr) {
 
 	const (
 		gwlStyle       = ^uintptr(15) // GWL_STYLE = -16
+		wsCaption      = 0x00C00000   // WS_BORDER | WS_DLGFRAME（标题栏）
+		wsSysMenu      = 0x00080000   // 系统菜单（关闭按钮）
+		wsThickFrame   = 0x00040000   // 可调边框
 		wsMinimizeBox  = 0x00020000
 		wsMaximizeBox  = 0x00010000
 		swpFrameChange = 0x0020
@@ -95,7 +222,9 @@ func stripMinMaxButtons(hwnd uintptr) {
 		swpNoZOrder    = 0x0004
 	)
 	style, _, _ := getWindowLong.Call(hwnd, gwlStyle)
-	setWindowLong.Call(hwnd, gwlStyle, style&^(uintptr(wsMinimizeBox)|uintptr(wsMaximizeBox)))
+	style &^= uintptr(wsCaption) | uintptr(wsSysMenu) | uintptr(wsThickFrame) |
+		uintptr(wsMinimizeBox) | uintptr(wsMaximizeBox)
+	setWindowLong.Call(hwnd, gwlStyle, style)
 	// 通知系统重绘非客户区，使样式立即生效
 	setWindowPos.Call(hwnd, 0, 0, 0, 0, 0, swpFrameChange|swpNoMove|swpNoSize|swpNoZOrder)
 }
@@ -185,18 +314,10 @@ func forceForegroundWindow(hwnd uintptr) {
 // 振铃边框彩色闪烁（DWM 边框颜色，Windows 11）
 // ---------------------------------------------------------------------------
 
-// 振铃边框轮换的颜色序列（COLORREF 即 0x00BBGGRR）：红、橙、绿、青、蓝、紫。
-var ringBorderColors = []uint32{
-	0x000000FF, // 红
-	0x0000A5FF, // 橙
-	0x0000FF00, // 绿
-	0x00FFFF00, // 青
-	0x00FF0000, // 蓝
-	0x00FF00FF, // 紫
-}
-
 // setWindowBorderColor 设置窗口边框颜色（DWM，Win11）。失败静默——
 // 老系统无边框着色能力，振铃提醒退化为任务栏闪烁。
+// 注意：无边框通话面板无 DWM 边框，可见闪烁由 ui_call.go 的内容
+// 描边矩形实现（ringBorderColors 已移至该文件）。
 func setWindowBorderColor(hwnd uintptr, color uint32) {
 	dwmapi := syscall.NewLazyDLL("dwmapi.dll")
 	proc := dwmapi.NewProc("DwmSetWindowAttribute")
@@ -220,29 +341,6 @@ func ringBorderFlash(hwnd uintptr, stop <-chan struct{}) {
 		}
 	}
 }
-
-// getWindowPos 获取窗口位置。
-func getWindowPos(hwnd uintptr) (x, y int) {
-	user32 := syscall.NewLazyDLL("user32.dll")
-	getWindowRect := user32.NewProc("GetWindowRect")
-	type rect struct{ left, top, right, bottom int32 }
-	var r rect
-	getWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
-	return int(r.left), int(r.top)
-}
-
-// setWindowPosXY 移动窗口到指定位置。
-func setWindowPosXY(hwnd uintptr, x, y int) {
-	user32 := syscall.NewLazyDLL("user32.dll")
-	setWindowPos := user32.NewProc("SetWindowPos")
-	const (
-		hwndTopMost = ^uintptr(0)
-		swpNoSize   = 0x0001
-		swpShowWin  = 0x0040
-	)
-	setWindowPos.Call(hwnd, hwndTopMost, uintptr(x), uintptr(y), 0, 0, swpNoSize|swpShowWin)
-}
-
 
 // findWindowByTitlePrefix 按标题前缀查找**本进程**的顶层窗口。
 // 进程过滤必不可少：其他进程窗口标题可能包含应用名（如浏览器标签页

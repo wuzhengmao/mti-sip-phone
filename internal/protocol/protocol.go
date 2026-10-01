@@ -1,7 +1,8 @@
 // Package protocol 实现 sip:// 自定义协议：注册系统协议处理器并解析 URI。
 //
 // 网页通过 sip://account:password@host:port 拉起软电话，携带注册信息。
-//   - Windows：写 HKCU\Software\Classes\sip（URL Protocol + shell\open\command）
+//   - Windows：写 HKCU\Software\Classes（sip 方案 + ProgID + Capabilities 声明），
+//     成为「默认应用」候选；默认处理器由用户在系统设置中手动选择（防劫持机制）
 //   - Linux：写 ~/.local/share/applications 下的 .desktop 文件 + mimeapps.list
 package protocol
 
@@ -14,8 +15,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-
-	"golang.org/x/sys/windows/registry"
 
 	"mti-sip-phone/internal/logx"
 )
@@ -86,47 +85,9 @@ func RegisterProtocol(exePath string) error {
 	}
 }
 
-// registerWindows 写 HKCU 注册表：Software\Classes\sip。
-// HKCU 无需管理员权限；若 sip:// 被其他程序（如 Teams）抢占，需用户手动改默认应用。
-func registerWindows(exePath string) error {
-	progID := "mti-sip-phone.sip"
-
-	// HKCU\Software\Classes\sip
-	k, _, err := registry.CreateKey(registry.CURRENT_USER, `Software\Classes\`+Scheme, registry.SET_VALUE)
-	if err != nil {
-		return fmt.Errorf("写注册表失败: %w", err)
-	}
-	defer k.Close()
-	// URL Protocol 必须存在且值为空字符串，否则 handler 不会启动
-	if err := k.SetStringValue("URL Protocol", ""); err != nil {
-		return err
-	}
-	if err := k.SetStringValue("", "mti-sip-phone 协议"); err != nil {
-		return err
-	}
-
-	// shell\open\command：路径加引号，%1 为协议 URL
-	cmdKey, _, err := registry.CreateKey(registry.CURRENT_USER, `Software\Classes\`+Scheme+`\shell\open\command`, registry.SET_VALUE)
-	if err != nil {
-		return fmt.Errorf("写命令注册表失败: %w", err)
-	}
-	defer cmdKey.Close()
-	if err := cmdKey.SetStringValue("", fmt.Sprintf(`"%s" "%%1"`, exePath)); err != nil {
-		return err
-	}
-
-	// RegisteredApplications 声明（部分系统用于默认应用选择列表）
-	appsKey, _, err := registry.CreateKey(registry.CURRENT_USER, `Software\RegisteredApplications`, registry.SET_VALUE)
-	if err == nil {
-		_ = appsKey.SetStringValue("mti-sip-phone", `Software\Classes\`+Scheme)
-		appsKey.Close()
-	}
-
-	// 通知 shell 刷新协议关联
-	refreshShellAssociations()
-	logx.Logger().Info("已注册 sip:// 协议（HKCU）", "progID", progID)
-	return nil
-}
+// registerWindows 的实现在 register_windows.go（构建标签 windows），
+// 避免在非 Windows 平台导入 x/sys/windows/registry（该包仅支持
+// Windows，导入会导致 Linux 交叉编译失败）。
 
 // registerLinux 写 .desktop 文件并更新 mimeapps.list。
 func registerLinux(exePath string) error {

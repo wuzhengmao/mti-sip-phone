@@ -142,10 +142,13 @@ func (b *malgoBackend) Stop() {
 
 // PlayTone 播放提示音（独立 playback 设备；loop=true 循环）。
 // deviceID 指定播放设备（hex 编码），空 = 系统默认。
+//
+// 线程模型（改动前必读）：toneMu 只保护提示音状态，**不得跨越设备调用持有**
+// ——miniaudio 的 ma_device_start/ma_device_uninit 会等待音频回调线程，而回调
+// 要拿 toneMu，持锁调用必然死锁（实测：树莓派 PulseAudio 下 ma_device_start
+// 永不返回，音频 worker 卡死，此后所有音频操作排队不执行，通话彻底无声）。
 func (b *malgoBackend) PlayTone(tone *wavPCM, loop bool, deviceID string) error {
 	b.StopTone()
-	b.toneMu.Lock()
-	defer b.toneMu.Unlock()
 	if tone == nil || len(tone.pcm) == 0 {
 		return nil
 	}
@@ -164,10 +167,13 @@ func (b *malgoBackend) PlayTone(tone *wavPCM, loop bool, deviceID string) error 
 		}
 	}
 
+	// 状态写入持锁但极短（回调可能马上就跑起来读这些字段）
+	b.toneMu.Lock()
 	b.tonePCM = tone.pcm
 	b.toneCh = channels
 	b.tonePos = 0
 	b.toneLoop = loop
+	b.toneMu.Unlock()
 
 	onFrames := func(output, input []byte, frameCount uint32) {
 		b.toneMu.Lock()
@@ -202,6 +208,7 @@ func (b *malgoBackend) PlayTone(tone *wavPCM, loop bool, deviceID string) error 
 	}
 
 	callbacks := malgo.DeviceCallbacks{Data: onFrames}
+	// 不持锁调用后端：Start 会等待音频回调线程，而回调要拿 toneMu
 	device, err := malgo.InitDevice(b.ctx.Context, deviceConfig, callbacks)
 	if err != nil {
 		return fmt.Errorf("初始化提示音设备失败: %w", err)
@@ -210,19 +217,25 @@ func (b *malgoBackend) PlayTone(tone *wavPCM, loop bool, deviceID string) error 
 		device.Uninit()
 		return fmt.Errorf("启动提示音设备失败: %w", err)
 	}
+	b.toneMu.Lock()
 	b.toneDev = device
+	b.toneMu.Unlock()
 	return nil
 }
 
 // StopTone 停止提示音播放。
 func (b *malgoBackend) StopTone() {
 	b.toneMu.Lock()
-	defer b.toneMu.Unlock()
-	if b.toneDev != nil {
-		b.toneDev.Uninit()
-		b.toneDev = nil
-	}
+	device := b.toneDev
+	b.toneDev = nil
 	b.tonePCM = nil
+	b.toneMu.Unlock()
+
+	// 不持锁调用后端：Uninit 等待回调线程退出，而回调要拿 toneMu，
+	// 持锁调用会死锁（同 PlayTone 的线程模型说明）。
+	if device != nil {
+		device.Uninit()
+	}
 }
 
 func (b *malgoBackend) Close() {

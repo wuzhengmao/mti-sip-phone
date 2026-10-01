@@ -23,6 +23,10 @@ type Telephony interface {
 	Reject(callID string, code int) error
 	// Mute 设置通话静音：muted=true 停止发送本地音频，保持接收。
 	Mute(callID string, muted bool) error
+	// MuteMic 麦克风静音：muted=true 停止发送本地音频（纯本地，不发 SIP 信令）。
+	MuteMic(callID string, muted bool) error
+	// MuteSpeaker 扬声器静音：muted=true 停止本地播放（继续接收）。
+	MuteSpeaker(callID string, muted bool) error
 	// SendDTMF 在通话中发送一个 DTMF 音（RFC 2833）。
 	SendDTMF(callID, digit string) error
 	// SetAutoAnswer 开关自动接听：开启后来电自动接听。

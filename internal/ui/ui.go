@@ -58,7 +58,7 @@ type App struct {
 	regDot       *statusDot
 	regLabel     *widget.Label // 本机号码显示
 	autoAnswerBtn *widget.Button
-	callBtn      *widget.Button
+	callBtn      *compactButton
 	settingsBtn  *widget.Button
 
 	// 设置页控件
@@ -90,10 +90,13 @@ type App struct {
 	callStateLabel *widget.Label
 	callTimerLabel *widget.Label
 	callRows       *fyne.Container // 通话面板三行内容容器（按状态重建）
-	hangupBtn      *widget.Button
-	answerBtn      *widget.Button
-	holdBtn        *widget.Button
+	hangupBtn      *compactButton
+	answerBtn      *compactButton
+	holdBtn        *compactButton
+	speakerBtn     *compactButton // 扬声器开关（REQ-UI-023）
+	micBtn         *compactButton // 麦克风开关（REQ-UI-023）
 	pulseStop      chan struct{} // 振铃脉动动画停止通道
+	ringFlashRect  *canvas.Rectangle // 振铃边框闪烁描边（无边框窗口用，REQ-UI-025 修订）
 
 	// 主窗口呼叫状态控件
 	keypadBtns []*widget.Button // 3×4 拨号键（空闲输入号码 / 通话中发 DTMF）
@@ -107,6 +110,11 @@ type App struct {
 	timerStop    chan struct{}
 	regState     string
 	autoAnswer   bool // 自动接听开关
+
+	// 扬声器/麦克风开关（REQ-UI-023）：会话内记忆——通话面板再次弹出时
+	// 沿用上次状态；不持久化，应用重启后恢复默认都打开。
+	speakerOn bool
+	micOn     bool
 
 	// 主窗口可见性跟踪（Fyne 无 Visible() 查询，自行维护）：
 	// mainShown 当前是否显示；mainWasVisible 通话前是否可见
@@ -139,6 +147,8 @@ func New(c *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath strin
 		onRestart: onRestart,
 		fyne:      app.NewWithID("com.mti.sip-phone"),
 		regState:  "unregistered",
+		speakerOn: true, // 扬声器默认开（REQ-UI-023）
+		micOn:     true, // 麦克风默认开（REQ-UI-023）
 	}
 	if desk, ok := ui.fyne.(desktop.App); ok {
 		ui.desk = desk
@@ -149,10 +159,21 @@ func New(c *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath strin
 // Run 启动界面主循环（阻塞直到退出）。
 // 必须在主 goroutine 调用：Fyne 的 UI 初始化与事件循环要求主线程。
 func (a *App) Run() {
+	// 平台相关的 GLFW 预设置，必须早于第一个窗口创建（Fyne 在
+	// buildMainWindow 时初始化 GLFW）。Linux 侧关闭 libdecor，原因见
+	// glfw_linux.go。
+	prepareGLFW()
 	a.buildMainWindow()
 	a.buildTray()
 	a.subscribeEvents()
 	a.watchWSPortFocus() // WS 端口输入框失焦保存与重启提示
+	// 音频后端在后台初始化（音频服务不可达时可能耗时数十秒）：就绪后
+	// 刷新设置页的设备列表。回调在后台 goroutine，需 fyne.Do 回主线程。
+	if a.audioMgr != nil {
+		a.audioMgr.OnReady(func() {
+			fyne.Do(a.refreshDevices)
+		})
+	}
 	a.fyne.Run()
 }
 
@@ -190,6 +211,37 @@ func (a *App) buildMainWindow() {
 	// 固定窗口尺寸：切换设置页（内容多）时窗口不被撑大
 	w.SetFixedSize(true)
 
+	// 主窗体任意位置按键输入（无需聚焦输入框，REQ-UI-024）：
+	// 数字/星号/井号直接输入拨号框，退格删除末尾字符。
+	// 输入框获得焦点时按键由其自身消费，此处只处理未被消费的按键。
+	w.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
+		if a.uiState != uiIdle || a.dialSelect == nil {
+			return
+		}
+		// 仅在拨号盘页生效（设置页展示时不处理）
+		if len(a.mainContent.Objects) == 0 || a.mainContent.Objects[0] != a.dialPage {
+			return
+		}
+		switch {
+		case ev.Name == fyne.KeyBackspace:
+			runes := []rune(a.dialSelect.Text)
+			if len(runes) > 0 {
+				a.dialSelect.SetText(string(runes[:len(runes)-1]))
+			}
+		case ev.Name == fyne.KeyEnter || ev.Name == fyne.KeyReturn:
+			// 回车直接呼出（输入框聚焦时由 OnSubmitted 处理，不会重复）
+			a.onCallButton()
+		case isDialDigit(ev.Name):
+			digit := string(ev.Name)
+			// 与号码盘一致：呼出过的号码视为已完成输入，重新输入时先清空
+			if a.savedNumber != "" && a.dialSelect.Text == a.savedNumber {
+				a.dialSelect.SetText(digit)
+			} else {
+				a.dialSelect.SetText(a.dialSelect.Text + digit)
+			}
+		}
+	})
+
 	// 启动默认隐藏主窗口，仅显示托盘图标（REQ-UI 修订）；
 	// 单击托盘图标或菜单「显示主界面」唤出
 }
@@ -200,7 +252,8 @@ func (a *App) buildDialPage() {
 	a.regDot = newStatusDot("unregistered")
 	a.regLabel = widget.NewLabel("") // 本机号码（已配置时显示）
 	a.autoAnswerBtn = widget.NewButton("自动接听", a.toggleAutoAnswer)
-	a.autoAnswerBtn.Importance = widget.LowImportance
+	// 未选中时浅灰底（与通话面板开关关闭状态一致，REQ-UI-024 修订）
+	a.autoAnswerBtn.Importance = widget.MediumImportance
 	statusRow := fyne.NewContainerWithLayout(statusRowLayout{}, a.regDot, a.regLabel)
 	a.settingsBtn = widget.NewButtonWithIcon("", theme.SettingsIcon(), a.showSettings)
 	a.settingsBtn.Importance = widget.LowImportance
@@ -217,6 +270,10 @@ func (a *App) buildDialPage() {
 	a.dialSelect.SetPlaceHolder("输入号码或 sip:xxx@主机")
 	a.dialSelect.Wrapping = fyne.TextWrapOff
 	a.dialSelect.Scroll = fyne.ScrollNone
+	// 回车直接呼出（REQ-UI-024）
+	a.dialSelect.OnSubmitted = func(string) {
+		a.onCallButton()
+	}
 	a.refreshRecentDials()
 
 	inputRow := container.NewBorder(nil, nil, nil, nil, a.dialSelect)
@@ -236,7 +293,13 @@ func (a *App) buildDialPage() {
 			btn := widget.NewButton(key, func() {
 				switch a.uiState {
 				case uiIdle:
-					a.dialSelect.SetText(a.dialSelect.Text + key)
+					// 呼出过的号码视为已完成输入：再次点号码盘时
+					// 清空重新输入（REQ-UI-024）
+					if a.savedNumber != "" && a.dialSelect.Text == a.savedNumber {
+						a.dialSelect.SetText(key)
+					} else {
+						a.dialSelect.SetText(a.dialSelect.Text + key)
+					}
 				case uiInCall:
 					// 通话中按键发送 DTMF（REQ-CALL-006）
 					if a.activeCallID != "" {
@@ -250,9 +313,12 @@ func (a *App) buildDialPage() {
 		}
 	}
 
-	// ---- 呼叫按钮：绿色「呼叫」，宽度拉满居中（Border 底部对象被拉伸全宽）----
-	a.callBtn = widget.NewButtonWithIcon("呼叫", theme.MediaPlayIcon(), a.onCallButton)
-	a.callBtn.Importance = widget.SuccessImportance
+	// ---- 呼叫按钮：绿色「呼叫」（黑色图标与文字一致，REQ-UI-024 修订），
+	// 宽度拉满居中（Border 底部对象被拉伸全宽）----
+	// 呼叫按钮用 compactTextButton：文字颜色固定（浅色主题下 fyne
+	// Success 按钮文字为白色、看不清），黑色文字与黑色图标一致
+	//（REQ-UI-024 修订）
+	a.callBtn = newCompactTextButton("呼叫", IconPlayBlack, colorSuccessGreen, colorIconBlack, a.onCallButton)
 
 	a.dialPage = container.NewBorder(
 		topBar,
@@ -265,7 +331,7 @@ func (a *App) buildDialPage() {
 	)
 }
 
-// buildSettingsPage 设置页：账户、音频设备、日志、网页接入 token（REQ-UI-006/012）。
+// buildSettingsPage 设置页：账户、音频设备、日志、网页接入（REQ-UI-006/012）。
 func (a *App) buildSettingsPage() {
 	// ---- 顶部栏：返回按钮 ----
 	backBtn := widget.NewButtonWithIcon("返回", theme.NavigateBackIcon(), a.showDialPage)
@@ -301,7 +367,7 @@ func (a *App) buildSettingsPage() {
 		}
 	})
 
-	// 表单项采用「label 在上、输入框在下」的堆叠布局（与 token 一致），
+	// 表单项采用「label 在上、输入框在下」的堆叠布局，
 	// 避免 Grid 双列在窄窗口下把主窗口撑宽（REQ-UI-019）
 	// STUN（REQ-ACC-017）：默认 stun.l.google.com:19302，可修改；
 	// 启用开关与地址输入框联动——勾选后才能编辑地址
@@ -405,9 +471,16 @@ func (a *App) buildSettingsPage() {
 	scroll := container.NewVScroll(scrollContentWithGap)
 	a.settingsScroll = scroll
 
+	// 底部常驻一行版本信息（REQ-UI-026）：版本号、平台/架构、构建时间。
+	// 主窗体固定 320px 宽，用标注字号（11px）的 canvas 文本避免整行超宽被截断
+	versionText := canvas.NewText(fmt.Sprintf("版本 %s · %s · 构建于 %s",
+		core.Version, core.Platform(), core.BuildTimeText()), theme.ForegroundColor())
+	versionText.TextSize = a.fyne.Settings().Theme().Size(theme.SizeNameCaptionText)
+
 	a.settingsPage = container.NewBorder(
 		container.NewHBox(backBtn),
-		nil, nil, nil,
+		container.NewHBox(versionText),
+		nil, nil,
 		scroll,
 	)
 
@@ -443,7 +516,7 @@ func parseHostPort(addr string, defaultPort int) (string, int) {
 }
 
 // formItem 表单项：label 在上、控件在下的堆叠布局（防止窄窗口被撑宽）。
-// 控件包一层 HScroll：长内容（如 token、长地址）横向滚动而非撑宽窗口。
+// 控件包一层 HScroll：长内容（如长地址）横向滚动而非撑宽窗口。
 func formItem(label string, obj fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewVBox(
 		widget.NewLabel(label),
@@ -637,16 +710,20 @@ func (a *App) setKeypadEnabled(enabled bool) {
 	}
 }
 
-// updateCallButton 按通话状态更新呼叫按钮外观与行为。
+// updateCallButton 按通话状态更新呼叫按钮外观与行为：
+// 呼叫态=绿底黑字黑图标；挂断态=红底白字白图标
+//（文字颜色固定，不随主题变化，REQ-UI-024 修订）。
 func (a *App) updateCallButton() {
 	if a.activeCallID != "" {
 		a.callBtn.SetText("挂断")
-		a.callBtn.SetIcon(theme.MediaStopIcon())
-		a.callBtn.Importance = widget.DangerImportance
+		a.callBtn.SetIcon(IconStopWhite)
+		a.callBtn.SetBg(colorDangerRed)
+		a.callBtn.SetLabelColor(colorIconWhite)
 	} else {
 		a.callBtn.SetText("呼叫")
-		a.callBtn.SetIcon(theme.MediaPlayIcon())
-		a.callBtn.Importance = widget.SuccessImportance
+		a.callBtn.SetIcon(IconPlayBlack)
+		a.callBtn.SetBg(colorSuccessGreen)
+		a.callBtn.SetLabelColor(colorIconBlack)
 	}
 	a.callBtn.Refresh()
 }
@@ -674,6 +751,10 @@ func (a *App) buildTray() {
 	quit := fyne.NewMenuItem("退出", func() {
 		a.fyne.Quit()
 	})
+	// 标记为退出项（Linux 生效，见 markTrayQuit）：否则 Fyne 会在菜单
+	// 末尾自动补一个本地化的 Quit 项（driver_desktop.go 的
+	// addMissingQuitForMenu），托盘上会出现「退出」与「Quit」两项
+	markTrayQuit(quit)
 	menu := fyne.NewMenu("mti-sip-phone", showMain, fyne.NewMenuItemSeparator(), quit)
 
 	// 初始图标按当前注册状态（默认红色，systray 就绪回调自动设置）
@@ -691,9 +772,7 @@ func (a *App) buildTray() {
 	})
 	systray.SetOnTapped(func() {
 		fyne.Do(func() {
-			a.mainW.Show()
-			a.mainShown = true
-			a.bringMainToFront()
+			a.showMain()
 		})
 	})
 	logx.Logger().Info("系统托盘已就绪（单击图标唤出主界面）")
@@ -801,9 +880,12 @@ func (a *App) onEvent(ev core.Event) {
 
 	case "call.ringing":
 		// 呼出振铃：通话面板保持"呼叫中"（对方信息可能更新）。
-		// 回铃音由 SIP 服务器以 183 早期媒体下发，媒体层直接接收播放
+		// 回铃音由 SIP 服务器以 183 早期媒体下发，媒体层直接接收播放。
+		// 183 附 SDP 时媒体引擎已创建：把会话内记忆的扬声器/麦克风
+		// 状态下发（呼叫阶段关闭扬声器即可屏蔽回铃音，REQ-UI-023）
 		if callID, call := callData(ev.Data); call != nil && callID == a.activeCallID {
 			a.activeCall = call
+			a.applySessionAudioState()
 		}
 
 	case "call.established":
@@ -860,12 +942,13 @@ func regText(state string) string {
 }
 
 // toggleAutoAnswer 自动接听开关：开启后来电自动接听。
+// 选中 = 蓝底；未选中 = 浅灰底（REQ-UI-024 修订）。
 func (a *App) toggleAutoAnswer() {
 	a.autoAnswer = !a.autoAnswer
 	if a.autoAnswer {
 		a.autoAnswerBtn.Importance = widget.HighImportance
 	} else {
-		a.autoAnswerBtn.Importance = widget.LowImportance
+		a.autoAnswerBtn.Importance = widget.MediumImportance
 	}
 	a.autoAnswerBtn.Refresh()
 	if err := a.core.SetAutoAnswer(a.autoAnswer); err != nil {
@@ -874,8 +957,13 @@ func (a *App) toggleAutoAnswer() {
 	logx.Logger().Info("自动接听开关", "enabled", a.autoAnswer)
 }
 
-// showMain 显示主窗口（托盘单击唤出）。
+// showMain 显示主窗口（托盘单击/菜单唤出）。
+// 通话期间（呼叫/振铃/通话中）主窗口保持隐藏，通话面板关闭后
+// 才可唤出（REQ-UI-025 修订）。
 func (a *App) showMain() {
+	if a.uiState != uiIdle {
+		return
+	}
 	a.mainW.Show()
 	a.mainShown = true
 	a.mainW.RequestFocus()
@@ -1047,24 +1135,44 @@ func (a *App) chooseLogDir() {
 }
 
 // refreshDevices 刷新音频设备列表（枚举真实系统设备，REQ-MEDIA-002）。
+// 枚举可能耗时（ALSA 会逐个探测设备），放到后台 goroutine 执行、结果
+// 回到主线程应用；音频后端尚未就绪时先显示占位，就绪后由 OnReady 再刷。
 func (a *App) refreshDevices() {
 	if a.audioMgr == nil {
-		a.micSelect.Options = []string{"音频后端不可用"}
-		a.speakerSelect.Options = []string{"音频后端不可用"}
+		a.applyDeviceLists(nil, nil, "音频后端不可用")
 		return
 	}
-	mics, speakers := a.audioMgr.Devices()
+	if !a.audioMgr.Ready() {
+		a.applyDeviceLists(nil, nil, "音频初始化中…")
+	}
+	go func() {
+		mics, speakers := a.audioMgr.Devices()
+		fyne.Do(func() {
+			a.applyDeviceLists(mics, speakers, "未检测到音频设备")
+		})
+	}()
+}
+
+// applyDeviceLists 在 UI 线程应用设备枚举结果（placeholder 为列表为空时
+// 的占位文案）。可重复调用：设备就绪后会再次调用以回填真实设备。
+func (a *App) applyDeviceLists(mics, speakers []core.AudioDevice, placeholder string) {
 	micNames := make([]string, 0, len(mics))
 	micIDs := make(map[string]string)
 	for _, d := range mics {
 		micNames = append(micNames, d.Name)
 		micIDs[d.Name] = d.ID
 	}
+	if len(micNames) == 0 {
+		micNames = []string{placeholder}
+	}
 	spkNames := make([]string, 0, len(speakers))
 	spkIDs := make(map[string]string)
 	for _, d := range speakers {
 		spkNames = append(spkNames, d.Name)
 		spkIDs[d.Name] = d.ID
+	}
+	if len(spkNames) == 0 {
+		spkNames = []string{placeholder}
 	}
 	a.micSelect.Options = micNames
 	a.speakerSelect.Options = spkNames
@@ -1090,7 +1198,9 @@ func (a *App) refreshDevices() {
 			return // 回填阶段不触发保存
 		}
 		if id, ok := micIDs[name]; ok {
-			_ = a.audioMgr.SetMic(id)
+			if a.audioMgr != nil {
+				a.audioMgr.SetMic(id)
+			}
 			a.cfg.Audio.MicID = id
 			a.persistConfig()
 		}
@@ -1100,7 +1210,9 @@ func (a *App) refreshDevices() {
 			return
 		}
 		if id, ok := spkIDs[name]; ok {
-			_ = a.audioMgr.SetSpeaker(id)
+			if a.audioMgr != nil {
+				a.audioMgr.SetSpeaker(id)
+			}
 			a.cfg.Audio.SpeakerID = id
 			a.persistConfig()
 		}
@@ -1158,4 +1270,13 @@ func callData(data any) (callID string, call *core.Call) {
 		call = &c
 	}
 	return callID, call
+}
+
+// isDialDigit 判断按键是否为可拨号的数字键（0-9 / * / #，REQ-UI-024）。
+func isDialDigit(name fyne.KeyName) bool {
+	if len(name) != 1 {
+		return false
+	}
+	c := name[0]
+	return (c >= '0' && c <= '9') || c == '*' || c == '#'
 }

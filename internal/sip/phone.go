@@ -63,7 +63,7 @@ type callSession struct {
 	mediaStarted bool      // 媒体引擎已启动（183 早期媒体可能提前启动）
 }
 
-// UserAgentName 软电话标识（REQ-ACC-014）：格式 "mti-sip-phone v1.0.0"。
+// UserAgentName 软电话标识（REQ-ACC-014）：格式 "mti-sip-phone v1.0.1"。
 func UserAgentName() string {
 	return "mti-sip-phone v" + core.Version
 }
@@ -417,6 +417,27 @@ func (p *Phone) Mute(callID string, muted bool) error {
 	return nil
 }
 
+// MuteMic 麦克风静音切换：纯本地停止/恢复发送（不发 SIP 信令，
+// 区别于 Mute 的保持 re-INVITE——对端听到静音但通话保持正常状态）。
+func (p *Phone) MuteMic(callID string, muted bool) error {
+	cs := p.getCall(callID)
+	if cs == nil || cs.engine == nil {
+		return core.ErrCallNotFound
+	}
+	cs.engine.SetMicMuted(muted)
+	return nil
+}
+
+// MuteSpeaker 扬声器静音切换：纯本地停止/恢复播放（继续接收 RTP）。
+func (p *Phone) MuteSpeaker(callID string, muted bool) error {
+	cs := p.getCall(callID)
+	if cs == nil || cs.engine == nil {
+		return core.ErrCallNotFound
+	}
+	cs.engine.SetPlayMuted(muted)
+	return nil
+}
+
 // sendHoldReInvite 发送保持/取消保持的 re-INVITE：
 // INVITE（新 SDP offer，方向 sendonly/sendrecv）→ 2xx → 应用 answer → ACK。
 func (p *Phone) sendHoldReInvite(cs *callSession, muted bool) {
@@ -596,11 +617,14 @@ func (p *Phone) SetRPort(enabled bool) error {
 }
 
 // SetMicrophone 选择麦克风。
+// 切换在音频后台队列中生效（设备重建可能耗时，不能阻塞调用方），
+// 失败经日志体现。
 func (p *Phone) SetMicrophone(deviceID string) error {
 	if p.audio == nil {
 		return fmt.Errorf("音频管理器不可用")
 	}
-	return p.audio.SetMic(deviceID)
+	p.audio.SetMic(deviceID)
+	return nil
 }
 
 // SetSpeaker 选择扬声器。
@@ -608,7 +632,8 @@ func (p *Phone) SetSpeaker(deviceID string) error {
 	if p.audio == nil {
 		return fmt.Errorf("音频管理器不可用")
 	}
-	return p.audio.SetSpeaker(deviceID)
+	p.audio.SetSpeaker(deviceID)
+	return nil
 }
 
 // AudioDevices 返回音频设备列表。

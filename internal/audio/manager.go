@@ -3,14 +3,42 @@
 // 后端实现按构建标签切换：
 //   - 默认（无标签）：malgo（miniaudio，全双工 + 设备枚举，需 CGO）
 //   - -tags noaudio：空后端（无音频设备，供纯 Go 构建与测试）
+//
+// 线程模型（重要，改动前先读）：
+//   - 后端初始化在后台 goroutine 进行，NewManager 最多等待 initWait：
+//     miniaudio 连接音频服务时是**同步且不可中断**的（环境变量
+//     PULSE_SERVER 指向不可达地址时实测阻塞 15 秒），不能让启动路径与
+//     界面线程被它拖住；
+//   - 所有会碰后端的操作（开关音频流、播放提示音）都排入单一 worker 的
+//     FIFO 队列后**立即返回**：顺序语义与同步调用一致（例如 StopRing 之后
+//     PlayHangup 不会颠倒），同时 UI 线程、SIP 线程与信令流程都不会被
+//     设备操作阻塞；
+//   - **不要持锁调用后端**：设备操作可能阻塞数十秒，持锁会让 UI 线程的
+//     enqueue / SetMic 反过来被卡住。锁只用于读写本结构的状态，调用后端
+//     前先取快照并释放锁；
+//   - 设备枚举 Devices 保持同步（枚举同样可能慢，例如 ALSA 逐个探测设备），
+//     由调用方放到后台 goroutine 执行。
 package audio
 
 import (
 	"sync"
+	"time"
 
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
 	"mti-sip-phone/internal/media"
+)
+
+const (
+	// initWait 启动时最多等待后端初始化的时间。正常环境初始化在百毫秒内
+	// 完成；超时说明音频服务不可达，此时先继续启动，就绪后经 OnReady 通知
+	// 界面刷新设备列表。
+	initWait = 2 * time.Second
+	// closeWait 退出时最多等待命令队列排空的时间（设备操作可能长时间阻塞，
+	// 超时则直接释放后端，不拖住退出）。
+	closeWait = 2 * time.Second
+	// cmdQueueLen 命令队列长度：一次通话只有几个音频操作，正常不会触及。
+	cmdQueueLen = 32
 )
 
 // Manager 音频设备管理：全局单例，一次仅支持一路通话的音频流。
@@ -19,102 +47,143 @@ type Manager struct {
 	micID         string // 当前选择的麦克风 ID，空 = 系统默认
 	speakerID     string // 当前选择的扬声器 ID，空 = 系统默认
 	ringSpeakerID string // 振铃音专用扬声器 ID，空 = 系统默认
-	engine    *media.Engine
-	backend   Backend
-	running   bool
+	engine        *media.Engine
+	backend       Backend
+	running       bool // 音频流是否已启动
+	initDone      bool // 后端初始化是否已结束（成功或失败）
+	closed        bool
+
+	cmds       chan func()
+	workerDone chan struct{}
+	readyCh    chan struct{}
+	onReady    func()
+	closeOnce  sync.Once
 }
 
-// NewManager 创建音频管理器并初始化后端。
-func NewManager() (*Manager, error) {
-	backend, err := newBackend()
-	if err != nil {
-		return nil, err
+// NewManager 创建音频管理器：后端在后台初始化，最多等待 initWait。
+// 后端不可用时返回的管理器依然可用——设备列表为空、音频操作被跳过
+// （与"无音频设备"时的行为一致），就绪后经 OnReady 通知调用方。
+func NewManager() *Manager {
+	m := &Manager{
+		cmds:       make(chan func(), cmdQueueLen),
+		workerDone: make(chan struct{}),
+		readyCh:    make(chan struct{}),
 	}
-	return &Manager{backend: backend}, nil
+	go m.runWorker()
+	go m.initBackend()
+
+	select {
+	case <-m.readyCh:
+	case <-time.After(initWait):
+		logx.Logger().Warn("等待音频后端初始化超时，先继续启动",
+			"wait", initWait,
+			"hint", "音频服务不可达时优先检查 PULSE_SERVER / XDG_RUNTIME_DIR 等环境变量")
+	}
+	return m
+}
+
+// initBackend 后台初始化后端（miniaudio），完成后通知 OnReady 回调。
+func (m *Manager) initBackend() {
+	start := time.Now()
+	backend, err := newBackend()
+
+	m.mu.Lock()
+	if err == nil {
+		m.backend = backend
+	}
+	m.initDone = true
+	engine := m.engine // 初始化期间已挂上的引擎：就绪后补启动
+	cb := m.onReady
+	m.mu.Unlock()
+
+	if err != nil {
+		logx.Logger().Warn("音频后端初始化失败，音频功能不可用",
+			"err", err, "elapsed", time.Since(start))
+	} else {
+		logx.Logger().Info("音频后端已初始化（miniaudio）", "elapsed", time.Since(start))
+	}
+	close(m.readyCh)
+
+	if err == nil && engine != nil {
+		// 初始化期间接通的通话：补启动音频流（队列保证与后续操作顺序一致）
+		m.enqueue(func() { m.startStreamFor(engine) })
+	}
+	if cb != nil {
+		cb()
+	}
+}
+
+// OnReady 注册后端初始化结束（成功或失败）后的回调，最多生效一次。
+// 回调在后台 goroutine 中执行：涉及界面的操作请自行用 fyne.Do 包裹。
+// 若注册时初始化已结束，回调会被立即调用。
+func (m *Manager) OnReady(fn func()) {
+	m.mu.Lock()
+	if m.initDone {
+		m.mu.Unlock()
+		fn()
+		return
+	}
+	m.onReady = fn
+	m.mu.Unlock()
+}
+
+// Ready 后端是否可用（初始化成功）。
+func (m *Manager) Ready() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.backend != nil
+}
+
+// runWorker 串行执行音频命令：设备操作可能长时间阻塞，放在这里不影响任何
+// 调用方，同时保证执行顺序与入队顺序一致。
+func (m *Manager) runWorker() {
+	defer close(m.workerDone)
+	for cmd := range m.cmds {
+		cmd()
+	}
+}
+
+// enqueue 把音频操作排入队列（非阻塞，不等待执行）。队列已关闭（退出流程）
+// 时丢弃；队列满时丢弃并告警——正常使用不会触及上限，丢弃比阻塞调用方安全。
+func (m *Manager) enqueue(cmd func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
+	select {
+	case m.cmds <- cmd:
+	default:
+		logx.Logger().Warn("音频命令队列已满，丢弃一次音频操作")
+	}
 }
 
 // SetMic 选择麦克风。空 ID 表示系统默认设备。
-func (m *Manager) SetMic(deviceID string) error {
+// 切换在后台生效（设备重建可能耗时），失败经日志体现。
+func (m *Manager) SetMic(deviceID string) {
 	m.mu.Lock()
 	m.micID = deviceID
 	restart := m.running
 	m.mu.Unlock()
 	logx.Logger().Info("切换麦克风", "device", deviceID)
 	if restart {
-		return m.restart()
+		m.enqueue(m.restartStream)
 	}
-	return nil
 }
 
 // SetSpeaker 选择扬声器。空 ID 表示系统默认设备。
-func (m *Manager) SetSpeaker(deviceID string) error {
+func (m *Manager) SetSpeaker(deviceID string) {
 	m.mu.Lock()
 	m.speakerID = deviceID
 	restart := m.running
 	m.mu.Unlock()
 	logx.Logger().Info("切换扬声器", "device", deviceID)
 	if restart {
-		return m.restart()
-	}
-	return nil
-}
-
-// Devices 返回麦克风与扬声器列表。
-func (m *Manager) Devices() ([]core.AudioDevice, []core.AudioDevice) {
-	return m.backend.Devices()
-}
-
-// AttachEngine 通话建立时对接媒体引擎：启动全双工音频流。
-func (m *Manager) AttachEngine(engine *media.Engine) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.engine = engine
-	if err := m.startLocked(); err != nil {
-		logx.Logger().Error("启动音频流失败", "err", err)
+		m.enqueue(m.restartStream)
 	}
 }
 
-// DetachEngine 通话结束时停止音频流。
-func (m *Manager) DetachEngine() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.stopLocked()
-	m.engine = nil
-}
-
-// restart 设备切换时重建音频流。
-func (m *Manager) restart() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.running {
-		return nil
-	}
-	m.stopLocked()
-	return m.startLocked()
-}
-
-func (m *Manager) startLocked() error {
-	if m.running || m.engine == nil {
-		return nil
-	}
-	if err := m.backend.Start(m.micID, m.speakerID, m.engine); err != nil {
-		return err
-	}
-	m.running = true
-	logx.Logger().Info("音频流已启动", "mic", m.micID, "speaker", m.speakerID)
-	return nil
-}
-
-func (m *Manager) stopLocked() {
-	if !m.running {
-		return
-	}
-	m.backend.Stop()
-	m.running = false
-	logx.Logger().Debug("音频流已停止")
-}
-
-// SetRingSpeaker 设置振铃音专用扬声器。
+// SetRingSpeaker 设置振铃音专用扬声器（只影响后续提示音，无需重建音频流）。
 func (m *Manager) SetRingSpeaker(deviceID string) {
 	m.mu.Lock()
 	m.ringSpeakerID = deviceID
@@ -122,38 +191,149 @@ func (m *Manager) SetRingSpeaker(deviceID string) {
 	logx.Logger().Info("振铃设备已切换", "device", deviceID)
 }
 
-// PlayRing 播放振铃音（循环），通话事件驱动；使用振铃专用扬声器（若已配置）。
-func (m *Manager) PlayRing() {
+// Devices 返回麦克风与扬声器列表；后端未就绪时返回空列表。
+// 枚举可能耗时（ALSA 逐个探测设备），调用方应在后台 goroutine 中调用。
+func (m *Manager) Devices() ([]core.AudioDevice, []core.AudioDevice) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.backend.PlayTone(ringtone, true, m.ringSpeakerID); err != nil {
-		logx.Logger().Warn("播放振铃音失败", "err", err)
+	backend := m.backend
+	m.mu.Unlock()
+	if backend == nil {
+		return nil, nil
 	}
+	return backend.Devices()
 }
 
-// PlayRingback 已移除：回铃音由 SIP 服务器下发（183 早期媒体），
-// 本地通过媒体引擎接收并播放，不再本地生成。
+// AttachEngine 通话建立时对接媒体引擎：后台启动全双工音频流。
+// 不阻塞调用方（接听/呼叫流程先走信令，音频设备在队列里打开）。
+func (m *Manager) AttachEngine(engine *media.Engine) {
+	m.mu.Lock()
+	m.engine = engine
+	m.mu.Unlock()
+	m.enqueue(func() { m.startStreamFor(engine) })
+}
+
+// DetachEngine 通话结束时停止音频流。不阻塞调用方（挂断流程先走信令与
+// 界面收尾，设备在队列里关闭）。
+func (m *Manager) DetachEngine() {
+	m.mu.Lock()
+	m.engine = nil
+	m.mu.Unlock()
+	m.enqueue(m.stopStream)
+}
+
+// PlayRing 播放振铃音（循环），通话事件驱动；使用振铃专用扬声器（若已配置）。
+func (m *Manager) PlayRing() {
+	m.enqueue(func() { m.playTone(ringtone, true) })
+}
 
 // PlayHangup 播放挂断提示音（一次）。
 func (m *Manager) PlayHangup() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.backend.PlayTone(hangup, false, m.ringSpeakerID); err != nil {
-		logx.Logger().Warn("播放挂断音失败", "err", err)
-	}
+	m.enqueue(func() { m.playTone(hangup, false) })
 }
 
 // StopRing 停止提示音（振铃结束/通话建立时）。
 func (m *Manager) StopRing() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.backend.StopTone()
+	m.enqueue(func() {
+		m.mu.Lock()
+		backend := m.backend
+		m.mu.Unlock()
+		if backend == nil {
+			return
+		}
+		backend.StopTone()
+	})
 }
 
-// Close 释放后端资源。
+// Close 释放后端资源：停止音频流并关闭后端。
+// 最多等待命令队列排空 closeWait——设备操作可能长时间阻塞，超时则直接
+// 释放（退出流程不能被音频拖住）。
 func (m *Manager) Close() {
+	m.closeOnce.Do(func() {
+		m.mu.Lock()
+		m.closed = true
+		close(m.cmds)
+		m.mu.Unlock()
+
+		select {
+		case <-m.workerDone:
+		case <-time.After(closeWait):
+			logx.Logger().Warn("等待音频命令队列排空超时，直接释放后端", "wait", closeWait)
+		}
+
+		m.stopStream()
+
+		m.mu.Lock()
+		backend := m.backend
+		m.backend = nil
+		m.mu.Unlock()
+		if backend != nil {
+			backend.Close()
+		}
+	})
+}
+
+// startStreamFor 队列命令：为指定引擎启动音频流（引擎已被后续通话取代时跳过）。
+func (m *Manager) startStreamFor(engine *media.Engine) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.stopLocked()
-	m.backend.Close()
+	if m.running || m.engine != engine || m.backend == nil || engine == nil {
+		m.mu.Unlock()
+		return
+	}
+	backend, mic, speaker := m.backend, m.micID, m.speakerID
+	m.running = true // 先置位，避免与 restart/stop 重复启动
+	m.mu.Unlock()
+
+	// 不持锁调用后端：设备打开可能阻塞数十秒
+	if err := backend.Start(mic, speaker, engine); err != nil {
+		m.mu.Lock()
+		m.running = false
+		m.mu.Unlock()
+		logx.Logger().Error("启动音频流失败", "err", err)
+		return
+	}
+	logx.Logger().Info("音频流已启动", "mic", mic, "speaker", speaker)
+}
+
+// stopStream 队列命令：停止音频流。
+func (m *Manager) stopStream() {
+	m.mu.Lock()
+	if !m.running {
+		m.mu.Unlock()
+		return
+	}
+	backend := m.backend
+	m.running = false
+	m.mu.Unlock()
+
+	if backend == nil {
+		return
+	}
+	backend.Stop() // 不持锁：设备关闭同样可能阻塞
+	logx.Logger().Debug("音频流已停止")
+}
+
+// restartStream 队列命令：设备切换时重建音频流。
+func (m *Manager) restartStream() {
+	m.mu.Lock()
+	engine := m.engine
+	running := m.running
+	m.mu.Unlock()
+	if !running || engine == nil {
+		return
+	}
+	m.stopStream()
+	m.startStreamFor(engine)
+}
+
+// playTone 队列命令：播放提示音（使用振铃专用扬声器，空 = 系统默认）。
+func (m *Manager) playTone(tone *wavPCM, loop bool) {
+	m.mu.Lock()
+	backend, device := m.backend, m.ringSpeakerID
+	m.mu.Unlock()
+	if backend == nil {
+		return
+	}
+	if err := backend.PlayTone(tone, loop, device); err != nil {
+		logx.Logger().Warn("播放提示音失败", "err", err)
+	}
 }

@@ -11,8 +11,6 @@ import (
 	"os/user"
 	"runtime"
 	"strings"
-
-	"golang.org/x/sys/windows/registry"
 )
 
 // 密码加密方案：
@@ -42,19 +40,9 @@ func machineID() string {
 	return u.Username + "@" + host
 }
 
-func windowsMachineID() string {
-	k, err := registry.OpenKey(registry.LOCAL_MACHINE,
-		`SOFTWARE\Microsoft\Cryptography`, registry.QUERY_VALUE)
-	if err != nil {
-		return ""
-	}
-	defer k.Close()
-	id, _, err := k.GetStringValue("MachineGuid")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(id)
-}
+// windowsMachineID 的实现在 machineid_windows.go（构建标签 windows）：
+// 注册表读取仅 Windows 可用，直接导入 x/sys/windows/registry 会破坏
+// Linux 交叉编译。
 
 func linuxMachineID() string {
 	for _, p := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {

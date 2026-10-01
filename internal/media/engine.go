@@ -44,6 +44,8 @@ type Engine struct {
 
 	muted     atomic.Bool
 	holdTx    atomic.Bool // 因对端要求（re-INVITE sendonly/inactive）而停止发送
+	micMuted  atomic.Bool // 麦克风静音（纯本地，无 SIP 信令，区别于保持的 muted）
+	playMuted atomic.Bool // 扬声器静音（纯本地，停止播放但继续接收）
 	keepalive atomic.Bool // 早期媒体阶段持续发送静音保活（NAT 打洞）
 
 	// 播放缓冲：样本粒度环形缓冲 + 序号跟踪
@@ -136,6 +138,13 @@ func (e *Engine) Codec() Codec {
 
 // SetMuted 静音：停止发送本地音频（保持接收）。
 func (e *Engine) SetMuted(muted bool) { e.muted.Store(muted) }
+
+// SetMicMuted 麦克风静音：纯本地停止/恢复发送，不发 SIP 信令
+//（通话面板麦克风开关用；区别于 Mute 的保持 re-INVITE）。
+func (e *Engine) SetMicMuted(muted bool) { e.micMuted.Store(muted) }
+
+// SetPlayMuted 扬声器静音：纯本地停止/恢复播放，接收侧不受影响。
+func (e *Engine) SetPlayMuted(muted bool) { e.playMuted.Store(muted) }
 
 // SetRemoteHold 远端保持：对端 re-INVITE 声明只发不收（sendonly）或
 // 完全停发（inactive）时，本端停止发送媒体。
@@ -306,8 +315,8 @@ func (e *Engine) FeedMic(pcm []int16) {
 		}
 		return
 	}
-	// 静音 / 对端保持：丢弃麦克风数据
-	if e.muted.Load() || e.holdTx.Load() {
+	// 静音 / 麦克风静音 / 对端保持：丢弃麦克风数据
+	if e.muted.Load() || e.micMuted.Load() || e.holdTx.Load() {
 		e.micBuf = e.micBuf[:0]
 		return
 	}
@@ -390,10 +399,15 @@ func (e *Engine) setRemote(addr *net.UDPAddr, rtcpPort int) {
 
 // ReadPlayback 播放侧回调：从播放缓冲取样本，数据不足时补静音。
 // 接受任意长度（音频回调帧长不一定等于 20ms），由音频设备层周期调用。
+// 扬声器静音时输出全零，但仍消费缓冲——取消静音后从当前流位置继续，
+// 不会回放静音期间的旧数据。
 func (e *Engine) ReadPlayback(buf []int16) int {
 	e.playMu.Lock()
 	n := e.ring.Read(buf)
 	e.playMu.Unlock()
+	if e.playMuted.Load() {
+		n = 0
+	}
 	for i := n; i < len(buf); i++ {
 		buf[i] = 0
 	}
