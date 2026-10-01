@@ -1,6 +1,6 @@
 # 本地 WebSocket 控制协议
 
-> 适用版本：1.0.2。网页通过本机 WebSocket 连接 SIP 软电话，实现拨号、接听、挂断等控制，并接收振铃、挂断等事件。
+> 适用版本：1.0.3。网页通过本机 WebSocket 连接 SIP 软电话，实现拨号、接听、挂断等控制，并接收振铃、挂断等事件。
 >
 > 本文档面向网页前端开发者；JS SDK 已封装本协议，通常无需直接读写报文。
 
@@ -60,13 +60,13 @@
 | `call.reject` | `{ "callId": "...", "code": 486 }` | `{ "callId": "..." }` | 拒接；code 为 SIP 状态码，默认 486 |
 | `call.mute` | `{ "callId": "...", "muted": true }` | `{ "callId": "..." }` | 静音切换（仅通话建立后有效） |
 | `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态） |
-| `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64" }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.2" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选 |
+| `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64" }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.3" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选 |
 
 ### system.getState 返回示例
 
 ```json
 {
-  "version": "1.0.2",
+  "version": "1.0.3",
   "os": "windows",
   "arch": "amd64",
   "register": { "state": "registered", "account": "1001", "reason": "" },

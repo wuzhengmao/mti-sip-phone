@@ -63,7 +63,7 @@ type callSession struct {
 	mediaStarted bool      // 媒体引擎已启动（183 早期媒体可能提前启动）
 }
 
-// UserAgentName 软电话标识（REQ-ACC-014）：格式 "mti-sip-phone v1.0.2"。
+// UserAgentName 软电话标识（REQ-ACC-014）：格式 "mti-sip-phone v1.0.3"。
 func UserAgentName() string {
 	return "mti-sip-phone v" + core.Version
 }
