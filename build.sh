@@ -17,6 +17,10 @@ cd "$(dirname "$0")"
 export GOTOOLCHAIN=local
 mkdir -p dist
 
+# 构建时间注入 core.BuildTime（设置页版本行显示）；ISO 8601，T 分隔避免 ldflags 参数空格问题
+BUILD_TS="$(date '+%Y-%m-%dT%H:%M:%S')"
+LDFLAGS="-s -w -X mti-sip-phone/internal/core.BuildTime=${BUILD_TS}"
+
 NATIVE_ARCH="$(go env GOARCH)"
 
 # ---------- 交叉目标探测 ----------
@@ -95,7 +99,7 @@ EOF
 # ---------- 构建 ----------
 
 echo "[1/4] 构建本机 GUI 版 sip-phone-linux-${NATIVE_ARCH}（CGO+音频）..."
-go build -ldflags "-s -w" -o "dist/sip-phone-linux-${NATIVE_ARCH}" ./cmd/sip-phone
+go build -ldflags "$LDFLAGS" -o "dist/sip-phone-linux-${NATIVE_ARCH}" ./cmd/sip-phone
 
 if [ -z "$CROSS_ARCH" ]; then
     echo "[2/4] 跳过 Linux 交叉：本机架构 ${NATIVE_ARCH} 不在支持列表（amd64/arm64）"
@@ -110,14 +114,14 @@ else
     echo "[2/4] 交叉构建 dist/sip-phone-linux-${CROSS_ARCH}（CGO+音频，CC=${CROSS_CC}）..."
     CGO_ENABLED=1 GOOS=linux GOARCH="$CROSS_ARCH" CC="$CROSS_CC" \
         PKG_CONFIG_LIBDIR="$CROSS_PC_LIBDIR" PKG_CONFIG_PATH= \
-        go build -ldflags "-s -w" -o "dist/sip-phone-linux-${CROSS_ARCH}" ./cmd/sip-phone
+        go build -ldflags "$LDFLAGS" -o "dist/sip-phone-linux-${CROSS_ARCH}" ./cmd/sip-phone
 fi
 
 # Windows amd64 托盘版（参数与 build.bat 的同名目标一致：GUI 子系统无控制台）
 if [ -n "$MINGW64_CC" ]; then
     echo "[3/4] 交叉构建 dist/sip-phone-windows-amd64.exe（CGO+音频，CC=${MINGW64_CC}）..."
     CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC="$MINGW64_CC" \
-        go build -ldflags "-s -w -H=windowsgui" \
+        go build -ldflags "$LDFLAGS -H=windowsgui" \
         -o dist/sip-phone-windows-amd64.exe ./cmd/sip-phone
 else
     echo "[3/4] 跳过 Windows amd64：未找到 x86_64-w64-mingw32-gcc"
@@ -128,7 +132,7 @@ fi
 if [ -n "$MINGW32_CC" ]; then
     echo "[4/4] 交叉构建 dist/sip-phone-windows-386.exe（CGO+音频，静态，CC=${MINGW32_CC}）..."
     CGO_ENABLED=1 GOOS=windows GOARCH=386 CC="$MINGW32_CC" \
-        go build -ldflags "-s -w -H=windowsgui -extldflags -static" \
+        go build -ldflags "$LDFLAGS -H=windowsgui -extldflags -static" \
         -o dist/sip-phone-windows-386.exe ./cmd/sip-phone
 else
     echo "[4/4] 跳过 Windows 386：未找到 i686-w64-mingw32-gcc"

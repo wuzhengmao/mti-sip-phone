@@ -22,14 +22,23 @@ if defined GCC (
 set "GOTOOLCHAIN=local"
 if not exist dist mkdir dist
 
+rem Build timestamp (ISO 8601 local time) injected into core.BuildTime, shown in
+rem the settings page version row. Empty when PowerShell is unavailable, then the
+rem app falls back to the executable's modification time.
+set "BUILD_TS="
+for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "Get-Date -Format s"`) do set "BUILD_TS=%%t"
+if defined BUILD_TS set "BUILD_TS=%BUILD_TS:~0,19%"
+set "LDFLAGS=-s -w"
+if defined BUILD_TS set "LDFLAGS=%LDFLAGS% -X mti-sip-phone/internal/core.BuildTime=%BUILD_TS%"
+
 rem 1) Windows amd64 GUI: no console, tray app, CGO+audio
 echo [1/3] Building dist\sip-phone-windows-amd64.exe (GUI, audio)...
-go build -ldflags "-s -w -H=windowsgui" -o dist\sip-phone-windows-amd64.exe .\cmd\sip-phone
+go build -ldflags "%LDFLAGS% -H=windowsgui" -o dist\sip-phone-windows-amd64.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 
 rem 2) Windows console build (-headless server mode / command line debug)
 echo [2/3] Building dist\sip-phone-console.exe (console, for headless)...
-go build -ldflags "-s -w" -o dist\sip-phone-console.exe .\cmd\sip-phone
+go build -ldflags "%LDFLAGS%" -o dist\sip-phone-console.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 
 rem 3) Windows 386 GUI: needs 32-bit MinGW, otherwise skipped
@@ -44,7 +53,7 @@ set CGO_ENABLED=1
 set CC=%GCC32%
 set GOOS=windows
 set GOARCH=386
-go build -ldflags "-s -w -H=windowsgui -extldflags -static" -o dist\sip-phone-windows-386.exe .\cmd\sip-phone
+go build -ldflags "%LDFLAGS% -H=windowsgui -extldflags -static" -o dist\sip-phone-windows-386.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 goto :summary
 

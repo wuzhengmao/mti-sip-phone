@@ -471,9 +471,16 @@ func (a *App) buildSettingsPage() {
 	scroll := container.NewVScroll(scrollContentWithGap)
 	a.settingsScroll = scroll
 
+	// 底部常驻一行版本信息（REQ-UI-026）：版本号、平台/架构、构建时间。
+	// 主窗体固定 320px 宽，用标注字号（11px）的 canvas 文本避免整行超宽被截断
+	versionText := canvas.NewText(fmt.Sprintf("版本 %s · %s · 构建于 %s",
+		core.Version, core.Platform(), core.BuildTimeText()), theme.ForegroundColor())
+	versionText.TextSize = a.fyne.Settings().Theme().Size(theme.SizeNameCaptionText)
+
 	a.settingsPage = container.NewBorder(
 		container.NewHBox(backBtn),
-		nil, nil, nil,
+		container.NewHBox(versionText),
+		nil, nil,
 		scroll,
 	)
 

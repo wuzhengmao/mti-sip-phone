@@ -490,6 +490,3 @@ func (a *App) publishCall(event, callID string, extra ...any) {
 	}
 	a.bus.Publish(event, data)
 }
-
-// Version 应用版本号（构建时可通过 -ldflags 覆盖）。
-var Version = "1.0.1"
