@@ -71,6 +71,9 @@ func main() {
 	releaseLock, err := single.Run(lockPath, os.Args[1:])
 	if err != nil {
 		if err == single.ErrAlreadyRunning {
+			// 同时写日志：自更新重启时，新进程若因锁冲突走到这里会静默退出，
+			// 日志是唯一线索（此前只打 stdout，无控制台时看不到）
+			logx.Logger().Warn("检测到已有实例在运行，本进程转发参数后退出", "lock", lockPath, "args", os.Args[1:])
 			fmt.Println("mti-sip-phone 已在运行，参数已转发给现有实例。")
 			os.Exit(0)
 		}
@@ -85,9 +88,17 @@ func main() {
 	// 拉起新进程"统一放在退出收尾（spawnNewProcessIfRequested）——必须等
 	// WS/SIP 监听关闭、SIP 注销完成后再启动新进程，否则新进程会把被占用的
 	// WS 端口 +1 写回配置，并与旧进程重复注册。
+	// 可执行文件路径：协议/自启注册、自动更新与重启共用（先取到，
+	// 重启回调与退出收尾都要用）
+	exePath, exeErr := os.Executable()
+
 	var restartRequested atomic.Bool
 	restart := func() error {
 		restartRequested.Store(true)
+		// Unix 侧先起看门狗兜底：正常退出时它只是多起一个实例（会被
+		// 单实例锁拦住并自行退出），若退出收尾卡住则由它强杀旧进程并拉起
+		// 新进程（实测 Debian X11 上更新后曾卡在 UI 退出阶段）
+		startRestartWatchdog(exePath, os.Args[1:])
 		stop()
 		return nil
 	}
@@ -95,7 +106,6 @@ func main() {
 	logx.Logger().Info("mti-sip-phone 启动", "version", core.Version, "config", cfgPath)
 
 	// 4. 注册 sip:// 系统协议（幂等；失败不阻断启动）
-	exePath, exeErr := os.Executable()
 	if exeErr != nil {
 		logx.Logger().Warn("无法获取可执行文件路径，跳过协议注册", "err", exeErr)
 	} else {
@@ -242,6 +252,7 @@ func spawnNewProcessIfRequested(requested *atomic.Bool, exePath string, releaseL
 	if !requested.Load() {
 		return
 	}
+	logx.Logger().Info("重启收尾：释放单实例锁", "exe", exePath)
 	if releaseLock != nil {
 		releaseLock()
 	}
@@ -250,11 +261,13 @@ func spawnNewProcessIfRequested(requested *atomic.Bool, exePath string, releaseL
 		return
 	}
 	cmd := exec.Command(exePath, os.Args[1:]...)
+	// Unix 侧脱离父进程会话（setsid），避免随父进程/终端退出被终止
+	cmd.SysProcAttr = detachSysProcAttr()
 	if err := cmd.Start(); err != nil {
-		logx.Logger().Error("拉起新进程失败，请手动启动程序", "err", err)
+		logx.Logger().Error("拉起新进程失败，请手动启动程序", "exe", exePath, "err", err)
 		return
 	}
-	logx.Logger().Info("已拉起新进程，当前进程退出")
+	logx.Logger().Info("已拉起新进程，当前进程退出", "pid", cmd.Process.Pid)
 }
 
 // shutdown 退出清理：注销 SIP 账户（发送 expires=0 的 REGISTER，REQ-ACC-009）。
