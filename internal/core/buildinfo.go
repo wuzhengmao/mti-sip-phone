@@ -7,7 +7,7 @@ import (
 )
 
 // Version 应用版本号（构建时可通过 -ldflags 覆盖）。
-var Version = "1.0.1"
+var Version = "1.0.2"
 
 // BuildTime 构建时间，由构建脚本通过 -ldflags -X 注入，格式 2006-01-02T15:04:05
 // （用 T 分隔避免 ldflags 参数里出现空格）；手动 go build / go run 未注入时为空，
