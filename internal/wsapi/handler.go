@@ -160,6 +160,35 @@ func (s *Server) dispatch(ctx context.Context, conn *websocket.Conn, wmu *sync.M
 	case MethodGetState:
 		resp = okMessage(msg.ID, s.app.State())
 
+	case MethodNotifyUpdate:
+		var p struct {
+			Version string `json:"version"`
+			URL     string `json:"url"`
+			SHA256  string `json:"sha256"`
+			Notes   string `json:"notes"`
+			OS      string `json:"os"`
+			Arch    string `json:"arch"`
+		}
+		if err := json.Unmarshal(msg.Params, &p); err != nil {
+			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("参数格式错误"))
+			break
+		}
+		// 参数校验（必填、地址合法性、平台一致性、版本高低）在 updater 内完成
+		err := s.app.NotifyUpdate(core.UpdateInfo{
+			Version: p.Version, URL: p.URL, SHA256: p.SHA256,
+			Notes: p.Notes, OS: p.OS, Arch: p.Arch,
+		})
+		if err != nil {
+			resp = errMessage(msg.ID, codeOf(err), err)
+			break
+		}
+		st := s.app.UpdateStatus()
+		resp = okMessage(msg.ID, map[string]string{
+			"phase":          st.Phase,
+			"version":        st.Info.Version,
+			"currentVersion": core.Version,
+		})
+
 	default:
 		resp = errMessage(msg.ID, CodeUnknownMethod, fmt.Errorf("未知方法: %s", msg.Method))
 	}
@@ -187,6 +216,12 @@ func codeOf(err error) string {
 		return CodeNotReady
 	case errors.Is(err, core.ErrCallNotFound):
 		return CodeCallNotFound
+	case errors.Is(err, core.ErrUpdateNotNewer):
+		return CodeUpdateNotNewer
+	case errors.Is(err, core.ErrUpdateInvalid):
+		return CodeInvalidParams
+	case errors.Is(err, core.ErrUpdateInProgress):
+		return CodeInternal
 	default:
 		return CodeInternal
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -50,8 +51,11 @@ type RegisterInfo struct {
 // State 应用状态快照（供 WS 查询接口返回）。
 type State struct {
 	Version  string        `json:"version"`
+	OS       string        `json:"os"`   // 编译目标平台（如 windows），前端据此查询对应产物
+	Arch     string        `json:"arch"` // 编译目标架构（如 amd64）
 	Register RegisterInfo  `json:"register"`
 	Calls    []Call        `json:"calls"`
+	Update   *UpdateStatus `json:"update,omitempty"` // 更新状态（无更新时省略）
 }
 
 // 常见错误，供接口层映射为错误码。
@@ -66,6 +70,7 @@ type App struct {
 	cfg     *config.Config
 	cfgPath string
 	tel     Telephony
+	upd     Updater // 自动更新能力（nil = 未接入）
 	bus     *Bus
 
 	mu        sync.RWMutex
@@ -151,12 +156,24 @@ func (a *App) Start(ctx context.Context) {
 
 // State 返回当前状态快照。
 func (a *App) State() State {
+	// 更新状态先取快照（updater 自持锁），再进 a.mu——updater 的等待
+	// goroutine 会回调 a.HasActiveCall 取 a.mu，若这里持 a.mu 再调
+	// updater 会形成两把锁互等
+	var upd *UpdateStatus
+	if a.upd != nil {
+		if st := a.upd.Status(); st.Phase != UpdateIdle {
+			upd = &st
+		}
+	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	st := State{
 		Version:  Version,
+		OS:       runtime.GOOS,
+		Arch:     runtime.GOARCH,
 		Register: a.reg,
 		Calls:    make([]Call, 0, len(a.callOrder)),
+		Update:   upd,
 	}
 	for _, id := range a.callOrder {
 		st.Calls = append(st.Calls, *a.calls[id])
@@ -178,7 +195,7 @@ func (a *App) Dial(ctx context.Context, target string) (string, error) {
 	if a.tel == nil {
 		return "", ErrTelephonyNotReady
 	}
-	if a.hasActiveCall() {
+	if a.HasActiveCall() {
 		return "", fmt.Errorf("已有通话进行中，无法发起新的呼叫")
 	}
 	callID, err := a.tel.Dial(ctx, target)
@@ -436,8 +453,8 @@ func (a *App) setRegister(state RegisterState, reason string) {
 	a.mu.Unlock()
 }
 
-// hasActiveCall 是否存在进行中的通话（振铃或已接通）。
-func (a *App) hasActiveCall() bool {
+// HasActiveCall 是否存在进行中的通话（振铃或已接通）。
+func (a *App) HasActiveCall() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	for _, c := range a.calls {

@@ -121,7 +121,8 @@
     /**
      * 订阅事件。
      * 事件名：call.incoming / call.ringing / call.established / call.terminated /
-     *         call.failed / call.muted / register.state / system.state / connected / disconnected
+     *         call.failed / call.muted / register.state / system.state /
+     *         system.update（自动更新状态：phase/progress/error 等）/ connected / disconnected
      * @param {string} event 事件名，'*' 订阅全部
      * @param {Function} fn 回调 (data) => {}
      * @returns {this}
@@ -195,10 +196,35 @@
 
     /**
      * 查询软电话当前状态（注册状态、通话列表等）。
+     * 返回值含 version / os / arch（前端据此到业务平台查询对应架构的
+     * 最新版本，见 notifyUpdate）。
      * @returns {Promise<Object>}
      */
     getState() {
       return this._request('system.getState', {});
+    }
+
+    /**
+     * 告知软电话有新版本可用（自动更新）。软电话只提示用户，
+     * 由用户在软电话界面上确认后才会下载、替换并重启。
+     * @param {{version: string, url: string, sha256?: string, notes?: string,
+     *          os?: string, arch?: string}} info 新版本信息；
+     *        version 必须高于软电话当前版本，否则返回 update_not_newer
+     * @returns {Promise<{phase: string, version: string, currentVersion: string}>}
+     */
+    notifyUpdate(info) {
+      info = info || {};
+      if (!info.version || !info.url) {
+        return Promise.reject(new Error('notifyUpdate 需要 version 与 url'));
+      }
+      return this._request('system.notifyUpdate', {
+        version: info.version,
+        url: info.url,
+        sha256: info.sha256,
+        notes: info.notes,
+        os: info.os,
+        arch: info.arch
+      });
     }
 
 

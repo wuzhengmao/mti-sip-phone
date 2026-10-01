@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 
 	"mti-sip-phone/internal/config"
 	"mti-sip-phone/internal/core"
+	"mti-sip-phone/internal/updater"
 )
 
 // stubTel 测试电话桩：Dial 后立即模拟振铃→接通，Hangup 立即结束，
@@ -53,7 +56,8 @@ func (s *stubTel) AudioDevices() ([]core.AudioDevice, []core.AudioDevice) {
 }
 func (s *stubTel) Close() error { return nil }
 
-// newTestServer 构造测试用服务：stub 电话层 + httptest 服务。
+// newTestServer 构造测试用服务：stub 电话层 + 真实更新器 + httptest 服务。
+// 更新器指向临时目录下的假 exe 路径（只做参数校验与状态机，不触发下载）。
 func newTestServer(t *testing.T) (*httptest.Server, *core.App) {
 	t.Helper()
 	cfg := config.Default()
@@ -62,6 +66,10 @@ func newTestServer(t *testing.T) (*httptest.Server, *core.App) {
 	app := core.New(cfg, nil, bus)
 	tel := &stubTel{app: app}
 	app.SetTel(tel)
+	app.SetUpdater(updater.New(updater.Options{
+		Bus:     bus,
+		ExePath: filepath.Join(t.TempDir(), "sip-phone-test.exe"),
+	}))
 	app.Start(context.Background())
 
 	srv := New(app)
@@ -199,6 +207,61 @@ func TestGetState(t *testing.T) {
 	}
 	if got.Register.State != state.Register.State {
 		t.Fatalf("状态不一致: got=%+v want=%+v", got, state)
+	}
+	// 版本与平台/架构随状态上报（前端据此查询对应产物的更新）
+	if got.Version != core.Version {
+		t.Errorf("版本号 = %q，期望 %q", got.Version, core.Version)
+	}
+	if got.OS != runtime.GOOS || got.Arch != runtime.GOARCH {
+		t.Errorf("平台/架构 = %s/%s，期望 %s/%s", got.OS, got.Arch, runtime.GOOS, runtime.GOARCH)
+	}
+}
+
+// TestNotifyUpdate 前端告知新版本：成功、版本不更高、参数非法三种路径。
+func TestNotifyUpdate(t *testing.T) {
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+
+	// 1) 更高版本：受理并回 available，同时推送 system.update 事件
+	sendRequest(t, conn, Message{ID: json.RawMessage("1"), Method: "system.notifyUpdate",
+		Params: json.RawMessage(`{"version":"9.9.9","url":"http://dl.example.com/a.exe"}`)})
+	resp, ev := waitResponseAndEvent(t, conn, "system.update")
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("notifyUpdate 应成功，收到: %+v", resp)
+	}
+	data, _ := json.Marshal(resp.Data)
+	var got map[string]string
+	_ = json.Unmarshal(data, &got)
+	if got["phase"] != core.UpdateAvailable || got["currentVersion"] != core.Version {
+		t.Errorf("响应数据异常: %+v", got)
+	}
+	evData, _ := json.Marshal(ev.Data)
+	var st core.UpdateStatus
+	_ = json.Unmarshal(evData, &st)
+	if st.Phase != core.UpdateAvailable || st.Host != "dl.example.com" {
+		t.Errorf("system.update 事件异常: %+v", st)
+	}
+
+	// 2) 版本不高于当前：update_not_newer
+	sendRequest(t, conn, Message{ID: json.RawMessage("2"), Method: "system.notifyUpdate",
+		Params: json.RawMessage(`{"version":"` + core.Version + `","url":"http://dl.example.com/a.exe"}`)})
+	resp = waitResponse(t, conn)
+	if resp.OK == nil || *resp.OK || resp.Error == nil || resp.Error.Code != CodeUpdateNotNewer {
+		t.Fatalf("期望 update_not_newer，收到: %+v", resp)
+	}
+
+	// 3) 参数非法：invalid_params（缺地址 / 非 http(s)）
+	for i, params := range []string{
+		`{"version":"9.9.9"}`,
+		`{"version":"9.9.9","url":"ftp://dl.example.com/a.exe"}`,
+	} {
+		sendRequest(t, conn, Message{ID: json.RawMessage("3"), Method: "system.notifyUpdate",
+			Params: json.RawMessage(params)})
+		resp = waitResponse(t, conn)
+		if resp.OK == nil || *resp.OK || resp.Error == nil || resp.Error.Code != CodeInvalidParams {
+			t.Fatalf("用例 %d：期望 invalid_params，收到: %+v", i, resp)
+		}
 	}
 }
 

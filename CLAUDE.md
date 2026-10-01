@@ -41,7 +41,7 @@ build.bat
 # 测试：CGO 包（audio）需要 gcc。用 build.bat 同款工具链：
 export CC="<WinLibs mingw64/bin/gcc.exe 路径>"   # build.bat 输出里可见
 export CGO_ENABLED=1
-go test ./internal/media/ ./internal/wsapi/ ./internal/sip/
+go test ./internal/media/ ./internal/wsapi/ ./internal/sip/ ./internal/ui/ ./internal/updater/
 
 # 运行
 dist/sip-phone-windows-amd64.exe       # 托盘常驻；关闭主窗口=隐藏到托盘
@@ -94,11 +94,17 @@ internal/
   media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU 编解码、播放环形缓冲、SDP 协商
   audio/      音频设备：malgo 后端（全双工采集/播放、设备枚举/选择、提示音）
   wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳）
-  ui/         Fyne 界面：主窗口/拨号盘/设置页/通话面板/托盘。通话面板的
-              去装饰/右下角吸附/不进任务栏按平台拆分：topmost_windows.go
-              （Win32）、topmost_linux.go（X11：_MOTIF_WM_HINTS 去装饰 +
-              _NET_WM_STATE SKIP_TASKBAR + _NET_WORKAREA 定位）、
-              topmost_other.go（其余平台空实现）
+  updater/    自动更新：前端经 WS 告知新版本 → 用户确认后下载（sha256/
+              可执行魔数校验）→ 替换当前可执行文件（.old 备份）→ 重启；
+              向总线发布 system.update 事件
+  ui/         Fyne 界面：主窗口/拨号盘/设置页/通话面板/更新提示窗/托盘。
+              通话面板与更新提示窗的去装饰/右下角吸附/不进任务栏按平台
+              拆分：topmost_windows.go（Win32）、topmost_linux.go（X11：
+              _MOTIF_WM_HINTS 去装饰 + _NET_WM_STATE SKIP_TASKBAR +
+              _NET_WORKAREA 定位）、topmost_other.go（其余平台空实现）
+  ui/ui_update.go  更新提示窗 + 主窗体提示行（REQ-UPD-003）
+  ui/folderdlg_windows.go  系统文件夹选择对话框（IFileOpenDialog，Windows）
+  ui/folderdlg_other.go    其他平台回退（用 Fyne 内置对话框）
   protocol/   sip:// 协议解析与系统协议注册（Windows 注册表 / Linux .desktop）
   single/     单实例（命名互斥体/flock）+ 第二实例参数转发（随机 token）
   autostart/  开机自启（Windows HKCU Run / Linux XDG autostart，其他平台 no-op）
@@ -120,6 +126,7 @@ main（组装）
 ```
 
 - **事件流单向**：sip 层 → `p.sink`（core.App 回调：OnIncoming/OnRinging/OnEstablished/OnFailed/OnTerminated）→ 事件总线 → UI 与 WS 订阅者。
+- **自动更新**：业务前端（网页）经 WS `system.notifyUpdate` 告知新版本（软电话自身不查更新服务器）→ `internal/updater` 校验并发布 `system.update` 事件 → UI 弹右下角提示窗 + 主窗体提示行 → **用户点击后**才下载、替换 exe 并重启（WS 不能触发下载/重启）。下载/替换的进度与失败原因同样经总线事件到 UI 与网页。
 - **media.Engine 与音频设备解耦**：音频回调调用 `FeedMic`（任意帧长，内部按 20ms 帧累积发送）/ `ReadPlayback`（任意帧长，内部从样本环形缓冲取）。
 - **播放缓冲**（media/jitter.go）：样本粒度环形缓冲 8 秒容量；RTP 按序号处理——乱序/过期丢弃、丢包填静音（PLC 用静音而非循环旧帧）、SSRC 切换或序号大跳变（>2 秒）重置缓冲（183 早期媒体 → 200 新媒体流的关键）。
 - **保持语义**：本端保持发 re-INVITE（offer `a=sendonly`，恢复 `a=sendrecv`）；对端 re-INVITE 按方向镜像应答（对端 `recvonly` → 本端 `sendonly` 且停止发送）。
@@ -157,6 +164,8 @@ main（组装）
 - **音频管理器（internal/audio）的线程模型**：后端初始化在后台 goroutine，`NewManager` 最多等 `initWait`(2s) 就返回；所有会碰后端的操作（开关音频流、播放提示音）都排入单 worker 的 FIFO 队列后立即返回，调用方（UI 线程、SIP 线程）不会被设备操作阻塞。**不要持 `m.mu` 调用后端**——miniaudio 的设备操作在音频服务不可达时会长时间阻塞（`PULSE_SERVER=tcp:localhost` 实测 15 秒），持锁会把 UI 线程的 `enqueue`/`SetMic` 一起卡死；正确做法是先取状态快照、释放锁再调后端（见 `startStreamFor`/`stopStream`）。设备枚举 `Devices()` 保持同步，调用方需自行放进后台 goroutine（界面侧见 `refreshDevices`）。后端内部同理：`malgoBackend.toneMu` 只护提示音状态，**不得跨越 `malgo.InitDevice`/`device.Start`/`device.Uninit` 持有**——miniaudio 启动/销毁设备要等音频回调线程，而回调要拿 `toneMu`，持锁即死锁（树莓派 PulseAudio 实测 `ma_device_start` 永不返回，音频 worker 卡死，之后所有音频操作排队不执行、通话无声）。
 - **通话面板窗口控制按平台拆分**：`ui_call.go`/`ui.go` 只调用平台函数（`moveCallWindowToCorner`、`callWindowTitle`、`markTrayQuit`、面板尺寸常量），实现分别在 `topmost_windows.go`（Win32）与 `topmost_linux.go`（X11）——**勿把任一侧的逻辑写进共享文件**。Linux 侧靠 `driver.NativeWindow.RunNative` 取 X11 窗口号（回调收到 `driver.X11WindowContext`），需经 `fyne.DoAndWait` 在主线程取；`fyne.DoAndWait` 不可在主线程调用（会 panic），故 `moveCallWindowToCorner` 内部起 goroutine。Wayland 会话下 X11 手段全部无效（不能自定位、去装饰看合成器）——所以 Linux 默认把后端固定到 X11（见下方「Linux 桌面后端」条）。X11 侧还额外把 `_NET_WM_STATE` 写成**窗口属性**（不只发 ClientMessage），因为 Xwayland 下没有独立 X11 窗口管理器处理消息。但**任务栏条目在 labwc 下无法由客户端去掉**（实测属性/消息都不生效）：任务栏走 foreign-toplevel 协议，该协议没有 skip-taskbar 字段，`_NET_WM_STATE_SKIP_TASKBAR` 不会透传。要隐藏只能用 labwc 自己的窗口规则（`~/.config/labwc/rc.xml`，labwc ≥0.6.4）：`<windowRule title="SIP" skipTaskbar="yes" skipWindowSwitcher="yes"/>`——按 `title` 匹配（面板标题恒以 `SIP` 开头，主窗体是 `mti-sip-phone …`），**勿按 `identifier` 匹配**（Xwayland 下两窗口 WM_CLASS 相同，会连主窗体一起隐藏）。用户已确认该条目可接受，不要再在客户端代码里尝试修它。
 - **媒体/NAT**：对称 NAT 下 UDP 映射需持续出向流量保活（早期媒体阶段 SetKeepalive 持续发静音帧）；SDP 宣告地址与 socket 绑定地址分离（SetSDPIP）；183→200 可能换 SSRC/端口（引擎已自动处理，勿移除 playPush 的重置逻辑）。
+- **自更新重启时序**（勿简化）：重启请求只标记 `restartRequested` 并取消 ctx，**释放单实例锁与拉起新进程必须放在退出收尾**（`shutdown` 之后、进程退出之前，见 main.go 的 `spawnNewProcessIfRequested`）——顺序反了会让新进程因锁冲突转发参数后退出，或因 WS 端口仍被占用而 +1 写回配置、SIP 双注册。历史缺陷：旧 `onRestart` 释放锁+拉起进程后不退出旧进程（已修复）。Windows 上运行中的 exe **能改名不能覆盖**，替换流程为 exe→.old、.new→exe、失败回滚（`internal/updater/replace.go`，已用真实进程验证）。
+- **更新提示窗与通话面板都吸附右下角**：通话期间隐藏更新提示窗（`setCallUI` 非空闲分支），通话结束后按 `updatePopupPending` 补弹；不要在两者都可见时做偏移摆放。
 - **测试 flakiness**：`internal/sip` 全量并行跑时偶发 5s 超时失败（信令测试间资源干扰，与具体改动无关）；分组或单跑稳定。验证方式：`go test -run "<Test名>"` 单跑 + 分组复跑。
 - **malgo 回调帧长不固定**：WASAPI 共享模式下回调 frameCount 不保证等于 20ms（160 样本），不要假设固定帧长读写引擎。
 - **build.bat（cmd 解析）**：`if (...)` 块内的 `echo` 文本不要同时出现括号与尾部 `...`——cmd 会把 `(...)` 当命令组，报「此时不应有 ...。」并中断整个构建（不回显 errorlevel）。多分支输出用 `goto` 标签而不要塞进 if/else 块。
