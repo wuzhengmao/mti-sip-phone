@@ -165,7 +165,9 @@ setup_toolchain() {
                 CC="$(command -v gcc)"; CXX="$(command -v g++)"
             elif [ -n "$cross32" ]; then
                 CC="$cross32"; CXX="${cross32%gcc}g++"
-                FF_EXTRA="--arch=x86_64 --cross-prefix=x86_64-linux-gnu-"
+                # --target-os 同 linux-arm64 分支：有 --cross-prefix 就必须给
+                # --arch 与 --target-os（否则 configure 直接 die）
+                FF_EXTRA="--target-os=linux --arch=x86_64 --cross-prefix=x86_64-linux-gnu-"
             else
                 echo "  缺少 x86_64-linux-gnu-gcc（apt install gcc-x86-64-linux-gnu）" >&2
                 return 1
@@ -177,7 +179,11 @@ setup_toolchain() {
                 CC="$(command -v gcc)"; CXX="$(command -v g++)"
             elif [ -n "$cross64" ]; then
                 CC="$cross64"; CXX="${cross64%gcc}g++"
-                FF_EXTRA="--arch=aarch64 --cross-prefix=aarch64-linux-gnu-"
+                # --target-os 不能省：configure 只要见到 --cross-prefix 就要求
+                # --arch 与 --target-os **同时**给出，否则直接 die
+                # "Must specify target arch (--arch) and OS (--target-os) when
+                # cross-compiling"（见 ffmpeg/configure 的 cross_prefix 检查）。
+                FF_EXTRA="--target-os=linux --arch=aarch64 --cross-prefix=aarch64-linux-gnu-"
             else
                 echo "  缺少 aarch64-linux-gnu-gcc（apt install gcc-aarch64-linux-gnu）" >&2
                 return 1
