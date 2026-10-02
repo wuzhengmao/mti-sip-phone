@@ -92,12 +92,20 @@ func videoCodecDecodable(name string) bool {
 }
 
 // negotiateVideo 在对端的视频媒体段中按本地优先级挑选编码。
-// 返回本地编码描述与**对端 offer 里的 PT 号**。
+// 返回本地编码描述、**对端 offer 里的 PT 号**，以及 answer 应使用的 fmtp。
 //
-// H264 特例：对端显式声明 packetization-mode=0 时跳过——我们发不出
-// 「单 NAL 必须小于 MTU」的约束，大帧只能靠 FU-A 分片。
-// 未声明该属性时按宽容处理（多数实现省略但支持 FU-A）。
-func negotiateVideo(info *MediaInfo) (VideoCodec, uint8, bool) {
+// H264 的 packetization-mode=0（单 NAL 模式）**不再跳过**：该参数说的是对端
+// 自己怎么发（对端只发单 NAL），并不限制本端接收——本端解包器对单 NAL /
+// STAP-A / FU-A 一视同仁。而拒掉整条 m=video 的代价极大：对端也就不发视频了，
+// 两边全黑。实测（FreeSWITCH 呼入视频电话，offer 是
+// `a=fmtp:102 profile-level-id=42000a; packetization-mode=0`）200 OK 回
+// `m=video 0`，接听后没有任何画面。此前对「未声明 packetization-mode」
+//（RFC 6184 里同样等价于模式 0，且更常见）就是宽容处理的，现在两者一致。
+//
+// 发送侧仍按 pion 的 H264 打包器走（NAL 塞得进 MTU 就单包，大帧 FU-A 分片）：
+// 真按模式 0 只发单包等于发不出画面；而绝大多数接收端（含 FreeSWITCH——它的
+// 视频是 passthrough、根本不解析 H264 fmtp）对 FU-A 都能解。
+func negotiateVideo(info *MediaInfo) (VideoCodec, uint8, string, bool) {
 	for _, c := range supportedVideoCodecs {
 		if !video.EncoderAvailable(c.Name) && !videoCodecDecodable(c.Name) {
 			continue
@@ -106,15 +114,29 @@ func negotiateVideo(info *MediaInfo) (VideoCodec, uint8, bool) {
 			if !info.EncodingMatches(pt, c.Name) {
 				continue
 			}
-			if c.Name == videoCodecH264 {
-				if mode, ok := info.FmtpParam(pt, "packetization-mode"); ok && strings.TrimSpace(mode) == "0" {
-					continue
-				}
-			}
-			return c, pt, true
+			return c, pt, answerVideoFMTP(c, info, pt), true
 		}
 	}
-	return VideoCodec{}, 0, false
+	return VideoCodec{}, 0, "", false
+}
+
+// answerVideoFMTP answer 里视频段的 fmtp：本端模板（描述本端发送什么），
+// 但 **packetization-mode 换成对端 offer 声明过的值**——answer 只能选 offer
+// 里出现过的模式，回本端的 1 会被严格的对端判为协商失败（488）。
+// 对端未声明该参数时保持模板原样（此时按 RFC 6184 缺省即模式 0，但实践中
+// 省略它的对端都支持 FU-A，回 1 反而更贴合实际行为）。
+func answerVideoFMTP(c VideoCodec, info *MediaInfo, pt uint8) string {
+	mode, ok := info.FmtpParam(pt, "packetization-mode")
+	if !ok || !strings.Contains(c.FMTP, "packetization-mode=") {
+		return c.FMTP
+	}
+	parts := strings.Split(c.FMTP, ";")
+	for i, p := range parts {
+		if k, _, found := strings.Cut(p, "="); found && strings.EqualFold(strings.TrimSpace(k), "packetization-mode") {
+			parts[i] = "packetization-mode=" + strings.TrimSpace(mode)
+		}
+	}
+	return strings.Join(parts, ";")
 }
 
 // VideoCodecSupported 指定编码在当前构建里可用（UI 判断视频入口是否显示）。

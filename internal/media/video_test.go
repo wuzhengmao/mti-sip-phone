@@ -135,7 +135,7 @@ func TestNegotiateVideoPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
-	rc, pt, ok := negotiateVideo(info)
+	rc, pt, _, ok := negotiateVideo(info)
 	if !ok {
 		t.Fatal("应当协商成功")
 	}
@@ -148,7 +148,13 @@ func TestNegotiateVideoPriority(t *testing.T) {
 	}
 }
 
-// TestNegotiateVideoH264Mode0 H264 显式声明 packetization-mode=0 时跳过。
+// TestNegotiateVideoH264Mode0 H264 显式声明 packetization-mode=0 也要接受，
+// 且 answer 的 fmtp 回**对端声明的模式**（answer 只能是 offer 的子集）。
+//
+// 回归：早期这里直接跳过 H264，实测 FreeSWITCH 呼入视频电话（offer 就是
+// `a=fmtp:102 profile-level-id=42000a; packetization-mode=0`）因此在 200 OK
+// 里回 `m=video 0`，两边都看不到画面。该参数说的是对端自己怎么发，不影响
+// 本端接收。
 func TestNegotiateVideoH264Mode0(t *testing.T) {
 	if !VideoSupported() {
 		t.Skip("未启用视频的构建（需要 -tags video）")
@@ -160,16 +166,41 @@ func TestNegotiateVideoH264Mode0(t *testing.T) {
 		"t=0 0\r\n" +
 		"m=video 50000 RTP/AVP 100 101\r\n" +
 		"a=rtpmap:100 H264/90000\r\n" +
-		"a=fmtp:100 packetization-mode=0\r\n" +
+		"a=fmtp:100 profile-level-id=42000a; packetization-mode=0\r\n" +
 		"a=rtpmap:101 VP8/90000\r\n" +
 		"a=sendrecv\r\n")
-	info, _ := ParseMedia(body, "video")
-	rc, pt, ok := negotiateVideo(info)
-	if !ok {
-		t.Fatal("应当落到 VP8")
+	info, err := ParseMedia(body, "video")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
 	}
-	if rc.Name != videoCodecVP8 || pt != 101 {
-		t.Fatalf("应选 VP8/101，实际 %s/%d", rc.Name, pt)
+	rc, pt, fmtp, ok := negotiateVideo(info)
+	if !ok {
+		t.Fatal("packetization-mode=0 不应导致协商失败")
+	}
+	if rc.Name != videoCodecH264 || pt != 100 {
+		t.Fatalf("应选 H264/100，实际 %s/%d", rc.Name, pt)
+	}
+	if !strings.Contains(fmtp, "packetization-mode=0") || strings.Contains(fmtp, "packetization-mode=1") {
+		t.Fatalf("answer 的 fmtp 应回对端声明的 packetization-mode=0：%q", fmtp)
+	}
+	if !strings.Contains(fmtp, "profile-level-id=42e01f") {
+		t.Fatalf("answer 的 fmtp 应保留本端 profile-level-id：%q", fmtp)
+	}
+
+	// 对端没声明 packetization-mode 时保持本端模板（行为与从前一致）
+	noMode := []byte("v=0\r\n" +
+		"o=- 1 1 IN IP4 192.168.1.9\r\n" +
+		"s=-\r\n" +
+		"c=IN IP4 192.168.1.9\r\n" +
+		"t=0 0\r\n" +
+		"m=video 50000 RTP/AVP 100\r\n" +
+		"a=rtpmap:100 H264/90000\r\n" +
+		"a=fmtp:100 profile-level-id=42e01f\r\n" +
+		"a=sendrecv\r\n")
+	info2, _ := ParseMedia(noMode, "video")
+	c := supportedVideoCodecs[0]
+	if got := answerVideoFMTP(c, info2, 100); got != c.FMTP {
+		t.Fatalf("对端未声明时应保持本端 fmtp，实际 %q", got)
 	}
 }
 

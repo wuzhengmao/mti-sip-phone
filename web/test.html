@@ -38,6 +38,12 @@
   .badge.warn { background: #fef3c7; color: var(--warn); }
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
   label { font-size: 13px; color: var(--gray); min-width: 70px; }
+  /* 勾选行：开关 + 说明文字（label 的最小宽度在这里不需要） */
+  .check {
+    display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+    font-size: 13px; color: var(--text); cursor: pointer;
+  }
+  .check input { width: 16px; height: 16px; cursor: pointer; margin: 0; }
   input[type=text], input[type=number] {
     flex: 1; min-width: 120px; padding: 8px 10px; border: 1px solid var(--border);
     border-radius: 6px; font-size: 14px; outline: none;
@@ -186,6 +192,13 @@
         </div>
       </div>
       <p id="noCall" class="state-line">当前没有进行中的通话</p>
+      <div class="row" style="margin-top:10px">
+        <label>自动接听</label>
+        <label class="check">
+          <input type="checkbox" id="chkAutoAnswer">
+          <span>开启后来电自动接听（视频来电按视频接听接通，摄像头不可用时只收不发）</span>
+        </label>
+      </div>
     </div>
 
     <div class="card" style="margin-top:16px">
@@ -444,6 +457,31 @@
     updateVersionLine(st);
   });
 
+  // ---------------- 自动接听开关 ----------------
+  // 与软电话界面上的「自动接听」按钮共用一份状态：这边改，桌面按钮跟着变；
+  // 桌面改，system.autoAnswer 事件推过来，这边跟着变。
+  function applyAutoAnswer(enabled, fromEvent) {
+    $('chkAutoAnswer').checked = !!enabled;
+    if (fromEvent) {
+      addLog('info', '自动接听: ' + (enabled ? '开' : '关'));
+    }
+  }
+
+  sdk.on('system.autoAnswer', function (data) {
+    applyAutoAnswer(data && data.enabled, true);
+  });
+
+  $('chkAutoAnswer').onchange = function () {
+    var on = this.checked;
+    var el = this;
+    sdk.setAutoAnswer(on).then(function () {
+      addLog('ok', '自动接听已' + (on ? '开启（来电自动接听）' : '关闭'));
+    }).catch(function (e) {
+      el.checked = !on; // 失败回滚显示
+      addLog('err', '设置自动接听失败: ' + e.message);
+    });
+  };
+
   sdk.on('system.state', function (state) {
     // 连接建立时收到的状态快照
     addLog('info', '收到状态快照: ' + JSON.stringify(state));
@@ -451,6 +489,7 @@
     buildInfo.os = state.os || '';
     buildInfo.arch = state.arch || '';
     updateVersionLine(state.update);
+    applyAutoAnswer(state.autoAnswer, false); // 自动接听开关当前状态
     if (state.register) {
       updateRegister(state.register);
     }

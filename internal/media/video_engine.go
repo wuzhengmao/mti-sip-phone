@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,9 +43,10 @@ type VideoEngine struct {
 	remote    *net.UDPAddr
 
 	// 协商结果
-	codecMu sync.RWMutex
-	codec   VideoCodec
-	peerPT  uint8 // 对端 offer/answer 中的负载类型号（线上用）
+	codecMu    sync.RWMutex
+	codec      VideoCodec
+	peerPT     uint8  // 对端 offer/answer 中的负载类型号（线上用）
+	answerFMTP string // answer 用的 fmtp（packetization-mode 已按对端 offer 取值）
 
 	pay videoPacketizer
 	dep videoDepacketizer
@@ -109,6 +111,8 @@ type VideoEngine struct {
 	wg        sync.WaitGroup
 
 	rxPackets atomic.Uint64
+	anyPkts   atomic.Uint64 // 到达本端口的任意 UDP 包数（前 3 个打日志，诊断用）
+	rxOtherPT atomic.Uint64 // 负载类型不符被丢弃的包数（诊断用）
 	txPackets atomic.Uint64
 	txBytes   atomic.Uint64
 }
@@ -252,14 +256,17 @@ func (v *VideoEngine) offerSection(dir string) *sdpSection {
 // 两边都看不到画面」。协商结果（编码 + 对端 PT）已存在 codec/peerPT 里，直接用。
 func (v *VideoEngine) answerSection(dir string) *sdpSection {
 	v.codecMu.RLock()
-	c, pt := v.codec, v.peerPT
+	c, pt, fmtp := v.codec, v.peerPT, v.answerFMTP
 	v.codecMu.RUnlock()
 	if c.Name == "" {
 		return nil
 	}
+	if fmtp == "" {
+		fmtp = c.FMTP
+	}
 	return &sdpSection{
 		Kind: "video", Port: v.localPort, RTCPPort: v.localPort + 1,
-		Codecs: []sdpCodec{{PT: pt, Encoding: c.Name, ClockRate: c.ClockRate, FMTP: c.FMTP}},
+		Codecs: []sdpCodec{{PT: pt, Encoding: c.Name, ClockRate: c.ClockRate, FMTP: fmtp}},
 		Dir:    dir,
 	}
 }
@@ -295,17 +302,23 @@ func (v *VideoEngine) ApplyOffer(info *MediaInfo) bool {
 	if info == nil || info.Rejected || info.Addr == nil {
 		return false
 	}
-	rc, peerPT, ok := negotiateVideo(info)
+	rc, peerPT, fmtp, ok := negotiateVideo(info)
 	if !ok {
 		logx.Logger().Warn("无共同视频编解码器", "对端支持", ptListString(info.PTs))
 		return false
 	}
-	v.setNegotiated(rc, peerPT)
+	v.setNegotiated(rc, peerPT, fmtp)
 	v.setRemote(info.Addr, info.RTCPPort)
 	v.punchHole()
 	v.notifyState()
+	mode := info.PacketizationMode(peerPT)
 	logx.Logger().Info("视频协商完成（呼入）", "codec", rc.Name, "peerPT", peerPT,
-		"remote", info.Addr.String(), "dir", info.Dir)
+		"remote", info.Addr.String(), "dir", info.Dir, "对端mode", mode)
+	if mode == 0 && rc.Name == videoCodecH264 {
+		// 单 NAL 模式：对端只发单包，本端照收；本端发送仍可能在必要时用 FU-A 分片
+		//（见 negotiateVideo 注释）。这条日志用于解释"对方看不到我"的可能原因。
+		logx.Logger().Info("对端声明 packetization-mode=0（单 NAL），本端按需仍用 FU-A 分片发送")
+	}
 	return true
 }
 
@@ -324,18 +337,27 @@ func (v *VideoEngine) ApplyAnswer(info *MediaInfo) bool {
 		logx.Logger().Warn("对端 answer 的视频负载类型未知", "pt", pt)
 		return false
 	}
-	v.setNegotiated(rc, pt)
+	// 呼出路径不会再构造 answer，这里只记录本端编码的 fmtp（answerSection 用不到）
+	v.setNegotiated(rc, pt, rc.FMTP)
 	v.setRemote(info.Addr, info.RTCPPort)
 	v.punchHole()
 	v.notifyState()
 	logx.Logger().Info("视频协商完成（呼出）", "codec", rc.Name, "pt", pt, "remote", info.Addr.String())
+	// 本端 offer 写的是 packetization-mode=1，对端**显式**回 0 说明它只收单 NAL，
+	// 本端的大帧（FU-A 分片）它多半解不了——留条线索，别让它变成"对方看不到我"的悬案。
+	if mode, ok := info.FmtpParam(pt, "packetization-mode"); ok && strings.TrimSpace(mode) == "0" && rc.Name == videoCodecH264 {
+		logx.Logger().Info("对端 answer 声明 packetization-mode=0（单 NAL），本端仍按需用 FU-A 分片发送")
+	}
 	return true
 }
 
-func (v *VideoEngine) setNegotiated(c VideoCodec, peerPT uint8) {
+// setNegotiated 记录协商结果。answerFMTP 是 answer 里要回给对端的 fmtp
+//（packetization-mode 已按对端 offer 取值，见 answerVideoFMTP）。
+func (v *VideoEngine) setNegotiated(c VideoCodec, peerPT uint8, answerFMTP string) {
 	v.codecMu.Lock()
 	v.codec = c
 	v.peerPT = peerPT
+	v.answerFMTP = answerFMTP
 	v.codecMu.Unlock()
 	v.pay = newVideoPacketizer(c.Name)
 	v.dep = newVideoDepacketizer(c.Name)
@@ -350,6 +372,33 @@ func (v *VideoEngine) Start() {
 	go v.decodeLoop()
 	v.rtcp.start()
 	v.punchHole()
+	// 诊断：8 秒后还没收到对端任何视频包就打一条线索（只打一次，挂断则不打）。
+	// 「视频窗口开了但对方画面一直不来」时，它能立刻区分「对端没发」与
+	// 「本端没收到/被过滤」，省掉一轮抓包。
+	time.AfterFunc(8*time.Second, v.diagNoRemoteVideo)
+}
+
+// diagNoRemoteVideo 启动后迟迟收不到对端视频时的诊断（见 Start）。
+func (v *VideoEngine) diagNoRemoteVideo() {
+	select {
+	case <-v.stop:
+		return // 已挂断，别误导
+	default:
+	}
+	if v.rxPackets.Load() > 0 {
+		return
+	}
+	rx, tx, _ := v.Stats()
+	hint := "对端可能没有视频源（摄像头未开/被禁用），或仍在等本端画面"
+	switch {
+	case tx == 0:
+		hint = "本端一个视频包也没发出（摄像头打开失败？）——对端可能因此在等本端画面"
+	case v.anyPkts.Load() > 0 && rx == 0:
+		hint = "有 UDP 包到达本端口但不是能用的视频 RTP（负载类型不符或不是 RTP）"
+	}
+	logx.Logger().Warn("视频已启动 8 秒仍未收到对端视频 RTP",
+		"端口收包", v.anyPkts.Load(), "有效", rx, "负载类型不符", v.rxOtherPT.Load(),
+		"已发", tx, "提示", hint)
 }
 
 // Close 停止全部活动并释放端口。幂等。
@@ -592,7 +641,7 @@ func (v *VideoEngine) recvLoop() {
 		default:
 		}
 		_ = v.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		n, _, err := v.conn.ReadFromUDP(buf)
+		n, raddr, err := v.conn.ReadFromUDP(buf)
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
@@ -606,6 +655,13 @@ func (v *VideoEngine) recvLoop() {
 				return
 			}
 		}
+		// 任意到达 socket 的 UDP 包都记录前 3 个（Info 级，排查用），与音频引擎同款：
+		// 「对方的视频收不到」时，这里从未打印 = 对端根本没往本端口发包（网络/对端问题）；
+		// 打印了但 rx=0 = 包到了却被过滤（负载类型不符，见下面的分支）。
+		if c := v.anyPkts.Add(1); c <= 3 {
+			preview := fmt.Sprintf("%x", buf[:min(n, 16)])
+			logx.Logger().Info("视频端口收到 UDP 包", "src", raddr.String(), "len", n, "preview", preview)
+		}
 		if !v.enabled.Load() {
 			continue // 需求 8：关闭视频期间不接收
 		}
@@ -614,6 +670,13 @@ func (v *VideoEngine) recvLoop() {
 			continue
 		}
 		if pkt.PayloadType != v.payloadType() {
+			// 负载类型不符就丢（协商前 peerPT=0，此时收到的都是野生包）。
+			// 首次出现打条日志：排查「视频收不到」时，它能区分
+			// 「对端根本没发」与「发了但 PT 对不上、被本端过滤掉」。
+			if v.rxOtherPT.Add(1) == 1 {
+				logx.Logger().Info("视频端口收到非协商负载类型，已忽略",
+					"pt", pkt.PayloadType, "期望", v.payloadType(), "ssrc", pkt.SSRC)
+			}
 			continue
 		}
 		if v.rxPackets.Add(1) == 1 {

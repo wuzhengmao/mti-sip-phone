@@ -419,38 +419,29 @@ const (
 	videoMaxH = 640
 )
 
-// 窗口客户区的可用性下限（DIP）：帧过小时不留一个没法看的窗口。
+// 窗口客户区的可用性下限（DIP）：只有拿不到有效分辨率时的兜底尺寸
+//（正常路径下窗口恒被放到 640 那一侧，见 videoFitSize）。
 const (
 	videoMinW = 160
 	videoMinH = 120
 )
 
 // videoFitSize 把「视频原始宽高」换算成窗口客户区尺寸（用户指定规则）：
-//   - 优先按原视频的宽高等比（1:1）显示；
-//   - 宽或高超过 videoMaxW/H（固定 640）时按比例缩小，缩小后两者都在范围内。
+// **在固定上限 640×640 内等比放到最大**——比 640 小的流也放大到窗口
+//（用户要求：对端 192×128 的小流不该只开个小窗，要看就看清一点）；
+// 长边通常恒为 640，只有宽高比极端时另一边先顶到 640（如 900×100 → 640×71）。
 //
-// 帧过小时先等比补到下限（videoMinW/H，不变形），再做上限收缩——极端宽高比下
-// 两者会撞车（例如 900×100 补下限成 1080×120，再被收缩回 480×53），此时
-// **上限优先**，保证用户的「宽高都在屏幕 1/4 内」始终成立。
+// 历史：早期是"优先 1:1、超 640 才缩"，小流就开一个很小的窗口。
 func videoFitSize(fw, fh int) (float32, float32) {
-	const maxW, maxH float32 = videoMaxW, videoMaxH
+	if fw <= 0 || fh <= 0 {
+		return videoMinW, videoMinH
+	}
 	w, h := float32(fw), float32(fh)
-	if w < videoMinW {
-		h *= videoMinW / w
-		w = videoMinW
+	k := float32(videoMaxW) / w
+	if kh := float32(videoMaxH) / h; kh < k {
+		k = kh
 	}
-	if h < videoMinH {
-		w *= videoMinH / h
-		h = videoMinH
-	}
-	if w > maxW || h > maxH {
-		k := maxW / w
-		if kh := maxH / h; kh < k {
-			k = kh
-		}
-		w, h = w*k, h*k
-	}
-	return w, h
+	return w * k, h * k
 }
 
 // applyVideoSize 按对端视频分辨率初始化窗口尺寸（需求 6）。

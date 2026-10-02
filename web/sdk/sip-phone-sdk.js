@@ -276,9 +276,21 @@
     }
 
     /**
+     * 自动接听开关（与软电话界面上的「自动接听」按钮共用一份状态）：
+     * 开启后来电自动接听；视频呼叫按视频接听处理（打开摄像头双向视频，
+     * 摄像头不可用时只收不发）。
+     * 变更后软电话广播 system.autoAnswer 事件，桌面按钮与网页据此同步。
+     * @param {boolean} enabled
+     * @returns {Promise<{enabled: boolean}>}
+     */
+    setAutoAnswer(enabled) {
+      return this._request('system.setAutoAnswer', { enabled: !!enabled });
+    }
+
+    /**
      * 查询软电话当前状态（注册状态、通话列表等）。
      * 返回值含 version / os / arch（前端据此到业务平台查询对应架构的
-     * 最新版本，见 notifyUpdate）。
+     * 最新版本，见 notifyUpdate）与 autoAnswer（自动接听开关当前状态）。
      * @returns {Promise<Object>}
      */
     getState() {

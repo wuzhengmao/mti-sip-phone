@@ -70,11 +70,15 @@ declare class SipPhoneSDK {
   /** 视频总开关（纯本地动作，REQ-VIDEO-008）；状态见 call.video 事件 */
   setVideo(callId: string, enabled: boolean): Promise<{ callId: string }>;
 
-  /** 查询状态（注册状态、通话列表、版本与平台、更新状态） */
+  /** 自动接听开关（与软电话界面按钮共用一份状态；变更推 system.autoAnswer 事件） */
+  setAutoAnswer(enabled: boolean): Promise<{ enabled: boolean }>;
+
+  /** 查询状态（注册状态、通话列表、版本与平台、更新状态、自动接听开关） */
   getState(): Promise<{
     version: string;
     os: string;
     arch: string;
+    autoAnswer: boolean;
     register: { state: string; account: string; reason: string };
     calls: Array<{
       id: string;

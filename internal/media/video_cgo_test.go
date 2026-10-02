@@ -190,6 +190,63 @@ func TestVideoAnswerUsesPeerPT(t *testing.T) {
 	}
 }
 
+// TestVideoAnswerH264SingleNALMode 对端 offer 只给 packetization-mode=0 时，
+// answer 必须照收视频，并回**对端声明的模式**（answer 只能是 offer 的子集）。
+//
+// 回归：实测 FreeSWITCH 呼入视频电话的 offer 就是这个形态
+//（`a=fmtp:102 profile-level-id=42000a; packetization-mode=0`，PT 102），
+// 早期协商直接跳过 H264 → 200 OK 回 `m=video 0` → 接听后两边都没画面。
+func TestVideoAnswerH264SingleNALMode(t *testing.T) {
+	if !video.Supported() {
+		t.Skip("未启用视频的构建")
+	}
+	e := newTestEngine(t)
+	e.SetSDPIP("10.0.0.5")
+	e.ssrc = 12
+	e.localPort = 43000
+
+	body := []byte("v=0\r\n" +
+		"o=- 1 1 IN IP4 10.168.4.118\r\n" +
+		"s=-\r\n" +
+		"c=IN IP4 10.168.4.118\r\n" +
+		"t=0 0\r\n" +
+		"m=audio 22150 RTP/AVP 8\r\n" +
+		"a=rtpmap:8 PCMA/8000\r\n" +
+		"m=video 19120 RTP/AVP 102\r\n" +
+		"a=rtpmap:102 H264/90000\r\n" +
+		"a=fmtp:102 profile-level-id=42000a; packetization-mode=0\r\n" +
+		"a=rtcp-fb:102 nack pli\r\n" +
+		"a=sendrecv\r\n")
+	offer, err := ParseSDP(body)
+	if err != nil {
+		t.Fatalf("解析 offer 失败: %v", err)
+	}
+	vinfo, err := offer.Media("video")
+	if err != nil {
+		t.Fatalf("取视频段失败: %v", err)
+	}
+
+	v, err := NewVideoEngine("127.0.0.1")
+	if err != nil {
+		t.Fatalf("创建视频引擎失败: %v", err)
+	}
+	defer v.Close()
+	if !v.ApplyOffer(vinfo) {
+		t.Fatal("packetization-mode=0 时视频协商仍应成功")
+	}
+
+	ans := SDPAnswerFor(e, v, offer, 8, "sendrecv")
+	if strings.Contains(ans, "m=video 0 ") {
+		t.Fatalf("answer 不应把视频置 0（等于拒绝视频）：\n%s", ans)
+	}
+	if !strings.Contains(ans, "m=video "+strconv.Itoa(v.LocalPort())+" RTP/AVP 102") {
+		t.Fatalf("answer 的视频段应复用对端 PT 102：\n%s", ans)
+	}
+	if !strings.Contains(ans, "a=fmtp:102 profile-level-id=42e01f;packetization-mode=0;level-asymmetry-allowed=1") {
+		t.Fatalf("answer 的 fmtp 应保留本端 profile、回对端的 packetization-mode=0：\n%s", ans)
+	}
+}
+
 // TestEncoderRejectsSmallerFrame 编码器必须拒绝比自身要求更小的输入帧。
 //
 // 回归测试：摄像头驱动可能不按请求分辨率出图（Windows DirectShow 挑最接近的

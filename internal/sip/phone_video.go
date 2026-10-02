@@ -176,25 +176,46 @@ func (p *Phone) SetVideoPreview(callID string, on bool) error {
 	return nil
 }
 
-// AnswerVideo 视频接听：打开摄像头，双向视频（REQ-VIDEO-004）。
-func (p *Phone) AnswerVideo(callID string) error {
-	return p.answerIncoming(callID, true)
+// answerMode 接听呼入时的视频策略（各接听路径的唯一区别，别再用 bool 传了）。
+type answerMode int
+
+const (
+	answerNoVideo  answerMode = iota // 不接受视频：answer 回 m=video 0（点普通「接听」）
+	answerSendRecv                   // 接受视频，摄像头可用则双向（点「视频接听」、自动接听）
+)
+
+// String 日志用。摄像头被禁用/不可用时 answerSendRecv 会退化成"只收不发"
+// （方向由 videoAnswerDirection 算），所以这里只说接听方的**意图**。
+func (m answerMode) String() string {
+	if m == answerNoVideo {
+		return "不接受视频"
+	}
+	return "双向视频"
 }
 
-// answerIncoming 接听呼入。withVideo=true 时打开摄像头推本地视频；
-// false（普通接听）时视频段方向为 recvonly——**只接收对方的视频**（REQ-VIDEO-004）。
+// AnswerVideo 视频接听：打开摄像头，双向视频（REQ-VIDEO-004）。
+func (p *Phone) AnswerVideo(callID string) error {
+	return p.answerIncoming(callID, answerSendRecv)
+}
+
+// answerIncoming 接听呼入，按 mode 决定视频段方向与是否开摄像头。
+//
+// ⚠️ 三个概念别混：`m=video 0` 是**拒绝视频**（对端也不发，answerNoVideo）；
+// `recvonly` 是**只收不发**（能看对方，不开摄像头——摄像头被禁用/不可用时
+// answerSendRecv 会退化成它）；`sendrecv` 是双向。自动接听曾把前两者搞混
+//（传 false 却按 recvonly 注释理解），表现为「视频呼叫自动接听只接通音频」。
 //
 // 注意：sipgo 的 RespondSDP 发送 200 后按 RFC 6026 阻塞等待对端 ACK
 // （最长 64*T1=32 秒），必须放在后台 goroutine 执行，否则阻塞 UI 线程
 // 导致界面一直停留在振铃状态。
-func (p *Phone) answerIncoming(callID string, withVideo bool) error {
+func (p *Phone) answerIncoming(callID string, mode answerMode) error {
 	cs := p.getCall(callID)
 	if cs == nil || cs.dialogS == nil {
 		return core.ErrCallNotFound
 	}
 	go func() {
-		answer := p.buildAnswer(cs, withVideo)
-		if !withVideo {
+		answer := p.buildAnswer(cs, mode)
+		if mode == answerNoVideo {
 			// 不接受视频：立刻回收视频引擎（answer 已置 0，不必也不能再收流），
 			// 这样 UI 侧的 Video.Negotiated 恒为 false，不会弹视频窗口。
 			p.closeVideo(cs)
@@ -214,20 +235,20 @@ func (p *Phone) answerIncoming(callID string, withVideo bool) error {
 		cs.established = true
 		p.attachAudio(cs.engine)
 		cs.engine.Start()
-		p.startVideo(cs, withVideo)
+		p.startVideo(cs, mode == answerSendRecv)
 		p.sink.OnEstablished(cs.id)
 	}()
-	logx.Logger().Info("已接听来电（后台发送 200 OK）", "callId", callID, "withVideo", withVideo)
+	logx.Logger().Info("已接听来电（后台发送 200 OK）", "callId", callID, "视频", mode.String())
 	return nil
 }
 
 // buildAnswer 构造 200 OK 的 SDP。
 //
-// withVideo=false（点普通「接听」）= **本次通话不接受视频**：answer 里把
+// mode=answerNoVideo（点普通「接听」）= **本次通话不接受视频**：answer 里把
 // m=video 的端口置 0（RFC 3264 的拒绝写法）。这与"只收不发"的 recvonly 不同
 // ——对端不会再发视频流，本端自然也不建视频窗口（用户明确要求）。
 // 对端 offer 没有 m=video 时走原来的纯音频路径（输出逐字节不变）。
-func (p *Phone) buildAnswer(cs *callSession, withVideo bool) string {
+func (p *Phone) buildAnswer(cs *callSession, mode answerMode) string {
 	if cs.offer == nil {
 		return cs.engine.SDPNegotiatedAnswer()
 	}
@@ -235,12 +256,14 @@ func (p *Phone) buildAnswer(cs *callSession, withVideo bool) string {
 	if err != nil || info.Rejected {
 		return cs.engine.SDPNegotiatedAnswer()
 	}
-	if !withVideo {
+	if mode == answerNoVideo {
 		// v 传 nil → SDPAnswerFor 输出 m=video 0 拒绝段，
 		// 且仍保持与 offer 一致的 m= 行顺序与数量。
 		return media.SDPAnswerFor(cs.engine, nil, cs.offer, cs.engine.PayloadType(), "")
 	}
-	dir := videoAnswerDirection(info.Dir, p.cameraUsable())
+	// 只有双向视频才需要摄像头：摄像头不可用（禁用/无设备）时退化成 recvonly
+	//（对端照发，我们只看）——「只收不发」不是单独的模式，而是这里算出来的方向。
+	dir := videoAnswerDirection(info.Dir, mode == answerSendRecv && p.cameraUsable())
 	return media.SDPAnswerFor(cs.engine, cs.video, cs.offer, cs.engine.PayloadType(), dir)
 }
 

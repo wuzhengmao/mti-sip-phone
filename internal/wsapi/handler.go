@@ -263,6 +263,22 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 	case MethodGetState:
 		resp = okMessage(msg.ID, s.app.State())
 
+	case MethodSetAutoAnswer:
+		// 自动接听开关（桌面按钮与网页开关共用一份状态，变更后广播
+		// system.autoAnswer，两边同步显示）
+		var p struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.Unmarshal(msg.Params, &p); err != nil {
+			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("参数格式错误"))
+			break
+		}
+		if err := s.app.SetAutoAnswer(p.Enabled); err != nil {
+			resp = errMessage(msg.ID, codeOf(err), err)
+			break
+		}
+		resp = okMessage(msg.ID, map[string]any{"enabled": p.Enabled})
+
 	case MethodNotifyUpdate:
 		var p struct {
 			Version string `json:"version"`

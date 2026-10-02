@@ -64,6 +64,8 @@ type State struct {
 	Register RegisterInfo  `json:"register"`
 	Calls    []Call        `json:"calls"`
 	Update   *UpdateStatus `json:"update,omitempty"` // 更新状态（无更新时省略）
+	// AutoAnswer 自动接听开关（桌面按钮与网页开关共用一份状态）
+	AutoAnswer bool `json:"autoAnswer"`
 	// Video 显示用的旋转/镜像（远端 + 本地回显），网页连上就能拿到并与桌面同步
 	Video VideoTransforms `json:"video"`
 }
@@ -93,6 +95,14 @@ type App struct {
 	pendingVideo map[string]VideoState
 	// videoTx 显示用的旋转/镜像（桌面与网页共用一份，见 video.go）
 	videoTx VideoTransforms
+	// autoAnswer 自动接听开关（桌面按钮与网页开关共用一份，
+	// 变更后广播 system.autoAnswer，见 SetAutoAnswer）
+	autoAnswer bool
+}
+
+// AutoAnswerState 自动接听开关状态（system.autoAnswer 事件负载）。
+type AutoAnswerState struct {
+	Enabled bool `json:"enabled"`
 }
 
 // New 创建 App。tel 为 nil 时表示电话能力未接入（调用会返回 ErrTelephonyNotReady）。
@@ -185,13 +195,14 @@ func (a *App) State() State {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	st := State{
-		Version:  Version,
-		OS:       runtime.GOOS,
-		Arch:     runtime.GOARCH,
-		Register: a.reg,
-		Calls:    make([]Call, 0, len(a.callOrder)),
-		Update:   upd,
-		Video:    a.videoTx,
+		Version:    Version,
+		OS:         runtime.GOOS,
+		Arch:       runtime.GOARCH,
+		Register:   a.reg,
+		Calls:      make([]Call, 0, len(a.callOrder)),
+		Update:     upd,
+		Video:      a.videoTx,
+		AutoAnswer: a.autoAnswer,
 	}
 	for _, id := range a.callOrder {
 		st.Calls = append(st.Calls, *a.calls[id])
@@ -316,11 +327,30 @@ func (a *App) Reject(callID string, code int) error {
 }
 
 // SetAutoAnswer 开关自动接听。
+//
+// 状态存在 core（而不是各界面各存一份）：桌面「自动接听」按钮与网页
+// system.setAutoAnswer 都改这里，变更后广播 system.autoAnswer，两边据此
+// 同步显示（否则网页一开，桌面按钮还显示旧状态）。
+// 来电自动接听时的视频策略见 internal/sip（视频呼叫按视频接听处理）。
 func (a *App) SetAutoAnswer(enabled bool) error {
 	if a.tel == nil {
 		return ErrTelephonyNotReady
 	}
-	return a.tel.SetAutoAnswer(enabled)
+	if err := a.tel.SetAutoAnswer(enabled); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.autoAnswer = enabled
+	a.mu.Unlock()
+	a.bus.Publish("system.autoAnswer", AutoAnswerState{Enabled: enabled})
+	return nil
+}
+
+// AutoAnswer 当前自动接听开关状态。
+func (a *App) AutoAnswer() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.autoAnswer
 }
 
 // SetRPort 动态切换 rport（运行中立即生效）。

@@ -377,6 +377,46 @@ func TestMuteMicSpeakerFlow(t *testing.T) {
 	}
 }
 
+// TestSetAutoAnswerFlow 网页设置自动接听开关：响应回生效值、广播
+// system.autoAnswer，且状态查询里能查到当前值（桌面按钮与网页共用一份）。
+func TestSetAutoAnswerFlow(t *testing.T) {
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("1"), Method: MethodSetAutoAnswer,
+		Params: json.RawMessage(`{"enabled":true}`)})
+	resp, ev := waitResponseAndEvent(t, conn, EvAutoAnswer)
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("开启自动接听应成功，收到: %+v", resp)
+	}
+	if d, _ := resp.Data.(map[string]any); d["enabled"] != true {
+		t.Fatalf("响应应回生效值 enabled=true: %+v", resp.Data)
+	}
+	if d, _ := ev.Data.(map[string]any); d["enabled"] != true {
+		t.Fatalf("system.autoAnswer 事件负载应为 enabled=true: %+v", ev.Data)
+	}
+
+	// 状态快照里也要带上当前值（网页刷新/重连后据此显示勾选状态）
+	sendRequest(t, conn, Message{ID: json.RawMessage("2"), Method: MethodGetState,
+		Params: json.RawMessage(`{}`)})
+	st := waitResponse(t, conn)
+	if d, _ := st.Data.(map[string]any); d["autoAnswer"] != true {
+		t.Fatalf("getState 应包含 autoAnswer=true: %+v", st.Data)
+	}
+
+	// 关掉：事件与响应都要反映
+	sendRequest(t, conn, Message{ID: json.RawMessage("3"), Method: MethodSetAutoAnswer,
+		Params: json.RawMessage(`{"enabled":false}`)})
+	resp, ev = waitResponseAndEvent(t, conn, EvAutoAnswer)
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("关闭自动接听应成功，收到: %+v", resp)
+	}
+	if d, _ := ev.Data.(map[string]any); d["enabled"] != false {
+		t.Fatalf("system.autoAnswer 事件负载应为 enabled=false: %+v", ev.Data)
+	}
+}
+
 // TestDialRejectedWhileActive 单通话限制：已有通话时第二次拨号被拒绝。
 func TestDialRejectedWhileActive(t *testing.T) {
 	ts, _ := newTestServer(t)

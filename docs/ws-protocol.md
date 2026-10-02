@@ -62,7 +62,8 @@
 | `call.muteMic` | `{ "callId": "...", "muted": true }` | `{ "callId": "..." }` | 麦克风开关（纯本地动作，不发 SIP 信令）；状态变化推 `call.audio`（REQ-UI-023） |
 | `call.muteSpeaker` | `{ "callId": "...", "muted": true }` | `{ "callId": "..." }` | 扬声器开关（纯本地动作，继续接收）；状态变化推 `call.audio` |
 | `call.setVideo` | `{ "callId": "...", "enabled": true }` | `{ "callId": "..." }` | 视频总开关（纯本地动作，REQ-VIDEO-008）：关 = 不显示远端、不推送本地、视频窗口关闭；状态变化推 `call.video` |
-| `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态） |
+| `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态、自动接听开关） |
+| `system.setAutoAnswer` | `{ "enabled": true }` | `{ "enabled": true }` | 自动接听开关（REQ-CALL-014）：与软电话界面上的「自动接听」按钮**共用一份状态**，变更后广播 `system.autoAnswer`，桌面按钮与网页据此同步。视频来电自动接听时按「视频接听」接通（REQ-VIDEO-004） |
 | `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64" }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.3" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选 |
 | `video.subscribe` | `{ "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 }, "local": { "maxWidth": 160, "maxHeight": 120 } }` | 见下 | 订阅视频画面（REQ-VIDEO-009）：**必定订阅远端画面**（`remote` 不传也有默认参数），`local` 可选——不传就是**不订阅本地回显**；两条通道各带各的参数（本地回显通常小一号）。订阅期间**软电话自动关闭视频窗口**，画面以二进制帧推送（见 4.1） |
 | `video.unsubscribe` | `{}` | `{ "local": false, "remote": false }` | 取消本连接的全部视频订阅（两条通道都已退订）；软电话恢复显示视频窗口 |
@@ -95,13 +96,15 @@
   "video": {
     "remote": { "rotation": 90, "mirror": false },
     "local": { "rotation": 0, "mirror": true }
-  }
+  },
+  "autoAnswer": false
 }
 ```
 
 - `version` / `os` / `arch`：软电话版本号与编译目标平台/架构——前端据此到业务平台查询该架构下是否有更高版本。
 - `update`：自动更新状态，无可用更新时省略（字段说明见 4. 事件 `system.update`）。
 - `video`：画面旋转/水平镜像（REQ-VIDEO-012），远端与本地回显各一份；网页连上（含断线重连）即可据此把按钮和渲染状态对齐。
+- `autoAnswer`：自动接听开关当前状态（与软电话界面的按钮共用一份，可用 `system.setAutoAnswer` 修改）。
 
 ### system.notifyUpdate 说明
 
@@ -144,6 +147,7 @@
 | `video.web` | `{ "active", "local", "remote", "viewers" }` | 网页视频订阅状态变化（任一连接订阅/退订时广播）。`active: true` 表示有网页在看画面，此时软电话**不显示视频窗口** |
 | `video.transform` | `{ "remote": { "rotation", "mirror" }, "local": { "rotation", "mirror" } }` | 画面旋转/水平镜像变化（桌面视频窗口或网页任一侧改动都会广播）；重连时也可从 `system.state` 的 `video` 字段取当前值 |
 | `register.state` | `{ "state", "account", "reason" }` | 注册状态变化 |
+| `system.autoAnswer` | `{ "enabled": true }` | 自动接听开关变化（桌面按钮点击或网页 `system.setAutoAnswer` 设置都会广播）；重连时也可从 `system.state` 的 `autoAnswer` 字段取当前值 |
 | `system.update` | 更新状态对象，见下 | 自动更新状态变化（受理/下载进度/就绪/失败） |
 
 `call` 对象中的视频相关字段（REQ-VIDEO-*）：

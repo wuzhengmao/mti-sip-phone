@@ -342,11 +342,12 @@ func (p *Phone) videoOfferDirection(v *media.VideoEngine) string {
 }
 
 // Answer 接听呼入（普通接听）。
-// 需求 4：只点普通接听时**不打开摄像头**，只接收对方的视频（视频段方向 recvonly）。
+// 需求 4（用户明确要求）：点普通「接听」= **不接受视频**，answer 里 m=video
+// 端口置 0；要接通视频请用 AnswerVideo。
 //
 // 实现见 phone_video.go 的 answerIncoming（后台发送 200 OK 的原因见那里）。
 func (p *Phone) Answer(callID string) error {
-	return p.answerIncoming(callID, false)
+	return p.answerIncoming(callID, answerNoVideo)
 }
 
 // attachAudio 接通后把媒体引擎对接音频设备（audio 为 nil 时跳过）。
@@ -1202,17 +1203,19 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 			case <-time.After(time.Duration(answerAfter) * time.Second):
 				logx.Logger().Info("延迟时间到，执行自动接听", "callId", callID)
 				if !cs.established {
-					// 自动接听按隐私优先：不打开摄像头（视频方向 recvonly）
-					_ = p.answerIncoming(cs.id, false)
+					// 自动接听（SIP 头 answer-after / 延迟接听）：视频呼叫按**视频接听**
+					// 处理（用户要求）——answerSendRecv 打开摄像头双向视频；
+					// 摄像头被禁用/不可用时 videoAnswerDirection 自动退化成 recvonly。
+					// 这里曾传 false（= 拒绝视频），表现为自动接听只接通音频。
+					_ = p.answerIncoming(cs.id, answerSendRecv)
 				}
 			case <-ctx.Done():
 			}
 		}()
 	} else if answerAfter == 0 || p.autoAnswer.Load() {
-		// 立即自动接听
+		// 立即自动接听（自动接听开关）：视频呼叫按**视频接听**处理（用户要求）
 		logx.Logger().Info("自动接听来电", "callId", callID, "answerAfter", answerAfter)
-		// 自动接听按隐私优先：不打开摄像头（视频方向 recvonly）
-		_ = p.answerIncoming(cs.id, false)
+		_ = p.answerIncoming(cs.id, answerSendRecv)
 	} else {
 		p.respondRinging(dlg)
 	}

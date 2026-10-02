@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU 通话、保持、DTMF；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.3**（dev 开发中；1.0.2 已发布到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。
+当前版本 **1.0.3**（含视频通话与网页订阅视频，已定版并合并到 master；日常开发在 dev 分支）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。
 
 真实环境：OpenSIPS 2.4.11（10.168.4.40:15060，账号 2999），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
 
@@ -358,9 +358,12 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   自定义 `vPadLayout` 精确控制留白，内容最小高 124 ≤ 126。
   另注：`layout.NewGridLayoutWithRows(n)` 内部是 `{Cols: n}`，行数由
   `ceil(可见对象数 / n)` 现算——所以"少一个可见对象"会直接改变行数，排查时先数对象。
-- **视频窗口尺寸上限固定 640px**（`videoMaxW/H`，用户要求）：优先按对端原始宽高
-  1:1 显示，宽或高超过 640 才等比缩小；**不要再按屏幕大小算**（早期按工作区 1/4，
-  小屏上窗口被压得太小、大屏上又开得过大）。下限仍是 160×120，撞车时上限优先。
+- **视频窗口尺寸上限固定 640px**（`videoMaxW/H`，用户要求）：按对端宽高**等比
+  放到 640×640 内的最大尺寸**——长边恒为 640，比 640 小的流也**放大**到窗口
+  （对端 192×128 的小流以前只开个 192×128 的小窗，用户要求放大）；只有宽高比
+  极端时另一边先顶到 640（900×100 → 640×71）。**不要再按屏幕大小算**（早期按
+  工作区 1/4，小屏上窗口被压得太小、大屏上又开得过大）。`videoMinW/H`(160×120)
+  现在只是拿不到分辨率时的兜底。
 - **视频窗口的尺寸与位置必须一次 `SetWindowPos` 原子完成**，不能"先 Resize
   再定位"。`Window.Resize` 的生效时机不受控（fyne/GLFW 会在随后的帧里再应用
   一次；`moveWindowToCorner` 里那三次延迟校正就是为这个加的），若定位时量到的
@@ -399,6 +402,14 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   （tel.DialVideo 返回后调用方才 upsertCall），`core.App` 用 `pendingVideo`
   暂存、`upsertCall` 时并入、`DialVideo` 在 `call.dialing` 之后补发一次
   `call.video`（顺序不能反：界面要先有 activeCallID 才认这条事件）。
+- **接听的视频策略用 `answerMode` 枚举区分（别用 bool 传）**：`answerNoVideo`
+  点普通「接听」→ answer 回 `m=video 0`（用户明确要求：普通接听 = 不接受视频，
+  对端也不再发）；`answerSendRecv` 点「视频接听」**和自动接听**（SIP 头
+  answer-after / 自动接听开关）→ 摄像头可用时 `sendrecv`，被禁用/无设备时由
+  `videoAnswerDirection` 自动退化成 `recvonly`（REQ-VIDEO-005）。
+  **踩过**：自动接听曾传 `withVideo=false`（= 拒绝视频），而注释写着 recvonly，
+  表现为「视频呼叫自动接听只接通了音频」——`m=video 0`（拒绝，对端也不发）、
+  `recvonly`（只收不发）、`sendrecv`（双向）是三个不同概念，别混。
 - **视频窗口摆放要直接读通话面板的可见矩形**（`visibleRect` + DWM 扩展框架边界），
   不要自己按工作区+边距算：面板定位用的是**未缩放**的 `callPanelMargin`(16 物理像素)，
   视频窗口若按 `16×缩放` 算，DPI 非 100%（如 125%）时就差 4px。
@@ -446,6 +457,18 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   本端表里是 96–99，对端 offer 可能是 100/101…；用 `videoCodecByPT(peerPT)` 查
   必然落空 → 段为 nil → 上层输出 `m=video 0`（等于拒绝视频）→ 两边都看不到画面。
   协商结果已存在 `VideoEngine.codec/peerPT` 里，用 `answerSection()` 直接取。
+- **视频：对端只声明 `packetization-mode=0`（单 NAL）时不能拒掉整条 m=video**。
+  该参数说的是**对端自己怎么发**（对端只发单 NAL），不限制本端接收——解包器
+  （pion `codecs.H264Packet`）对单 NAL / STAP-A / FU-A 一视同仁。实测 FreeSWITCH
+  呼入视频电话的 offer 就是 `a=fmtp:102 profile-level-id=42000a; packetization-mode=0`
+  （FreeSWITCH 的视频是 passthrough，且它根本不解析 H264 fmtp），早期按 RFC 严格
+  解读直接跳过 H264 → 200 OK 回 `m=video 0` → **接听后两边全黑**（用户实测）。
+  现在照常接受，且 answer 的 fmtp 回**对端声明的模式**（answer 只能是 offer 的子集，
+  回本端的 1 会被严格的对端判 488；模板其余参数不动，见 `answerVideoFMTP`）；
+  发送侧仍按 pion 的 H264 打包器走（塞不进 MTU 就用 FU-A 分片）——真按模式 0 只发
+  单包等于发不出画面。若哪天遇到确实解不了 FU-A 的对端，可给 OpenH264 开
+  `SM_SIZELIMITED_SLICE`（`iMaxNalSize` 已在用，现被 slice mode 0 抵消，编码时
+  有告警）让每个 NAL 都塞得进 MTU，从而合法地只发单包。
 - **视频：采集 goroutine 不计入 `VideoEngine.wg`**。`Close()` 会 `wg.Wait()`，
   若采集侧并发 `wg.Add(1)` 会触发 Go 运行时的
   `sync: WaitGroup misuse: Add called concurrently with Wait` panic。

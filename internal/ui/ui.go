@@ -1017,6 +1017,12 @@ func (a *App) onEvent(ev core.Event) {
 		if st, ok := ev.Data.(core.UpdateStatus); ok {
 			a.onUpdateStatus(st)
 		}
+	case "system.autoAnswer":
+		// 自动接听开关变化（本地按钮点击或网页 system.setAutoAnswer 设置）
+		if st, ok := ev.Data.(core.AutoAnswerState); ok {
+			a.setAutoAnswer(st.Enabled)
+		}
+
 	case "register.state":
 		if data, ok := ev.Data.(map[string]any); ok {
 			if state, ok := data["state"].(string); ok {
@@ -1231,17 +1237,26 @@ func regText(state string) string {
 // toggleAutoAnswer 自动接听开关：开启后来电自动接听。
 // 选中 = 蓝底；未选中 = 浅灰底（REQ-UI-024 修订）。
 func (a *App) toggleAutoAnswer() {
-	a.autoAnswer = !a.autoAnswer
-	if a.autoAnswer {
+	if err := a.core.SetAutoAnswer(!a.autoAnswer); err != nil {
+		logx.Logger().Warn("设置自动接听失败", "err", err)
+	}
+	// 按钮外观由 system.autoAnswer 事件回来时统一刷新（见 setAutoAnswer），
+	// 这样桌面按钮与网页开关永远是同一份状态。
+}
+
+// setAutoAnswer 刷新自动接听开关的界面状态（本地点击与网页开关共用）。
+func (a *App) setAutoAnswer(enabled bool) {
+	a.autoAnswer = enabled
+	logx.Logger().Info("自动接听开关", "enabled", enabled)
+	if a.autoAnswerBtn == nil {
+		return
+	}
+	if enabled {
 		a.autoAnswerBtn.Importance = widget.HighImportance
 	} else {
 		a.autoAnswerBtn.Importance = widget.MediumImportance
 	}
 	a.autoAnswerBtn.Refresh()
-	if err := a.core.SetAutoAnswer(a.autoAnswer); err != nil {
-		logx.Logger().Warn("设置自动接听失败", "err", err)
-	}
-	logx.Logger().Info("自动接听开关", "enabled", a.autoAnswer)
 }
 
 // showMain 显示主窗口（托盘单击/菜单唤出）。
