@@ -108,6 +108,10 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// 必须禁缓存：SDK 内嵌在二进制里，升级软电话后浏览器若还用着缓存里的旧
+	// SDK，新协议/新行为会"怎么改都不生效"（踩过：取消订阅后画面仍跟着旋转，
+	// 其实是旧 SDK）。测试页（handleIndex）同样带 no-cache。
+	w.Header().Set("Cache-Control", "no-cache")
 	if strings.HasSuffix(name, ".js") {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	} else if strings.HasSuffix(name, ".d.ts") {

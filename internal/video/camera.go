@@ -30,6 +30,13 @@ func OpenCamera(id string, w, h, fps int) (Camera, error) {
 	return openCamera(id, w, h, fps)
 }
 
+// CameraSupported 当前构建/平台是否支持摄像头采集。
+//
+// 与 Supported()（编解码能力）区分开：Windows 386 这类目标**编解码可用、
+// 摄像头不可用**（上游 mediadevices 在 i686 上的调用约定冲突，见 CLAUDE.md），
+// 上层据此把视频呼叫降级为"只收不发"，并把设置页的摄像头选择置灰。
+func CameraSupported() bool { return cameraSupported() }
+
 // PickCamera 按 ID → 名称的顺序在枚举结果中挑选设备。
 // 返回空字符串表示用系统默认设备（第一个）。
 // 设备 ID 不稳定（每次启动可能变），所以名称是更可靠的持久化标识。

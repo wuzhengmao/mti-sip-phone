@@ -37,8 +37,14 @@ func (p *Phone) videoConfig() config.VideoConfig {
 
 // cameraUsable 摄像头是否可用于发送本地视频（构建支持 + 未被禁用）。
 func (p *Phone) cameraUsable() bool {
-	return p.VideoSupported() && p.videoConfig().CameraUsable()
+	// 三道门：本构建有视频能力、**本平台有摄像头后端**（Windows 386 没有，
+	// 见 video.CameraSupported）、配置里没禁用摄像头。
+	return p.VideoSupported() && video.CameraSupported() && p.videoConfig().CameraUsable()
 }
+
+// CameraSupported 本构建/平台是否有摄像头采集能力（供界面区分"没插摄像头"
+// 与"这个版本压根不支持摄像头"）。
+func (p *Phone) CameraSupported() bool { return video.CameraSupported() }
 
 // VideoSupported 当前构建是否具备视频能力。
 func (p *Phone) VideoSupported() bool { return video.Supported() }

@@ -150,7 +150,15 @@ setup_toolchain() {
                 # 去掉 .exe 后缀再换 g++（Windows 上探测到的是完整路径）
                 local base="${mingw32%.exe}"
                 CC="$mingw32"; CXX="${base%gcc}g++"
-                FF_EXTRA="--target-os=mingw32 --arch=x86 --cross-prefix=i686-w64-mingw32-"
+                # --disable-x86asm：**32 位目标必须关掉 x86 汇编**。
+                # 不关的话 H.264 解码会在 FFmpeg 的 AVX 去块滤波里直接崩：
+                #   Thread 1 received signal SIGSEGV
+                #   ff_deblock_v_luma_8_avx () ← loop_filter ← decode_slice
+                #   ← h264_decode_frame ← avcodec_send_packet
+                # （gdb 实测，windows-386 库 + i686-w64-mingw32；amd64 无此问题）
+                # 症状是"32 位版视频呼叫一接通就闪退"，而音频/信令全正常。
+                # 关掉后解码走 C 回退，速度略慢但 386 本就是兼容目标，可接受。
+                FF_EXTRA="--target-os=mingw32 --arch=x86 --cross-prefix=i686-w64-mingw32- --disable-x86asm"
             else
                 echo "  缺少 i686-w64-mingw32-gcc" >&2
                 echo "    Linux:  apt install gcc-mingw-w64-i686" >&2

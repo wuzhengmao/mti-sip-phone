@@ -220,6 +220,13 @@ static void sp_remove_state(Display *d, Window win, const char *name) {
 	XFlush(d);
 }
 
+// 把窗口提到栈顶（XRaiseWindow）。X11 下"提到最前"就是这一件事，
+// 是否获得输入焦点由窗口管理器按自己的策略决定。
+static void sp_raise(Display *d, Window win) {
+	XRaiseWindow(d, win);
+	XFlush(d);
+}
+
 // 置顶开关：_NET_WM_STATE_ABOVE（EWMH 的"置顶"状态）。
 // on=0 时移除——Wayland 合成器下能否生效由合成器决定（Xwayland 下 labwc
 // 等会读属性；纯 Wayland 会话本就用不了 X11 手段）。
@@ -296,6 +303,34 @@ const callPanelMargin = 16
 // 去装饰后边框几何变化，再延后校正两次（节奏同 Windows 实现）。
 func moveCallWindowToCorner(w fyne.Window) {
 	moveWindowToCorner(w, callPanelWidth, callPanelHeight, "通话面板")
+}
+
+// raiseVideoWindow 把视频窗口提到最前面（用户要求：每次打开视频窗口都放最前）。
+// X11 下用 XRaiseWindow；窗口号经 RunNative 取（同 placeVideoWindow）。
+func raiseVideoWindow(w fyne.Window, keepTopmost bool) {
+	if w == nil {
+		return
+	}
+	go func() {
+		var handle uintptr
+		for i := 0; i < 20; i++ {
+			if handle = callPanelHandle(w); handle != 0 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if handle == 0 {
+			logx.Logger().Debug("未取得视频窗口 X11 句柄，跳过提到最前")
+			return
+		}
+		d := C.sp_open_display()
+		if d == nil {
+			return
+		}
+		defer C.sp_close_display(d)
+		C.sp_raise(d, C.Window(handle))
+		logx.Logger().Info("视频窗口已提到最前", "x11", handle, "保持置顶", keepTopmost)
+	}()
 }
 
 // setVideoWindowTopmost 视频窗口置顶开关（用户要求，可撤销）。
@@ -377,7 +412,7 @@ func placeVideoWindow(w fyne.Window) {
 
 // moveUpdateWindowToCorner 把更新提示窗吸附到工作区右下角（同通话面板：
 // 去标题栏、移出任务栏、置顶、尺寸锁定）。尺寸取窗口当前值
-//（内容自适应调整过），而不是固定常量。
+// （内容自适应调整过），而不是固定常量。
 func moveUpdateWindowToCorner(w fyne.Window) {
 	size := w.Canvas().Size()
 	moveWindowToCorner(w, size.Width, size.Height, "更新提示窗")

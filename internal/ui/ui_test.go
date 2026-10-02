@@ -5,8 +5,42 @@ import (
 	"math"
 	"testing"
 
+	"fyne.io/fyne/v2/test"
+
 	"mti-sip-phone/internal/core"
 )
+
+// TestLocalEchoControlsHiddenWithoutLocalVideo 本地不推视频（摄像头禁用）时，
+// 回显区连同它的旋转/镜像按钮一起隐藏——它们作用的对象根本不存在。
+func TestLocalEchoControlsHiddenWithoutLocalVideo(t *testing.T) {
+	test.NewApp() // 构造按钮要光栅化 SVG 图标，需要 Fyne 应用/驱动
+	a := &App{videoOn: true, callSending: false}
+	a.videoSurface = newVideoSurface(nil)
+
+	a.applyLocalVideoVisibility()
+	for name, b := range map[string]*compactButton{
+		"回显旋转": a.videoSurface.rotateLocalBtn,
+		"回显镜像": a.videoSurface.mirrorLocalBtn,
+		"回显开关": a.videoSurface.toggleBtn,
+	} {
+		if b.Visible() {
+			t.Fatalf("无本地视频时不该显示%s按钮", name)
+		}
+	}
+
+	// 本次通话推本地视频：三个按钮都出现
+	a.callSending = true
+	a.applyLocalVideoVisibility()
+	for name, b := range map[string]*compactButton{
+		"回显旋转": a.videoSurface.rotateLocalBtn,
+		"回显镜像": a.videoSurface.mirrorLocalBtn,
+		"回显开关": a.videoSurface.toggleBtn,
+	} {
+		if !b.Visible() {
+			t.Fatalf("推本地视频时应显示%s按钮", name)
+		}
+	}
+}
 
 // TestIsBusyReason 遇忙音判定：486/600 才算忙（sip 层给的 reason 形如
 // "486 Busy Here"），其余失败走挂断音。
@@ -150,38 +184,33 @@ func TestOnVideoWebEvent(t *testing.T) {
 	}
 }
 
-// TestVideoFitSize 视频窗口尺寸规则（用户指定）：
-//  1. 优先按原视频宽高显示；
-//  2. 宽或高超过屏幕 1/4 时等比缩小，缩小后宽高都在 1/4 内。
-//
-// 用 1920×1080 屏幕 → 上限 480×270 做基准。
+// TestVideoFitSize 视频窗口尺寸规则（用户指定）：优先原视频宽高；宽或高超过
+// **固定上限 640** 才等比缩小（不再按屏幕大小算）。
 func TestVideoFitSize(t *testing.T) {
-	const maxW, maxH float32 = 480, 270
 	cases := []struct {
 		name   string
 		fw, fh int
 		w, h   float32
 	}{
 		{"原样（宽高都未超上限）", 320, 240, 320, 240},
-		{"恰好在边界上", 480, 270, 480, 270},
-		{"高度超上限，按高收缩", 352, 288, 330, 270},
-		{"宽度超上限，按宽收缩", 640, 240, 480, 180},
-		{"宽高都超上限，取更小比例", 1920, 1080, 480, 270},
-		{"16:9 源", 1280, 720, 480, 270},
+		{"恰好在边界上", 640, 640, 640, 640},
+		{"常见 640×480 原样显示", 640, 480, 640, 480},
+		{"对端 720×480：按宽缩到 640", 720, 480, 640, 426.66666},
+		{"高度超上限，按高收缩", 320, 720, 284.44443, 640},
+		{"宽高都超，取更小比例", 1280, 720, 640, 360},
+		{"1920×1080 同样缩到 640 宽", 1920, 1080, 640, 360},
 		{"帧过小，等比放大到下限", 96, 72, 160, 120},
-		{"极端宽高比：下限与上限撞车时上限优先", 900, 100, 480, 53.333332},
+		{"极端宽高比：下限与上限撞车时上限优先", 900, 100, 640, 71.111114},
 	}
 	for _, c := range cases {
-		w, h := videoFitSize(c.fw, c.fh, maxW, maxH)
+		w, h := videoFitSize(c.fw, c.fh)
 		if math.Abs(float64(w-c.w)) > 0.01 || math.Abs(float64(h-c.h)) > 0.01 {
 			t.Errorf("%s：videoFitSize(%d,%d) = %.2f×%.2f，期望 %.2f×%.2f",
 				c.name, c.fw, c.fh, w, h, c.w, c.h)
 		}
-		// 规则 2 必须恒成立
-		if w > maxW+0.01 || h > maxH+0.01 {
-			t.Errorf("%s：结果 %.2f×%.2f 超出上限 %.0f×%.0f", c.name, w, h, maxW, maxH)
+		if w > videoMaxW+0.01 || h > videoMaxH+0.01 {
+			t.Errorf("%s：结果 %.2f×%.2f 超出固定上限 %d×%d", c.name, w, h, videoMaxW, videoMaxH)
 		}
-		// 等比（不改宽高比）
 		if math.Abs(float64(w/h)-float64(c.fw)/float64(c.fh)) > 0.001 {
 			t.Errorf("%s：宽高比 %.4f 与原视频 %.4f 不一致", c.name, w/h, float64(c.fw)/float64(c.fh))
 		}

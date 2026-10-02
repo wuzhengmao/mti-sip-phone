@@ -8,6 +8,10 @@ import "fmt"
 // 编译期保留视频编解码能力，但采集不可用——上层会因此在
 // 「摄像头」下拉里看到禁用项、且不提供视频接听按钮。
 
+// cameraSupported 这些平台组合没有采集后端（Windows 386 的 i686 调用约定冲突、
+// darwin 未实现）：编解码可用，但不采集。
+func cameraSupported() bool { return false }
+
 func listCameras() ([]CameraInfo, error) {
 	return nil, fmt.Errorf("当前平台不支持摄像头采集: %w", ErrUnsupported)
 }

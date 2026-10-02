@@ -53,6 +53,7 @@
       this._handlers = new Map();    // event -> Set<fn>
       this._renderers = {};          // channel -> VideoRenderer（订阅视频时绑定）
       this._videoRouted = false;     // 帧路由与生命周期清理是否已安装
+      this._videoSubActive = false;  // 当前是否处于订阅状态（未订阅不套用旋转/宽高）
       this._subOpts = null;          // 最近一次 video.subscribe 的参数（断线重连后自动恢复）
       // 旋转/镜像的**权威状态在软电话侧**（桌面视频窗口与网页共用一份）：
       // 这里只是本地镜像，订阅/退订/断线重连都不丢
@@ -347,12 +348,14 @@
       this._subOpts = params; // 记住订阅参数：断线重连后自动恢复
       return this._request('video.subscribe', params).then((res) => {
         this._ensureVideoRouting();
-        // 订阅时以软电话的当前状态为准（转/镜像可能是桌面那边设的）
+        // 订阅时以软电话的当前状态为准（转/镜像可能是桌面那边设的）：
+        // 先记录，再绑定渲染器（绑定即套用当前状态），最后标记"订阅中"
         this._applyTransformState(res.transforms);
         this._bindVideoChannel('remote', remote, options);
         if (local) {
           this._bindVideoChannel('local', local, options);
         }
+        this._videoSubActive = true;
         return this._decorateSubscription(res);
       });
     }
@@ -405,6 +408,11 @@
       }
       const zero = { rotation: 0, mirror: false };
       this._videoTx = { remote: st.remote || zero, local: st.local || zero };
+      // **未订阅不改画面/宽高**（用户要求）：桌面那边旋转视频窗口时，网页上
+      // 那两个 <video> 的尺寸不该跟着变；订阅时才按当前状态套用。
+      if (!this._videoSubActive) {
+        return this._videoTx;
+      }
       Object.keys(this._renderers).forEach((ch) => {
         const t = this._videoTx[ch];
         if (t) {
@@ -432,8 +440,13 @@
       // 主动退订要**忘掉**订阅参数：否则断线重连时会把它偷偷恢复回来，
       // 用户看到的现象是"取消了订阅，软电话的视频窗口却一直不回来"。
       this._subOpts = null;
+      this._videoSubActive = false;
       return this._request('video.unsubscribe', {}).then((res) => {
         this.clearVideo();
+        // 取消订阅后不再受旋转/镜像影响：<video> 恢复默认宽高比（用户要求）
+        Object.keys(this._renderers).forEach((ch) => {
+          this._renderers[ch].resetAspect();
+        });
         return res;
       });
     }
@@ -729,6 +742,13 @@
       this.rotation = ((Number(rotation) || 0) % 360 + 360) % 360;
       this.mirror = !!mirror;
       this._applyAspect();
+    }
+
+    /** 恢复 <video> 的默认宽高比（取消订阅时调用）。 */
+    resetAspect() {
+      if (this.el && this.el.style) {
+        this.el.style.aspectRatio = '';
+      }
     }
 
     /** 按旋转后的宽高比调整 <video> 的显示框（CSS aspect-ratio 覆盖默认值）。 */

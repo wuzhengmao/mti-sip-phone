@@ -153,6 +153,7 @@ type App struct {
 	videoAnswerBtn *compactButton // 来电弹窗「视频接听」按钮（需求 4）
 	videoBtn       *compactButton // 通话面板「关闭视频」开关（需求 8）
 	camSelect      *widget.Select // 设置页摄像头选择（需求 2）
+	camHint        *widget.Label  // 摄像头说明行（本构建不支持时改成提示文字）
 	camIDs         map[string]string
 
 	videoW          fyne.Window   // 视频窗口（懒创建）
@@ -168,6 +169,7 @@ type App struct {
 	webVideoOn      bool // 有网页正在接收视频画面（REQ-VIDEO-009，此时不显示视频窗口）
 	ringbackOn      bool // 正在放本地回铃音（没有早期媒体时自己放，避免重复放）
 	videoTopmost    bool // 视频窗口是否被用户置顶（默认不置顶，手动开启）
+	videoShown      bool // 视频窗口当前是否显示（Fyne 无 Visible() 查询 API，只能自己记）
 
 	// 帧投递：媒体层 goroutine 写、主线程读（合并刷新，见 ui_video.go）
 	remoteFrame   atomic.Pointer[frameRef]
@@ -177,6 +179,8 @@ type App struct {
 
 	// 旋转/水平镜像（显示用，媒体层 goroutine 逐帧读取，故用原子量）。
 	// 会话内记忆：不随通话结束复位（同一路摄像头/同一个对端的摆法通常不变）。
+	remoteSrcW   atomic.Int32 // 远端帧的**原始**宽（旋转前，用于算窗口形状）
+	remoteSrcH   atomic.Int32 // 远端帧的原始高
 	remoteRot    atomic.Int32 // 远端画面旋转角度（0/90/180/270）
 	remoteMirror atomic.Bool  // 远端画面水平镜像
 	localRot     atomic.Int32 // 本地回显旋转角度
@@ -502,12 +506,12 @@ func (a *App) buildSettingsPage() {
 	refreshCamBtn := widget.NewButtonWithIcon("刷新设备", theme.ViewRefreshIcon(), a.refreshDevices)
 	// 说明文字必须开自动折行：主窗体是固定宽度，标签的 MinSize 按整行文字宽度
 	// 计算会把窗口撑宽（与「网页接入」的 wsHint 同样处理）。
-	camHint := widget.NewLabel("选择「禁用」后：发起视频呼叫不发送本地视频，来电也不显示「视频接听」按钮，但仍可查看对方的视频")
-	camHint.Wrapping = fyne.TextWrapWord
+	a.camHint = widget.NewLabel("选择「禁用」后：发起视频呼叫不发送本地视频，来电也不显示「视频接听」按钮，但仍可查看对方的视频")
+	a.camHint.Wrapping = fyne.TextWrapWord
 	videoCard := container.NewVBox(
 		widget.NewLabelWithStyle("视频设备", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		formItem("摄像头", a.camSelect),
-		camHint,
+		a.camHint,
 		refreshCamBtn,
 	)
 
@@ -750,7 +754,9 @@ func (a *App) onVideoCallButton() {
 
 // cameraUsable 摄像头当前是否可用于发送本地视频（REQ-VIDEO-005）。
 func (a *App) cameraUsable() bool {
-	if !a.core.VideoSupported() {
+	// 没有摄像头后端的构建（Windows 386）也要算"不可用"：否则会显示
+	//「视频接听」按钮（点了却没有本地画面）。
+	if !a.core.VideoSupported() || !a.core.CameraSupported() {
 		return false
 	}
 	return a.cfg.Video.CameraUsable()
@@ -1615,6 +1621,16 @@ func (a *App) refreshCameras() {
 		a.applyCameraList(nil, "此构建未启用视频")
 		return
 	}
+	if !a.core.CameraSupported() {
+		// 编解码可用但**本平台没有摄像头后端**（Windows 386 这类目标）。
+		// 这里必须与"没插摄像头"区分开：否则用户会在空列表里选「禁用」，
+		// 把共用配置写坏（64 位版也跟着不发送本地视频了——实测踩过）。
+		a.camSelect.Disable()
+		a.applyCameraList(nil, "此版本不支持摄像头")
+		a.camHint.SetText("本版本（32 位）不支持摄像头采集：视频通话只能看对方，不发送本地画面")
+		return
+	}
+	a.camHint.SetText("")
 	go func() {
 		cams := a.core.VideoDevices()
 		fyne.Do(func() { a.applyCameraList(cams, "未检测到摄像头") })

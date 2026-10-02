@@ -65,6 +65,9 @@ type Telephony interface {
 	SetCamera(deviceID string) error
 	// VideoDevices 枚举摄像头（可能耗时，调用方放后台 goroutine）。
 	VideoDevices() []VideoDevice
+	// CameraSupported 本构建/平台是否有摄像头采集（Windows 386 这类目标没有：
+	// 编解码可用但不采集，界面据此把摄像头选择置灰、把视频呼叫降级为只收不发）。
+	CameraSupported() bool
 }
 
 // AudioDevice 音频设备。

@@ -172,6 +172,16 @@ Windows 386 的摄像头**编不过**，是上游限制：mediadevices 的 `came
 **i686 上是真实的调用约定冲突**。用 `-D__stdcall=` 强行编会让整份 COM 调用变 cdecl，
 运行期必崩，不要试。所以 386 走 `camera_other.go`：编解码可用、摄像头不可用。
 
+**32 位（windows-386）的 FFmpeg 必须 `--disable-x86asm`**（脚本里已加）：不关的话
+H.264 解码会崩在 FFmpeg 自己的 AVX 去块滤波里——gdb 实测栈是
+`ff_deblock_v_luma_8_avx` ← `loop_filter` ← `decode_slice` ← `h264_decode_frame`
+← `avcodec_send_packet`（`Exception 0xc0000005`）。**症状极具迷惑性**：
+32 位版音频/信令/界面全正常，只在**视频呼叫接通、对端画面开始解码**的瞬间整个
+进程闪退（GUI 子系统无控制台，panic/信号都没有可见输出）。关掉后解码走 C
+回退，速度略降但 386 本就是兼容目标。复核方式：`GOARCH=386 go test -tags video
+-ldflags "-extldflags -static" ./internal/media/`（要带 386 的 CGO_CFLAGS/LDFLAGS，
+不加 `-extldflags -static` 会报 `0xc000007b` 起不来）。
+
 Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `build.bat` 的位置探测：
 `C:\msys64\mingw32\bin` 与 `%USERPROFILE%\tools\winlibs-i686\mingw32\bin`。
 
@@ -348,6 +358,9 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   自定义 `vPadLayout` 精确控制留白，内容最小高 124 ≤ 126。
   另注：`layout.NewGridLayoutWithRows(n)` 内部是 `{Cols: n}`，行数由
   `ceil(可见对象数 / n)` 现算——所以"少一个可见对象"会直接改变行数，排查时先数对象。
+- **视频窗口尺寸上限固定 640px**（`videoMaxW/H`，用户要求）：优先按对端原始宽高
+  1:1 显示，宽或高超过 640 才等比缩小；**不要再按屏幕大小算**（早期按工作区 1/4，
+  小屏上窗口被压得太小、大屏上又开得过大）。下限仍是 160×120，撞车时上限优先。
 - **视频窗口的尺寸与位置必须一次 `SetWindowPos` 原子完成**，不能"先 Resize
   再定位"。`Window.Resize` 的生效时机不受控（fyne/GLFW 会在随后的帧里再应用
   一次；`moveWindowToCorner` 里那三次延迟校正就是为这个加的），若定位时量到的

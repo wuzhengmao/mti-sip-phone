@@ -54,6 +54,9 @@ func videoWindowTitle(account string) string {
 	return title
 }
 
+// raiseVideoWindow 其他平台不做窗口提升（同 setTopMost 的取舍）。
+func raiseVideoWindow(fyne.Window, bool) {}
+
 // setVideoWindowTopmost 其他平台不做窗口置顶（同 setTopMost 的取舍）。
 func setVideoWindowTopmost(fyne.Window, bool) {}
 

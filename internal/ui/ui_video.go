@@ -214,8 +214,7 @@ func (a *App) ensureVideoWindow() {
 	w.SetPadded(false)
 	// 默认尺寸同样按「优先原始尺寸、超屏则缩到 1/4」的规则算（首帧到达后
 	// applyVideoSize 会按对端分辨率重算）。
-	maxW, maxH := videoSizeLimits(w.Canvas().Scale())
-	dw, dh := videoFitSize(videoDefaultW, videoDefaultH, maxW, maxH)
+	dw, dh := videoFitSize(videoDefaultW, videoDefaultH)
 	w.Resize(fyne.NewSize(dw, dh))
 	// 关闭窗口 = 需求 8 的「关闭视频」（纯本地，不发 SIP 信令）
 	w.SetCloseIntercept(func() { a.setVideoEnabled(false) })
@@ -262,7 +261,14 @@ func (a *App) showVideoWindow() {
 		name = callRemoteName(a.activeCall)
 	}
 	a.videoW.SetTitle(videoWindowTitle(name))
+	// **每次"打开"视频窗口都带到最前面**（用户要求）：只在隐藏→显示的那一次
+	// 抢前台，之后同一通话里反复 sync 不会反复抢（避免一直打断用户操作）。
+	wasShown := a.videoShown
 	a.videoW.Show()
+	a.videoShown = true
+	if !wasShown {
+		raiseVideoWindow(a.videoW, a.videoTopmost)
+	}
 	// 摆在通话面板正上方、右边缘对齐（保留标题栏，可拖动）。
 	// 只移动不改尺寸；首帧到达后 applyVideoSize 会带尺寸再摆一次。
 	placeVideoWindow(a.videoW)
@@ -298,6 +304,7 @@ func (a *App) hideVideoWindow() {
 		a.setVideoFullscreen(false)
 	}
 	a.videoW.Hide()
+	a.videoShown = false
 	a.videoSurface.remote.Hide()
 	a.videoSurface.local.Hide()
 	a.videoSurface.border.Hide()
@@ -368,6 +375,16 @@ func (a *App) applyLocalVideoVisibility() {
 	} else {
 		a.videoSurface.toggleBtn.Hide()
 	}
+	// 本地回显整个不存在时（摄像头禁用 / 本次通话不推本地视频），回显区的
+	// 旋转、镜像按钮也一并隐藏——它们作用的对象根本不存在（用户要求）。
+	for _, b := range []*compactButton{a.videoSurface.rotateLocalBtn, a.videoSurface.mirrorLocalBtn} {
+		if a.videoOn && a.callSending {
+			b.Show()
+		} else {
+			b.Hide()
+		}
+		b.Refresh()
+	}
 	a.videoSurface.toggleBtn.SetIcon(iconForLocalVideo(a.previewOn))
 	a.videoSurface.local.Refresh()
 	a.videoSurface.border.Refresh()
@@ -395,8 +412,12 @@ func (a *App) setVideoFullscreen(on bool) {
 	logx.Logger().Info("视频窗口全屏切换", "fullscreen", on)
 }
 
-// videoMaxScreenDiv 视频窗口相对屏幕（工作区）的最大占比分母：宽、高都不得超过 1/4。
-const videoMaxScreenDiv = 4
+// videoMaxW/H 视频窗口客户区的最大尺寸（DIP）：**固定 640**，不再按屏幕大小算
+// （用户要求：小屏上窗口被压得太小，大屏上又会开得过大）。
+const (
+	videoMaxW = 640
+	videoMaxH = 640
+)
 
 // 窗口客户区的可用性下限（DIP）：帧过小时不留一个没法看的窗口。
 const (
@@ -404,24 +425,15 @@ const (
 	videoMinH = 120
 )
 
-// videoSizeLimits 当前屏幕（工作区）允许的视频窗口最大客户区尺寸（DIP）。
-// screenWorkArea 给的是物理像素，而 Resize 用 Fyne 的 DIP，故按缩放比换算。
-func videoSizeLimits(scale float32) (maxW, maxH float32) {
-	sw, sh := screenWorkArea()
-	if scale <= 0 {
-		scale = 1
-	}
-	return sw / scale / videoMaxScreenDiv, sh / scale / videoMaxScreenDiv
-}
-
 // videoFitSize 把「视频原始宽高」换算成窗口客户区尺寸（用户指定规则）：
 //   - 优先按原视频的宽高等比（1:1）显示；
-//   - 只有当宽或高超过 maxW/maxH 时才按比例缩小，缩小后宽、高都在范围内。
+//   - 宽或高超过 videoMaxW/H（固定 640）时按比例缩小，缩小后两者都在范围内。
 //
 // 帧过小时先等比补到下限（videoMinW/H，不变形），再做上限收缩——极端宽高比下
 // 两者会撞车（例如 900×100 补下限成 1080×120，再被收缩回 480×53），此时
 // **上限优先**，保证用户的「宽高都在屏幕 1/4 内」始终成立。
-func videoFitSize(fw, fh int, maxW, maxH float32) (float32, float32) {
+func videoFitSize(fw, fh int) (float32, float32) {
+	const maxW, maxH float32 = videoMaxW, videoMaxH
 	w, h := float32(fw), float32(fh)
 	if w < videoMinW {
 		h *= videoMinW / w
@@ -446,8 +458,7 @@ func (a *App) applyVideoSize(fw, fh int) {
 	if a.videoSized || a.videoW == nil || fw <= 0 || fh <= 0 {
 		return
 	}
-	maxW, maxH := videoSizeLimits(a.videoW.Canvas().Scale())
-	w, h := videoFitSize(fw, fh, maxW, maxH)
+	w, h := videoFitSize(fw, fh)
 	// 尺寸交给 Fyne（GLFW 设的是客户区，宽高比才与对端画面一致，不会出黑边）；
 	// 位置由 placeVideoWindow 负责，内部带延迟校正以跟上异步生效的尺寸。
 	a.videoW.Resize(fyne.NewSize(w, h))
@@ -455,7 +466,7 @@ func (a *App) applyVideoSize(fw, fh int) {
 	a.videoSized = true
 	logx.Logger().Info("视频窗口尺寸已按原视频设置",
 		"remote", fw, "x", fh, "window", int(w), "x", int(h),
-		"max", int(maxW), "x", int(maxH))
+		"max", videoMaxW, "x", videoMaxH)
 }
 
 // ---------------------------------------------------------------------------
@@ -541,21 +552,44 @@ func (a *App) applyVideoTransforms(st core.VideoTransforms) {
 	}
 	a.applyVideoTransformButtons()
 	if int32(st.Remote.Rotation) != prevRemoteRot {
-		a.resizeVideoWindowToLatest()
+		a.resizeVideoWindowForRotation(int(prevRemoteRot), st.Remote.Rotation)
 	}
 	if a.videoSurface != nil {
 		a.videoSurface.Refresh() // 回显区宽高比可能变了，重排一次
 	}
 }
 
-// resizeVideoWindowToLatest 按最新一帧（已含旋转变换）的尺寸重算视频窗口。
-func (a *App) resizeVideoWindowToLatest() {
-	ref := a.remoteFrame.Load()
-	if ref == nil || ref.callID != a.activeCallID || a.videoW == nil {
+// resizeVideoWindowForRotation 旋转按钮按下后**立刻**调整窗口形状（用户要求：
+// 点按钮就要看到窗口跟着转，这样对端画面来了才装在正确的框里）。两种情况：
+//
+//   - 有对端画面（记过原始宽高）：按「原视频尺寸 + 当前旋转」算，与首帧到达时
+//     同一套规则（优先原尺寸、上限 640）；
+//   - 还没收到对端画面：把**当前窗口尺寸**按旋转的宽高奇偶变化翻转，先给出反馈
+//     （对端首帧到达时 applyVideoSize 会再按真实分辨率定一次）。
+func (a *App) resizeVideoWindowForRotation(oldRot, newRot int) {
+	if a.videoW == nil {
 		return
 	}
-	a.videoSized = false
-	a.applyVideoSize(ref.img.Rect.Dx(), ref.img.Rect.Dy())
+	var w, h float32
+	if sw, sh := int(a.remoteSrcW.Load()), int(a.remoteSrcH.Load()); sw > 0 && sh > 0 {
+		if newRot%180 != 0 {
+			w, h = videoFitSize(sh, sw) // 旋转 90/270：宽高互换
+		} else {
+			w, h = videoFitSize(sw, sh)
+		}
+	} else {
+		size := a.videoW.Canvas().Size()
+		w, h = size.Width, size.Height
+		if (newRot/90)%2 != (oldRot/90)%2 {
+			w, h = h, w
+		}
+	}
+	if w <= 0 || h <= 0 {
+		return
+	}
+	logx.Logger().Info("旋转后调整视频窗口形状", "rot", newRot, "window", int(w), "x", int(h))
+	a.videoW.Resize(fyne.NewSize(w, h))
+	placeVideoWindow(a.videoW)
 }
 
 // toggleVideoTopmost 视频窗口置顶开关（用户要求）：点一下置顶，再点取消。
@@ -625,6 +659,10 @@ func (a *App) OnVideoFrame(callID string, local bool, img *image.RGBA) {
 	if local {
 		img = transformFrame(img, int(a.localRot.Load()), a.localMirror.Load())
 	} else {
+		// 记下**原始**宽高：旋转按钮要按"原视频尺寸 + 当前旋转"算窗口形状，
+		// 而存下来的帧已经是旋转过的（用它算会得到旋转前的形状）
+		a.remoteSrcW.Store(int32(img.Rect.Dx()))
+		a.remoteSrcH.Store(int32(img.Rect.Dy()))
 		img = transformFrame(img, int(a.remoteRot.Load()), a.remoteMirror.Load())
 	}
 	ref := &frameRef{callID: callID, img: img}

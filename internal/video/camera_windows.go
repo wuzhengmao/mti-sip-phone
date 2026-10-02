@@ -45,6 +45,9 @@ type windowsCamera struct {
 	lastRead time.Time
 }
 
+// cameraSupported Windows amd64（cgo）有 DirectShow 采集后端。
+func cameraSupported() bool { return true }
+
 func listCameras() ([]CameraInfo, error) {
 	var out []CameraInfo
 	for _, d := range driver.GetManager().Query(func(d driver.Driver) bool {

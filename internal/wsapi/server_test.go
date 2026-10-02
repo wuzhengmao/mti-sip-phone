@@ -71,6 +71,7 @@ func (s *stubTel) SetVideoEnabled(callID string, on bool) error {
 func (s *stubTel) SetVideoPreview(callID string, on bool) error { return core.ErrVideoUnsupported }
 func (s *stubTel) SetCamera(deviceID string) error              { return core.ErrVideoUnsupported }
 func (s *stubTel) VideoDevices() []core.VideoDevice             { return nil }
+func (s *stubTel) CameraSupported() bool                        { return false }
 
 // newTestServer 构造测试用服务：stub 电话层 + 真实更新器 + httptest 服务。
 // 更新器指向临时目录下的假 exe 路径（只做参数校验与状态机，不触发下载）。

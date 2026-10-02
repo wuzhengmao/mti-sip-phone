@@ -70,6 +70,65 @@ func setTopMost(on bool) {
 	setWindowPos.Call(hwnd, insertAfter, 0, 0, 0, 0, swpNoMove|swpNoSize)
 }
 
+// windowTitleOf 取窗口标题（诊断用）。
+func windowTitleOf(hwnd uintptr) string {
+	if hwnd == 0 {
+		return ""
+	}
+	buf := make([]uint16, 256)
+	user32 := syscall.NewLazyDLL("user32.dll")
+	user32.NewProc("GetWindowTextW").Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), 256)
+	return syscall.UTF16ToString(buf)
+}
+
+// raiseVideoWindow 把视频窗口带到最前面（用户要求：每次打开视频窗口都放最前）。
+// 与"置顶"不同——只是这一次显示时抢到前台，之后仍可被其他窗口盖住。
+// 窗口刚创建时句柄还没出来，所以带重试（同 placeVideoWindow 的做法）。
+func raiseVideoWindow(_ fyne.Window, keepTopmost bool) {
+	go func() {
+		var hwnd uintptr
+		for i := 0; i < 20; i++ {
+			if hwnd = findWindowByTitlePrefix(videoWindowTitlePrefix); hwnd != 0 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if hwnd == 0 {
+			logx.Logger().Debug("未找到视频窗口句柄，跳过带到前台")
+			return
+		}
+		// 1) 先试激活到前台（用户正在别的程序里打字时，Windows 前台锁多半会拒绝）
+		forceForegroundWindow(hwnd)
+		// 2) 再抬 Z 序——**这一步才是"不被浏览器挡住"的关键**：
+		//    后台进程无法把窗口抬到前台窗口之上，但"临时置顶再取消"可以
+		//    （先 HWND_TOPMOST 抬到最顶，随即 HWND_NOTOPMOST 复位成普通窗口，
+		//    抬高的 Z 序保留下来）。用户自己开了置顶时就不要取消。
+		const (
+			hwndTopMost    = ^uintptr(0) // HWND_TOPMOST = -1
+			hwndNotTopMost = ^uintptr(1) // HWND_NOTOPMOST = -2
+			swpNoMove      = 0x0002
+			swpNoSize      = 0x0001
+			swpNoActivate  = 0x0010
+		)
+		user32 := syscall.NewLazyDLL("user32.dll")
+		setWindowPos := user32.NewProc("SetWindowPos")
+		flags := uintptr(swpNoMove | swpNoSize | swpNoActivate)
+		r1, _, _ := setWindowPos.Call(hwnd, hwndTopMost, 0, 0, 0, 0, flags)
+		r2 := uintptr(0)
+		if !keepTopmost {
+			r2, _, _ = setWindowPos.Call(hwnd, hwndNotTopMost, 0, 0, 0, 0, flags)
+		}
+		// 诊断：置顶调用是否被系统接受、窗口此刻的上一层邻居是谁
+		getWindowLong := user32.NewProc("GetWindowLongW")
+		getWindow := user32.NewProc("GetWindow")
+		ex, _, _ := getWindowLong.Call(hwnd, ^uintptr(19)) // GWL_EXSTYLE = -20
+		prev, _, _ := getWindow.Call(hwnd, 3)              // GW_HWNDPREV = 3
+		logx.Logger().Info("视频窗口已带到最前", "hwnd", hwnd, "保持置顶", keepTopmost,
+			"topmostRet", r1, "notTopmostRet", r2,
+			"仍带topmost样式", ex&0x8 != 0, "上方窗口", windowTitleOf(prev))
+	}()
+}
+
 // setVideoWindowTopmost 视频窗口置顶开关（用户要求，可撤销）。
 // 与主窗口的 setTopMost 同套路：按「视频通话」标题前缀找句柄 + SetWindowPos。
 // 视频窗口保留系统标题栏，句柄一直在，开关随时生效。
@@ -346,7 +405,7 @@ type guid struct {
 // positionCornerWindow 把窗口移到工作区右下角并置顶（留 callPanelMargin）。
 //
 // **只移动、不改尺寸**：通话面板与更新提示窗都已是 Fyne 的 splash 窗口
-//（GLFW 从创建起就按无边框处理），尺寸由 Fyne 的 Resize/SetFixedSize 决定，
+// （GLFW 从创建起就按无边框处理），尺寸由 Fyne 的 Resize/SetFixedSize 决定，
 // 这里若再按客户区尺寸设窗口矩形，无边框下虽等价、却容易与 Fyne 的意图打架。
 func positionCornerWindow(hwnd, width, height uintptr) {
 
@@ -502,7 +561,7 @@ func ringBorderFlash(hwnd uintptr, stop <-chan struct{}) {
 // findWindowByTitlePrefix 按标题前缀查找**本进程**的顶层窗口。
 // 进程过滤必不可少：其他进程窗口标题可能包含应用名（如浏览器标签页
 // "mti-sip-phone 测试页面 - Edge"），误匹配会导致可见性误判
-//（主窗口隐藏却被判为可见——bug 修复）。
+// （主窗口隐藏却被判为可见——bug 修复）。
 func findWindowByTitlePrefix(prefix string) uintptr {
 	user32 := syscall.NewLazyDLL("user32.dll")
 	enumWindows := user32.NewProc("EnumWindows")

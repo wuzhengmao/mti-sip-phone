@@ -436,6 +436,11 @@ func (a *App) VideoSupported() bool {
 	return a.tel != nil && a.tel.VideoSupported()
 }
 
+// CameraSupported 本构建/平台是否有摄像头采集能力。
+func (a *App) CameraSupported() bool {
+	return a.tel != nil && a.tel.CameraSupported()
+}
+
 // DialVideo 发起视频呼叫。
 func (a *App) DialVideo(ctx context.Context, target string) (string, error) {
 	if a.tel == nil {

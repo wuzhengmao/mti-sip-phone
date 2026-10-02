@@ -38,6 +38,9 @@ type linuxCamera struct {
 	closed bool
 }
 
+// cameraSupported Linux（cgo）有 V4L2 采集后端。
+func cameraSupported() bool { return true }
+
 func listCameras() ([]CameraInfo, error) {
 	paths, err := filepath.Glob("/dev/video*")
 	if err != nil {

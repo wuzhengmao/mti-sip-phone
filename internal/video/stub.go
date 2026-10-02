@@ -5,7 +5,7 @@
 // 上层据此隐藏视频入口、SDP 不宣告 m=video——音频功能完全不受影响。
 //
 // 注意：即便带 video 标签，Go 工具链在没有 cgo 时也会退到这里
-//（见 video_cgo.go 的 `video && cgo` 标签组合）。
+// （见 video_cgo.go 的 `video && cgo` 标签组合）。
 package video
 
 const supported = false
@@ -19,6 +19,8 @@ func newDecoder(string) (Decoder, error) { return nil, ErrUnsupported }
 func scaleYUV(*YUV420P, int, int) (*YUV420P, error) { return nil, ErrUnsupported }
 
 func toRGBA(*YUV420P) (*Frame, error) { return nil, ErrUnsupported }
+
+func cameraSupported() bool { return false }
 
 func listCameras() ([]CameraInfo, error) { return nil, ErrUnsupported }
 
