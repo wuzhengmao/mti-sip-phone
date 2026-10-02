@@ -64,6 +64,8 @@ type State struct {
 	Register RegisterInfo  `json:"register"`
 	Calls    []Call        `json:"calls"`
 	Update   *UpdateStatus `json:"update,omitempty"` // 更新状态（无更新时省略）
+	// Video 显示用的旋转/镜像（远端 + 本地回显），网页连上就能拿到并与桌面同步
+	Video VideoTransforms `json:"video"`
 }
 
 // 常见错误，供接口层映射为错误码。
@@ -89,6 +91,8 @@ type App struct {
 	webViewers map[uint64]webViewer // 网页视频订阅（连接级，REQ-VIDEO-009）
 	// pendingVideo 早到的视频状态（通话尚未登记，如视频呼叫拨出即开摄像头）
 	pendingVideo map[string]VideoState
+	// videoTx 显示用的旋转/镜像（桌面与网页共用一份，见 video.go）
+	videoTx VideoTransforms
 }
 
 // New 创建 App。tel 为 nil 时表示电话能力未接入（调用会返回 ErrTelephonyNotReady）。
@@ -187,6 +191,7 @@ func (a *App) State() State {
 		Register: a.reg,
 		Calls:    make([]Call, 0, len(a.callOrder)),
 		Update:   upd,
+		Video:    a.videoTx,
 	}
 	for _, id := range a.callOrder {
 		st.Calls = append(st.Calls, *a.calls[id])
@@ -581,10 +586,10 @@ func (a *App) OnVideoState(callID string, st VideoState) {
 	a.publishCall("call.video", callID)
 }
 
-// OnRinging 呼出振铃。
-func (a *App) OnRinging(callID string) {
+// OnRinging 呼出振铃（earlyMedia 见 EventSink.OnRinging）。
+func (a *App) OnRinging(callID string, earlyMedia bool) {
 	if a.updateCall(callID, func(c *Call) { c.State = CallRinging }) {
-		a.publishCall("call.ringing", callID)
+		a.publishCall("call.ringing", callID, "earlyMedia", earlyMedia)
 	}
 }
 
@@ -600,7 +605,7 @@ func (a *App) OnEstablished(callID string) {
 func (a *App) OnTerminated(callID, reason string) {
 	if a.updateCall(callID, func(c *Call) { c.State = CallTerminated }) {
 		logx.Logger().Info("通话结束", "callId", callID, "reason", reason)
-		a.publishCall("call.terminated", callID, reason)
+		a.publishCall("call.terminated", callID, "reason", reason)
 	}
 }
 
@@ -608,7 +613,7 @@ func (a *App) OnTerminated(callID, reason string) {
 func (a *App) OnFailed(callID, reason string) {
 	if a.updateCall(callID, func(c *Call) { c.State = CallTerminated }) {
 		logx.Logger().Info("呼叫失败", "callId", callID, "reason", reason)
-		a.publishCall("call.failed", callID, reason)
+		a.publishCall("call.failed", callID, "reason", reason)
 	}
 }
 

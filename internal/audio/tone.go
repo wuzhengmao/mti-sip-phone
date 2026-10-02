@@ -19,10 +19,14 @@ type wavPCM struct {
 var (
 	ringtone = mustLoadWAV("assets/ringtone.wav")
 	hangup   = mustLoadWAV("assets/hangup.wav")
+	// ringback 本地回铃音：呼出时**没有早期媒体**才播（有早期媒体就听对端的）。
+	ringback = mustLoadWAV("assets/ringback.wav")
+	// busy 遇忙音：对端回 486/600 时播。
+	busy = mustLoadWAV("assets/busy.wav")
 )
 
 // mustLoadWAV 加载内嵌 WAV（仅支持 PCM 16bit），失败直接 panic
-//（资源损坏属于构建问题，运行期不恢复）。
+// （资源损坏属于构建问题，运行期不恢复）。
 func mustLoadWAV(name string) *wavPCM {
 	data, err := toneAssets.ReadFile(name)
 	if err != nil {

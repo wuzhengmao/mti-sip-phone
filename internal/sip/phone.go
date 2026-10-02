@@ -965,15 +965,16 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 			// 180 / 183 振铃
 			if res.StatusCode == 180 || res.StatusCode == 183 {
 				logx.TraceSIP("收到", res.String())
-				p.sink.OnRinging(cs.id)
 				// 183 携带 SDP 即早期媒体（服务器下发的回铃音）：
 				// 解析对端地址、启动媒体接收与播放（本端保持静音，
 				// 早期媒体阶段不发送本端音频）
+				earlyMedia := false
 				if res.StatusCode == 183 && len(res.Body()) > 0 && !cs.mediaStarted {
 					if err := cs.engine.SDPApplyAnswer(res.Body()); err != nil {
 						logx.Logger().Debug("早期媒体 SDP 解析失败", "callId", cs.id, "err", err)
 					} else {
 						cs.mediaStarted = true
+						earlyMedia = true
 						cs.engine.SetMuted(true)     // 早期媒体阶段静音本端（不发送真实麦克风数据）
 						cs.engine.SetKeepalive(true) // 持续发送静音保活 NAT 映射
 						p.attachAudio(cs.engine)
@@ -981,6 +982,8 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 						logx.Logger().Info("早期媒体已建立（回铃音）", "callId", cs.id)
 					}
 				}
+				// earlyMedia 一并上报：界面据此决定要不要放本地回铃音
+				p.sink.OnRinging(cs.id, earlyMedia)
 			}
 			return nil
 		},

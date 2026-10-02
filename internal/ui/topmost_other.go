@@ -54,6 +54,9 @@ func videoWindowTitle(account string) string {
 	return title
 }
 
+// setVideoWindowTopmost 其他平台不做窗口置顶（同 setTopMost 的取舍）。
+func setVideoWindowTopmost(fyne.Window, bool) {}
+
 // markTrayQuit 其他平台不打 IsQuit 标记（Fyne 会自动补 Quit 项）。
 func markTrayQuit(item *fyne.MenuItem) {}
 

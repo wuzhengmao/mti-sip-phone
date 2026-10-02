@@ -70,6 +70,29 @@ func setTopMost(on bool) {
 	setWindowPos.Call(hwnd, insertAfter, 0, 0, 0, 0, swpNoMove|swpNoSize)
 }
 
+// setVideoWindowTopmost 视频窗口置顶开关（用户要求，可撤销）。
+// 与主窗口的 setTopMost 同套路：按「视频通话」标题前缀找句柄 + SetWindowPos。
+// 视频窗口保留系统标题栏，句柄一直在，开关随时生效。
+func setVideoWindowTopmost(_ fyne.Window, on bool) {
+	hwnd := findWindowByTitlePrefix(videoWindowTitlePrefix)
+	if hwnd == 0 {
+		logx.Logger().Debug("未找到视频窗口句柄，跳过置顶")
+		return
+	}
+	const (
+		hwndTopMost    = ^uintptr(0) // HWND_TOPMOST = -1
+		hwndNotTopMost = ^uintptr(1) // HWND_NOTOPMOST = -2
+		swpNoMove      = 0x0002
+		swpNoSize      = 0x0001
+	)
+	insertAfter := hwndNotTopMost
+	if on {
+		insertAfter = hwndTopMost
+	}
+	user32 := syscall.NewLazyDLL("user32.dll")
+	user32.NewProc("SetWindowPos").Call(hwnd, insertAfter, 0, 0, 0, 0, swpNoMove|swpNoSize)
+}
+
 // callWindowTitle 通话面板标题（中文）：findWindowByTitlePrefix 依赖
 // 「通话面板」前缀定位窗口，Windows 下保持原样。
 func callWindowTitle(account string) string {
@@ -99,7 +122,7 @@ func markTrayQuit(item *fyne.MenuItem) {}
 // 通话面板固定尺寸（DIP，与 buildCallPanelIfNeeded 的 Resize 保持一致）：
 // 126 = 上下 4px 留白 + 行距 2×2px + 三行各 38px（36 紧凑按钮 + 2 行距垫）。
 const (
-	callPanelWidth  = 260
+	callPanelWidth = 260
 	// callPanelHeight 140 = 上下留白 8 + 三行各 36 + 行间 2×8（Fyne 网格自带 4px
 	// 行距、按钮上下再各余 ~2px）。126 时行距被压成 0，按钮上下相连（用户实测）。
 	callPanelHeight     = 140

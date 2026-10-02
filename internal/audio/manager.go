@@ -223,12 +223,23 @@ func (m *Manager) DetachEngine() {
 
 // PlayRing 播放振铃音（循环），通话事件驱动；使用振铃专用扬声器（若已配置）。
 func (m *Manager) PlayRing() {
-	m.enqueue(func() { m.playTone(ringtone, true) })
+	m.enqueue(func() { m.playTone(ringtone, true, true) }) // 来电振铃：振铃设备
 }
 
 // PlayHangup 播放挂断提示音（一次）。
 func (m *Manager) PlayHangup() {
-	m.enqueue(func() { m.playTone(hangup, false) })
+	m.enqueue(func() { m.playTone(hangup, false, false) }) // 挂断提示音：扬声器（用户要求）
+}
+
+// PlayRingback 播放**本地回铃音**（循环）：呼出时没有早期媒体（对端没下发
+// 回铃音）才播；对端一旦接通或回早期媒体，UI 会调 StopRing 停掉。
+func (m *Manager) PlayRingback() {
+	m.enqueue(func() { m.playTone(ringback, true, false) }) // 本地回铃音：扬声器（用户要求）
+}
+
+// PlayBusy 播放遇忙音（一次）：对端回 486 Busy Here / 600 Busy Everywhere 时播。
+func (m *Manager) PlayBusy() {
+	m.enqueue(func() { m.playTone(busy, false, false) }) // 遇忙音：扬声器（同回铃音）
 }
 
 // StopRing 停止提示音（振铃结束/通话建立时）。
@@ -325,14 +336,27 @@ func (m *Manager) restartStream() {
 	m.startStreamFor(engine)
 }
 
-// playTone 队列命令：播放提示音（使用振铃专用扬声器，空 = 系统默认）。
-func (m *Manager) playTone(tone *wavPCM, loop bool) {
+// playTone 队列命令：播放提示音。
+//
+// useRingDevice=true 走**振铃专用扬声器**——**只有来电振铃走它**（便于单独接
+// 一台铃音箱）；false 走**当前选择的扬声器**（挂断提示音、本地回铃音、遇忙音
+// ——用户要求这几类都走扬声器，不走振铃设备）。
+// 设备 ID 为空都表示系统默认设备。
+func (m *Manager) playTone(tone *wavPCM, loop bool, useRingDevice bool) {
 	m.mu.Lock()
-	backend, device := m.backend, m.ringSpeakerID
+	backend := m.backend
+	device := m.speakerID
+	if useRingDevice {
+		device = m.ringSpeakerID
+	}
 	m.mu.Unlock()
 	if backend == nil {
 		return
 	}
+	if device == "" {
+		device = "系统默认"
+	}
+	logx.Logger().Info("播放提示音", "loop", loop, "目标设备", device, "振铃设备", useRingDevice)
 	if err := backend.PlayTone(tone, loop, device); err != nil {
 		logx.Logger().Warn("播放提示音失败", "err", err)
 	}

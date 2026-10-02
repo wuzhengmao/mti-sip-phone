@@ -63,6 +63,8 @@
   .icon-btn.off { background: #e5e7eb; }
   .icon-btn:hover { filter: brightness(0.95); }
   .icon-btn svg { display: block; }
+  /* 旋转/镜像：未订阅时置灰不可点（订阅后才可操作） */
+  .icon-btn:disabled { background: #3a3f46; opacity: .45; cursor: not-allowed; }
   #callArea {
     background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px;
     padding: 14px; margin-bottom: 12px;
@@ -254,6 +256,14 @@
         <label class="chk"><input type="checkbox" id="vidLocal" checked> 同时订阅本地画面</label>
         <button id="btnSubVideo" class="green">订阅视频</button>
         <button id="btnUnsubVideo" class="ghost">取消订阅</button>
+      </div>
+      <div class="row">
+        <label style="min-width:auto">远端</label>
+        <button id="btnRotRemote" class="icon-btn off" disabled title="远端画面旋转 90°（宽高随之互换）"></button>
+        <button id="btnMirRemote" class="icon-btn off" disabled title="远端画面水平镜像"></button>
+        <label style="min-width:auto">本地</label>
+        <button id="btnRotLocal" class="icon-btn off" disabled title="本地画面旋转 90°（宽高随之互换）"></button>
+        <button id="btnMirLocal" class="icon-btn off" disabled title="本地画面水平镜像"></button>
       </div>
       <p class="state-line">订阅<b>必定包含远端画面</b>（本地画面可选）。订阅期间<b>软电话自动关闭视频窗口</b>，画面改在本页显示；取消订阅后窗口自动恢复。</p>
       <div class="video-grid">
@@ -495,6 +505,27 @@
     });
   };
 
+  // 媒体开关图标：与软电话通话面板同一套 Material Design 路径
+  //（internal/ui/icons.go 的 micIconSVG / speakerIconSVG / videoIconSVG）
+  var ICON_PATH = {
+    micOn: 'M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z',
+    micOff: 'M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5a3 3 0 0 0-5.54-1.65L11 4.86V11c0 .06-.01.11-.02.17l3.99 4zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z',
+    speakerOn: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.5 4.5 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06a9 9 0 0 0 0-17.54z',
+    speakerOff: 'M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z',
+    videoOn: 'M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z',
+    videoOff: 'M21 6.5l-4 4V7c0-.55-.45-1-1-1H9.82L21 17.18V6.5zM3.27 2L2 3.27 4.73 6H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.21 0 .39-.08.54-.18L19.73 21 21 19.73 3.27 2z',
+    // 旋转/镜像：与软电话视频窗口工具栏同一套路径（internal/ui/icons.go）
+    rotate: 'M15.55 5.55L11 1v3.07C7.06 4.56 4 7.92 4 12s3.05 7.44 7 7.93v-2.02c-2.84-.48-5-2.94-5-5.91s2.16-5.43 5-5.91V10l4.55-4.45zM19.93 11a7.9 7.9 0 0 0-1.62-3.89l-1.42 1.42c.54.75.88 1.6 1.02 2.47h2.02zM13 17.91v2.02c1.39-.22 2.68-.75 3.79-1.5l-1.44-1.44c-.71.51-1.51.84-2.35.92zm3.77-2.88l1.42 1.42c.75-1.11 1.28-2.4 1.5-3.79h-2.02c-.13.87-.47 1.72-1.02 2.47z',
+    mirror: 'M15 21h2v-2h-2v2zm4-12h2V7h-2v2zM3 5v14c0 1.1.9 2 2 2h4v-2H5V5h4V3H5c-1.1 0-2 .9-2 2zm16-2v2h2c0-1.1-.9-2-2-2zm-8 20h2V1h-2v22zm8-6h2v-2h-2v2zM15 5h2V3h-2v2zm4 8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2z'
+  };
+  var ICON_ON_COLOR = '#ffffff';  // 开：白图标 + 蓝底
+  var ICON_OFF_COLOR = '#e53935'; // 关：红图标 + 浅灰底
+
+  function iconSvg(d, color) {
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="22" height="22">' +
+      '<path fill="' + color + '" d="' + d + '"/></svg>';
+  }
+
   // ---------------- 视频订阅（REQ-VIDEO-009）----------------
   // SDK 负责渲染：把 <video> 元素传给 subscribeVideo 即可，帧回调不用管；
   // 只在 onStats 里更新角标（分辨率 / 帧率 / 码率），关闭视频/挂断/退订时
@@ -516,6 +547,52 @@
     return { el: el };
   }
 
+  // ---------------- 旋转 / 水平镜像 ----------------
+  // 状态存在**软电话侧**（桌面视频窗口与网页共用一份）：谁改都广播 video.transform，
+  // 两边的按钮外观随之刷新；订阅/退订、网页断线重连都不会丢。
+  function setTransformIcon(btn, path, on) {
+    btn.innerHTML = iconSvg(path, on ? ICON_ON_COLOR : ICON_OFF_COLOR);
+    btn.classList.toggle('off', !on); // 生效中 = 蓝底
+  }
+  function refreshTransformButtons() {
+    var tx = sdk.videoTransforms() || {};
+    var r = tx.remote || {}, l = tx.local || {};
+    setTransformIcon($('btnRotRemote'), ICON_PATH.rotate, (r.rotation || 0) !== 0);
+    setTransformIcon($('btnMirRemote'), ICON_PATH.mirror, !!r.mirror);
+    setTransformIcon($('btnRotLocal'), ICON_PATH.rotate, (l.rotation || 0) !== 0);
+    setTransformIcon($('btnMirLocal'), ICON_PATH.mirror, !!l.mirror);
+  }
+  // 旋转/镜像按钮只在**订阅期间**可用：未订阅时置灰不可点（用户要求）
+  function setTransformButtonsEnabled(on) {
+    ['btnRotRemote', 'btnMirRemote', 'btnRotLocal', 'btnMirLocal'].forEach(function (id) {
+      $(id).disabled = !on;
+    });
+  }
+  function channelLabel(prefix) { return prefix === 'local' ? '本地' : '远端'; }
+  function wireTransform(prefix, rotBtn, mirBtn) {
+    rotBtn.onclick = function () {
+      sdk.rotateVideo(prefix).then(function () {
+        refreshTransformButtons();
+        addLog('info', channelLabel(prefix) + '画面旋转 ' +
+          sdk.videoTransforms()[prefix].rotation + '°（宽高随之互换，软电话/网页同步）');
+      }).catch(function (e) { addLog('err', '旋转失败: ' + e.message); });
+    };
+    mirBtn.onclick = function () {
+      sdk.mirrorVideo(prefix).then(function () {
+        refreshTransformButtons();
+        addLog('info', channelLabel(prefix) + '画面水平镜像：' +
+          (sdk.videoTransforms()[prefix].mirror ? '开' : '关'));
+      }).catch(function (e) { addLog('err', '镜像失败: ' + e.message); });
+    };
+  }
+  wireTransform('remote', $('btnRotRemote'), $('btnMirRemote'));
+  wireTransform('local', $('btnRotLocal'), $('btnMirLocal'));
+  setTransformButtonsEnabled(false); // 初始：未订阅，置灰
+  sdk.on('video.transform', refreshTransformButtons);
+  sdk.on('system.state', refreshTransformButtons);
+  sdk.on('connected', refreshTransformButtons);
+  refreshTransformButtons();
+
   $('btnSubVideo').onclick = function () {
     var opts = {
       remote: $('remoteVideo'),                      // 必传
@@ -532,6 +609,8 @@
       (opts.local ? '，含本地画面' : '，仅远端');
     addLog('info', '订阅视频（' + desc + '）');
     sdk.subscribeVideo(opts).then(function (res) {
+      setTransformButtonsEnabled(true); // 订阅期间可操作
+      refreshTransformButtons();        // 状态以软电话为准（同步过来）
       resetStats();
       $('videoBadge').textContent = '已订阅';
       $('videoBadge').className = 'badge ok';
@@ -552,6 +631,8 @@
 
   $('btnUnsubVideo').onclick = function () {
     sdk.unsubscribeVideo().then(function () {
+      setTransformButtonsEnabled(false); // 退订后置灰不可点（状态留在软电话侧）
+      refreshTransformButtons();
       resetStats();
       $('videoBadge').textContent = '未订阅';
       $('videoBadge').className = 'badge';
@@ -624,23 +705,6 @@
 
   // ---------------- 界面状态 ----------------
 
-  // 媒体开关图标：与软电话通话面板同一套 Material Design 路径
-  //（internal/ui/icons.go 的 micIconSVG / speakerIconSVG / videoIconSVG）
-  var ICON_PATH = {
-    micOn: 'M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z',
-    micOff: 'M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5a3 3 0 0 0-5.54-1.65L11 4.86V11c0 .06-.01.11-.02.17l3.99 4zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z',
-    speakerOn: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.5 4.5 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06a9 9 0 0 0 0-17.54z',
-    speakerOff: 'M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z',
-    videoOn: 'M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z',
-    videoOff: 'M21 6.5l-4 4V7c0-.55-.45-1-1-1H9.82L21 17.18V6.5zM3.27 2L2 3.27 4.73 6H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.21 0 .39-.08.54-.18L19.73 21 21 19.73 3.27 2z'
-  };
-  var ICON_ON_COLOR = '#ffffff';  // 开：白图标 + 蓝底
-  var ICON_OFF_COLOR = '#e53935'; // 关：红图标 + 浅灰底
-
-  function iconSvg(d, color) {
-    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="22" height="22">' +
-      '<path fill="' + color + '" d="' + d + '"/></svg>';
-  }
 
   // 图标按钮状态：开 = 蓝底白图标，关 = 浅灰底红图标（与软电话一致）
   function setIconButton(btn, on, pathOn, pathOff) {

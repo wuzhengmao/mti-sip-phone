@@ -126,6 +126,20 @@ declare class SipPhoneSDK {
   /** 清空已订阅的画面（黑底）；关闭视频/挂断/退订时 SDK 会自动调用 */
   clearVideo(): void;
 
+  /**
+   * 画面旋转：每次顺时针 +90°（90°/270° 时宽高互换，<video> 的框跟着变）。
+   * **状态存在软电话侧**：桌面视频窗口的按钮会同步变，断线重连/退订都不丢。
+   * @param channel 默认 'remote'
+   * @returns 旋转后的完整状态（两条通道）
+   */
+  rotateVideo(channel?: SipVideoChannelName): Promise<SipVideoTransforms>;
+
+  /** 画面水平镜像开关（本地回显常用作自拍镜像）。状态同 rotateVideo */
+  mirrorVideo(channel?: SipVideoChannelName): Promise<SipVideoTransforms>;
+
+  /** 当前已知的旋转/镜像状态（远端 + 本地回显） */
+  videoTransforms(): SipVideoTransforms;
+
 }
 
 /** 通话事件负载中的通话对象 */
@@ -159,6 +173,20 @@ interface SipCall {
 
 /** 视频通道名 */
 type SipVideoChannelName = 'local' | 'remote';
+
+/** 一条通道的旋转/镜像 */
+interface SipVideoTransform {
+  /** 旋转角度（0/90/180/270，顺时针；90/270 时宽高互换） */
+  rotation: number;
+  /** 水平镜像 */
+  mirror: boolean;
+}
+
+/** 两条通道的旋转/镜像（状态在软电话侧，桌面与网页共用一份） */
+interface SipVideoTransforms {
+  remote: SipVideoTransform;
+  local: SipVideoTransform;
+}
 
 /** 每秒一次的画质统计（onStats 回调参数） */
 interface SipVideoStats {
@@ -216,7 +244,7 @@ interface SipVideoParams {
   quality: number;
 }
 
-/** video.subscribe 的返回：生效参数 + 当前通话快照 */
+/** video.subscribe 的返回：生效参数 + 当前通话快照 + 画面控制 */
 interface SipVideoSubscription {
   /** 远端生效参数 */
   remote: SipVideoParams;
@@ -224,6 +252,14 @@ interface SipVideoSubscription {
   local?: SipVideoParams;
   /** 当前进行中的通话（无则 null） */
   call: SipCall | null;
+  /** 画面旋转 +90°（默认远端；90°/270° 宽高互换），返回新状态 */
+  rotate(channel?: SipVideoChannelName): Promise<SipVideoTransforms>;
+  /** 画面水平镜像开关（默认远端），返回新状态 */
+  mirror(channel?: SipVideoChannelName): Promise<SipVideoTransforms>;
+  /** 两条通道当前的旋转/镜像状态 */
+  transforms(): SipVideoTransforms;
+  /** 画面清成黑底 */
+  clear(): void;
 }
 
 /** 告知软电话的新版本信息（system.notifyUpdate 参数） */

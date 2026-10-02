@@ -34,7 +34,7 @@ func (s *testSink) OnVideoState(callID string, st core.VideoState) {
 	defer s.mu.Unlock()
 	s.events = append(s.events, "video:"+callID)
 }
-func (s *testSink) OnRinging(callID string) {
+func (s *testSink) OnRinging(callID string, earlyMedia bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, "ringing:"+callID)

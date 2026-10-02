@@ -11,6 +11,7 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 
+	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
 )
 
@@ -53,6 +54,13 @@ const previewGap = 2
 // previewBtnGap 回显开关按钮距窗口右上的留白（用户指定 4px）。
 const previewBtnGap = 4
 
+// 工具栏按钮摆放：
+//
+//	左上角：远端画面的 [旋转][镜像]
+//	右上角：本地回显的 [旋转][镜像][回显开关]（开关在最右，位置与需求 7 一致）
+//
+// 按钮都在**窗口**边缘而不是回显区边缘——回显区只有窗口 1/3 宽，窗口缩小后
+// 三个按钮放不下（需求 7 的开关本来也是贴窗口右上角）。
 func (l previewLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	if len(objs) == 0 {
 		return
@@ -73,27 +81,50 @@ func (l previewLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 		objs[i].Move(rect)
 		objs[i].Resize(sz)
 	}
-	if len(objs) > 2 && objs[2] != nil {
-		btn := objs[2]
-		bs := btn.MinSize()
-		btn.Resize(bs)
-		btn.Move(fyne.NewPos(size.Width-bs.Width-previewBtnGap, previewBtnGap))
+
+	place := func(o fyne.CanvasObject, px, py float32) {
+		if o == nil {
+			return
+		}
+		bs := o.MinSize()
+		o.Resize(bs)
+		o.Move(fyne.NewPos(px, py))
+	}
+	btnGap := float32(4)
+	step := float32(videoToggleButtonSize) + btnGap
+
+	// 右上角：从右往左 = 回显开关、回显镜像、回显旋转
+	if l.s != nil {
+		bx := size.Width - float32(videoToggleButtonSize) - previewBtnGap
+		place(l.s.toggleBtn, bx, previewBtnGap)
+		place(l.s.mirrorLocalBtn, bx-step, previewBtnGap)
+		place(l.s.rotateLocalBtn, bx-2*step, previewBtnGap)
+		// 左上角：从左往右 = 远端旋转、远端镜像、窗口置顶
+		place(l.s.rotateRemoteBtn, previewBtnGap, previewBtnGap)
+		place(l.s.mirrorRemoteBtn, previewBtnGap+step, previewBtnGap)
+		place(l.s.pinBtn, previewBtnGap+2*step, previewBtnGap)
 	}
 }
 
 // previewBorderWidth 本地回显的绿色描边宽度（用户指定 2px）。
 const previewBorderWidth = 2
 
-// videoSurface 视频画面（远端）+ 本地回显叠加层 + 双击全屏。
+// videoSurface 视频画面（远端）+ 本地回显叠加层 + 旋转/镜像工具栏 + 双击全屏。
 type videoSurface struct {
 	widget.BaseWidget
-	remote      *canvas.Image
-	local       *canvas.Image
-	border      *canvas.Rectangle
-	toggleBtn   *compactButton
-	onDoubleTap func()
+	remote    *canvas.Image
+	local     *canvas.Image
+	border    *canvas.Rectangle
+	toggleBtn *compactButton
+	// 旋转/镜像：远端画面与本地回显各一套（左上角是远端，右上角是回显）
+	rotateRemoteBtn *compactButton
+	mirrorRemoteBtn *compactButton
+	rotateLocalBtn  *compactButton
+	mirrorLocalBtn  *compactButton
+	pinBtn          *compactButton
+	onDoubleTap     func()
 
-	// localW/localH 本地摄像头帧的尺寸，供 previewLayout 按宽高比排回显区
+	// localW/localH 本地回显帧的尺寸（**已含旋转**），供 previewLayout 排回显区
 	localW, localH int
 }
 
@@ -124,6 +155,13 @@ func newVideoSurface(onDoubleTap func()) *videoSurface {
 	s.border.Hide()
 
 	s.toggleBtn = newCompactButton(IconVideoOff, colorHoldBlue, videoToggleButtonSize, nil)
+	// 旋转 / 水平镜像：远端画面在左上角，本地回显在右上角（见 previewLayout）
+	s.rotateRemoteBtn = newCompactButton(IconRotate, colorTransformGray, videoToggleButtonSize, nil)
+	s.mirrorRemoteBtn = newCompactButton(IconMirror, colorTransformGray, videoToggleButtonSize, nil)
+	s.rotateLocalBtn = newCompactButton(IconRotate, colorTransformGray, videoToggleButtonSize, nil)
+	s.mirrorLocalBtn = newCompactButton(IconMirror, colorTransformGray, videoToggleButtonSize, nil)
+	// 窗口置顶开关（用户要求）：作用对象是窗口本身，放在左上角最右
+	s.pinBtn = newCompactButton(IconPin, colorTransformGray, videoToggleButtonSize, nil)
 	s.ExtendBaseWidget(s)
 	return s
 }
@@ -132,7 +170,9 @@ func newVideoSurface(onDoubleTap func()) *videoSurface {
 var colorPreviewBorder = colorSuccessGreen
 
 func (s *videoSurface) CreateRenderer() fyne.WidgetRenderer {
-	overlay := container.New(previewLayout{s: s}, s.local, s.border, s.toggleBtn)
+	overlay := container.New(previewLayout{s: s},
+		s.local, s.border, s.toggleBtn,
+		s.rotateRemoteBtn, s.mirrorRemoteBtn, s.rotateLocalBtn, s.mirrorLocalBtn, s.pinBtn)
 	return widget.NewSimpleRenderer(container.NewStack(s.remote, overlay))
 }
 
@@ -164,6 +204,12 @@ func (a *App) ensureVideoWindow() {
 	a.videoW = w
 	a.videoSurface = newVideoSurface(a.toggleVideoFullscreen)
 	a.videoSurface.toggleBtn.onTap = a.toggleLocalPreview
+	a.videoSurface.rotateRemoteBtn.onTap = a.rotateVideoRemote
+	a.videoSurface.mirrorRemoteBtn.onTap = a.mirrorVideoRemote
+	a.videoSurface.rotateLocalBtn.onTap = a.rotateVideoLocal
+	a.videoSurface.mirrorLocalBtn.onTap = a.mirrorVideoLocal
+	a.videoSurface.pinBtn.onTap = a.toggleVideoTopmost
+	a.applyVideoTransforms(a.core.VideoTransforms()) // 初始状态取自共享状态
 	w.SetContent(a.videoSurface)
 	w.SetPadded(false)
 	// 默认尺寸同样按「优先原始尺寸、超屏则缩到 1/4」的规则算（首帧到达后
@@ -220,15 +266,27 @@ func (a *App) showVideoWindow() {
 	// 摆在通话面板正上方、右边缘对齐（保留标题栏，可拖动）。
 	// 只移动不改尺寸；首帧到达后 applyVideoSize 会带尺寸再摆一次。
 	placeVideoWindow(a.videoW)
+	// 用户此前开了置顶：窗口重新显示后再施加一次（Show 可能重置窗口管理器状态）
+	if a.videoTopmost {
+		setVideoWindowTopmost(a.videoW, true)
+	}
 }
 
 // syncVideoWindow 按「当前有没有内容」决定窗口显隐（各处状态变化后统一调用）。
 func (a *App) syncVideoWindow() {
 	if a.wantVideoWindow() {
 		a.showVideoWindow()
-	} else {
-		a.hideVideoWindow()
+		return
 	}
+	// 本次通话明明有画面可显示，却因为是"有网页在看"而不显示——这是
+	// REQ-VIDEO-009 的正常行为，但桌面上看不到窗口时最容易困惑，
+	// 留一条日志点明原因（排查"视频窗口不出现"的第一线索）。
+	if a.webVideoOn && a.videoOn && a.activeCallID != "" && (a.callSending || a.callHasVideo) {
+		logx.Logger().Info("视频窗口不显示：有网页正在订阅画面（在网页上取消订阅或关掉该页面即可恢复）",
+			"callSending", a.callSending, "callHasVideo", a.callHasVideo,
+			"remoteHasVideo", a.remoteHasVideo)
+	}
+	a.hideVideoWindow()
 }
 
 // hideVideoWindow 隐藏视频窗口（挂断、需求 8 关闭视频、无内容可显示时调用）。
@@ -400,6 +458,158 @@ func (a *App) applyVideoSize(fw, fh int) {
 		"max", int(maxW), "x", int(maxH))
 }
 
+// ---------------------------------------------------------------------------
+// 旋转 / 水平镜像（显示用，不影响推送给对端与网页的原帧）
+// ---------------------------------------------------------------------------
+
+// transformFrame 按旋转/镜像生成显示用的帧；**不修改入参**——同一帧还会被
+// 网页订阅的出口拿去（那边有自己的旋转设置），必须保持原样。
+// 旋转 90°/270° 时宽高互换（"旋转后宽高也随之变化"）；无变换时原样返回。
+func transformFrame(img *image.RGBA, rot int, mirror bool) *image.RGBA {
+	rot = ((rot % 360) + 360) % 360
+	if img == nil || (rot == 0 && !mirror) {
+		return img
+	}
+	w, h := img.Rect.Dx(), img.Rect.Dy()
+	dw, dh := w, h
+	if rot == 90 || rot == 270 {
+		dw, dh = h, w
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	for y := 0; y < h; y++ {
+		row := img.Pix[y*img.Stride : y*img.Stride+w*4]
+		for x := 0; x < w; x++ {
+			sx := x
+			if mirror {
+				sx = w - 1 - x
+			}
+			var dx, dy int
+			switch rot {
+			case 90:
+				dx, dy = h-1-y, x
+			case 180:
+				dx, dy = w-1-x, h-1-y
+			case 270:
+				dx, dy = y, w-1-x
+			default:
+				dx, dy = x, y
+			}
+			sp := row[sx*4 : sx*4+4]
+			dp := dst.Pix[dy*dst.Stride+dx*4:]
+			dp[0], dp[1], dp[2], dp[3] = sp[0], sp[1], sp[2], sp[3]
+		}
+	}
+	return dst
+}
+
+// 旋转/镜像的**权威状态在 core**（桌面与网页共用一份，见 core.VideoTransforms）：
+// 点按钮只调 core，界面自己的原子量由 video.transform 事件回流更新。
+// 这样网页那边改了，桌面按钮跟着变；断线重连、订阅/退订也不会丢。
+
+func (a *App) rotateVideoRemote() { a.videoTransformCall(a.core.RotateVideo(core.VideoChannelRemote)) }
+func (a *App) mirrorVideoRemote() {
+	a.videoTransformCall(a.core.SetVideoMirror(core.VideoChannelRemote, !a.remoteMirror.Load()))
+}
+func (a *App) rotateVideoLocal() { a.videoTransformCall(a.core.RotateVideo(core.VideoChannelLocal)) }
+func (a *App) mirrorVideoLocal() {
+	a.videoTransformCall(a.core.SetVideoMirror(core.VideoChannelLocal, !a.localMirror.Load()))
+}
+
+// videoTransformCall 统一处理 core 的返回（失败只记日志：界面状态由事件回流）。
+func (a *App) videoTransformCall(_ core.VideoTransforms, err error) {
+	if err != nil {
+		logx.Logger().Warn("切换画面旋转/镜像失败", "err", err)
+	}
+}
+
+// applyVideoTransforms 把共享状态落到界面：原子量（供媒体 goroutine 逐帧读）、
+// 按钮外观；远端旋转后宽高互换，还要按最新一帧重算窗口尺寸。
+func (a *App) applyVideoTransforms(st core.VideoTransforms) {
+	prev := core.VideoTransforms{
+		Remote: core.VideoTransform{Rotation: int(a.remoteRot.Load()), Mirror: a.remoteMirror.Load()},
+		Local:  core.VideoTransform{Rotation: int(a.localRot.Load()), Mirror: a.localMirror.Load()},
+	}
+	prevRemoteRot := a.remoteRot.Load()
+	a.remoteRot.Store(int32(st.Remote.Rotation))
+	a.remoteMirror.Store(st.Remote.Mirror)
+	a.localRot.Store(int32(st.Local.Rotation))
+	a.localMirror.Store(st.Local.Mirror)
+	if st != prev {
+		logx.Logger().Info("画面旋转/镜像已更新",
+			"远端", fmt.Sprintf("旋转%d° 镜像%v", st.Remote.Rotation, st.Remote.Mirror),
+			"本地", fmt.Sprintf("旋转%d° 镜像%v", st.Local.Rotation, st.Local.Mirror))
+	}
+	a.applyVideoTransformButtons()
+	if int32(st.Remote.Rotation) != prevRemoteRot {
+		a.resizeVideoWindowToLatest()
+	}
+	if a.videoSurface != nil {
+		a.videoSurface.Refresh() // 回显区宽高比可能变了，重排一次
+	}
+}
+
+// resizeVideoWindowToLatest 按最新一帧（已含旋转变换）的尺寸重算视频窗口。
+func (a *App) resizeVideoWindowToLatest() {
+	ref := a.remoteFrame.Load()
+	if ref == nil || ref.callID != a.activeCallID || a.videoW == nil {
+		return
+	}
+	a.videoSized = false
+	a.applyVideoSize(ref.img.Rect.Dx(), ref.img.Rect.Dy())
+}
+
+// toggleVideoTopmost 视频窗口置顶开关（用户要求）：点一下置顶，再点取消。
+//
+// 注意视频窗口**默认不置顶**（REQ-VIDEO-006 用户明确要求），这里是用户手动
+// 打开的例外；状态是会话级记忆，窗口重新显示时会再应用一次。
+func (a *App) toggleVideoTopmost() {
+	a.videoTopmost = !a.videoTopmost
+	a.applyVideoTopmost()
+}
+
+// applyVideoTopmost 施加置顶状态并刷新按钮外观（生效 = 蓝底）。
+func (a *App) applyVideoTopmost() {
+	if a.videoW != nil {
+		setVideoWindowTopmost(a.videoW, a.videoTopmost)
+	}
+	btn := (*compactButton)(nil)
+	if a.videoSurface != nil {
+		btn = a.videoSurface.pinBtn
+	}
+	if btn != nil {
+		if a.videoTopmost {
+			btn.SetBg(colorHoldBlue)
+		} else {
+			btn.SetBg(colorTransformGray)
+		}
+		btn.Refresh()
+	}
+	logx.Logger().Info("视频窗口置顶切换", "topmost", a.videoTopmost)
+}
+
+// applyVideoTransformButtons 旋转/镜像按钮的外观：生效中蓝底，否则灰底。
+func (a *App) applyVideoTransformButtons() {
+	s := a.videoSurface
+	if s == nil {
+		return
+	}
+	set := func(b *compactButton, on bool) {
+		if b == nil {
+			return
+		}
+		if on {
+			b.SetBg(colorHoldBlue) // 生效中：蓝底
+		} else {
+			b.SetBg(colorTransformGray) // 未生效：深灰底（压在画面上，浅灰太跳）
+		}
+		b.Refresh()
+	}
+	set(s.rotateRemoteBtn, a.remoteRot.Load() != 0)
+	set(s.mirrorRemoteBtn, a.remoteMirror.Load())
+	set(s.rotateLocalBtn, a.localRot.Load() != 0)
+	set(s.mirrorLocalBtn, a.localMirror.Load())
+}
+
 // --- core.VideoSink 实现 ---
 
 // OnVideoFrame 视频帧回调（core.VideoSink）。
@@ -409,6 +619,13 @@ func (a *App) applyVideoSize(fw, fh int) {
 func (a *App) OnVideoFrame(callID string, local bool, img *image.RGBA) {
 	if img == nil {
 		return
+	}
+	// 显示用的旋转/镜像（在媒体 goroutine 上做，不占主线程；
+	// 不修改原帧——网页订阅的出口拿的是同一块数据，它有自己的一套设置）
+	if local {
+		img = transformFrame(img, int(a.localRot.Load()), a.localMirror.Load())
+	} else {
+		img = transformFrame(img, int(a.remoteRot.Load()), a.remoteMirror.Load())
 	}
 	ref := &frameRef{callID: callID, img: img}
 	var pending *atomic.Bool

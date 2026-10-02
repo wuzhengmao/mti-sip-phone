@@ -84,7 +84,7 @@ type VideoDevice struct {
 type VideoState struct {
 	Negotiated bool `json:"negotiated"` // 视频已协商成功
 	Enabled    bool `json:"enabled"`    // 需求 8 的总开关
-	PreviewOn    bool `json:"previewOn"`    // 需求 7 的本地回显开关
+	PreviewOn  bool `json:"previewOn"`  // 需求 7 的本地回显开关
 	Sending    bool `json:"sending"`    // 正在推送本地视频
 	Width      int  `json:"width"`      // 对端视频分辨率（未收到帧时为 0）
 	Height     int  `json:"height"`
@@ -108,7 +108,9 @@ type EventSink interface {
 	// hasVideo 表示对端 offer 里含可用的视频段（决定是否显示「视频接听」按钮）。
 	OnIncoming(callID, remote, remoteName string, hasVideo bool)
 	// OnRinging 呼出已振铃（收到 180/183）。
-	OnRinging(callID string)
+	// earlyMedia 表示本次振铃**带着早期媒体**（183 + SDP，回铃音由对端下发）——
+	// 界面据此决定要不要放本地回铃音（有早期媒体就不放，免得两种铃音重叠加）。
+	OnRinging(callID string, earlyMedia bool)
 	// OnEstablished 通话建立。
 	OnEstablished(callID string)
 	// OnTerminated 通话结束，reason 如 remote_hangup / local_hangup / rejected。

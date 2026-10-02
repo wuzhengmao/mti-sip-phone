@@ -215,6 +215,8 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 			"remote": effRemote,
 			// 当前通话快照：网页可立刻显示视频状态，无需等 call.video 事件
 			"call": activeCall(s.app),
+			// 当前旋转/镜像：订阅时以软电话为准（桌面那边可能已经转过）
+			"transforms": s.app.VideoTransforms(),
 		}
 		if p.Local != nil {
 			data["local"] = effLocal
@@ -224,6 +226,39 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 	case MethodVideoUnsubscribe:
 		s.video.Unsubscribe(c)
 		resp = okMessage(msg.ID, map[string]any{"local": false, "remote": false})
+
+	case MethodVideoSetTransform:
+		// 旋转/镜像存在**软电话侧**（桌面视频窗口与网页共用一份，断线/退订都不丢）：
+		// {"channel":"remote","rotate":true} | {"rotation":90} | {"mirror":true}
+		var p struct {
+			Channel  string `json:"channel"`
+			Rotate   bool   `json:"rotate"`
+			Rotation *int   `json:"rotation"`
+			Mirror   *bool  `json:"mirror"`
+		}
+		if err := json.Unmarshal(msg.Params, &p); err != nil {
+			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("参数格式错误"))
+			break
+		}
+		var (
+			st  core.VideoTransforms
+			err error
+		)
+		switch {
+		case p.Rotate:
+			st, err = s.app.RotateVideo(p.Channel)
+		case p.Rotation != nil:
+			st, err = s.app.SetVideoRotation(p.Channel, *p.Rotation)
+		case p.Mirror != nil:
+			st, err = s.app.SetVideoMirror(p.Channel, *p.Mirror)
+		default:
+			err = fmt.Errorf("需要 rotate / rotation / mirror 之一")
+		}
+		if err != nil {
+			resp = errMessage(msg.ID, CodeInvalidParams, err)
+			break
+		}
+		resp = okMessage(msg.ID, st)
 
 	case MethodGetState:
 		resp = okMessage(msg.ID, s.app.State())

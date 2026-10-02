@@ -53,12 +53,24 @@
       this._handlers = new Map();    // event -> Set<fn>
       this._renderers = {};          // channel -> VideoRenderer（订阅视频时绑定）
       this._videoRouted = false;     // 帧路由与生命周期清理是否已安装
+      this._subOpts = null;          // 最近一次 video.subscribe 的参数（断线重连后自动恢复）
+      // 旋转/镜像的**权威状态在软电话侧**（桌面视频窗口与网页共用一份）：
+      // 这里只是本地镜像，订阅/退订/断线重连都不丢
+      this._videoTx = { remote: { rotation: 0, mirror: false }, local: { rotation: 0, mirror: false } };
       this._ws = null;
       this._closed = false;          // 用户主动关闭，不再重连
       this._connected = false;
       this._heartbeat = null;        // 心跳定时器（保持连接不被服务端读超时断开）
       this._everConnected = false;   // 是否曾成功连接过
       this._launchAttempted = false; // 是否已尝试过通过协议拉起软电话（仅一次）
+
+      // 旋转/镜像状态：连上（含断线重连）时从状态快照恢复，变化时由事件同步
+      this.on('system.state', (st) => {
+        if (st && st.video) { this._applyTransformState(st.video); }
+      });
+      this.on('video.transform', (st) => this._applyTransformState(st));
+      // 断线重连后自动恢复订阅（订阅是连接级的，新连接默认没有订阅）
+      this.on('connected', () => this._restoreVideoSubscription());
     }
 
     /** 是否已连接 */
@@ -332,14 +344,84 @@
         params.local = channelParams(local, options);
       }
 
+      this._subOpts = params; // 记住订阅参数：断线重连后自动恢复
       return this._request('video.subscribe', params).then((res) => {
         this._ensureVideoRouting();
+        // 订阅时以软电话的当前状态为准（转/镜像可能是桌面那边设的）
+        this._applyTransformState(res.transforms);
         this._bindVideoChannel('remote', remote, options);
         if (local) {
           this._bindVideoChannel('local', local, options);
         }
-        return res;
+        return this._decorateSubscription(res);
       });
+    }
+
+    /**
+     * 画面旋转（每次顺时针 +90°，90°/270° 时宽高互换，<video> 的框跟着变）。
+     * 状态存在软电话侧：桌面视频窗口的按钮会同步变，断线/退订都不丢。
+     * @param {string} [channel] 'remote'（默认）或 'local'
+     * @returns {Promise<{remote: Object, local: Object}>} 旋转后的完整状态
+     */
+    rotateVideo(channel) {
+      return this._request('video.setTransform', { channel: channel || 'remote', rotate: true })
+        .then((st) => this._applyTransformState(st));
+    }
+
+    /**
+     * 画面水平镜像开关（本地回显常用作自拍镜像）。状态同 rotateVideo。
+     * @param {string} [channel] 'remote'（默认）或 'local'
+     * @returns {Promise<{remote: Object, local: Object}>} 切换后的完整状态
+     */
+    mirrorVideo(channel) {
+      const ch = channel || 'remote';
+      const cur = (this._videoTx && this._videoTx[ch]) || { mirror: false };
+      return this._request('video.setTransform', { channel: ch, mirror: !cur.mirror })
+        .then((st) => this._applyTransformState(st));
+    }
+
+    /**
+     * 当前已知的旋转/镜像状态（远端 + 本地回显）。
+     * @returns {{remote: {rotation: number, mirror: boolean}, local: {rotation: number, mirror: boolean}}}
+     */
+    videoTransforms() {
+      return this._videoTx;
+    }
+
+    /** 内部：给订阅响应挂上 rotate/mirror/clear 控制方法 */
+    _decorateSubscription(res) {
+      const sdk = this;
+      res.rotate = function (channel) { return sdk.rotateVideo(channel || 'remote'); };
+      res.mirror = function (channel) { return sdk.mirrorVideo(channel || 'remote'); };
+      res.clear = function () { sdk.clearVideo(); };
+      res.transforms = function () { return sdk.videoTransforms(); };
+      return res;
+    }
+
+    /** 内部：状态同步到本地（渲染器 + 供页面查询） */
+    _applyTransformState(st) {
+      if (!st) {
+        return;
+      }
+      const zero = { rotation: 0, mirror: false };
+      this._videoTx = { remote: st.remote || zero, local: st.local || zero };
+      Object.keys(this._renderers).forEach((ch) => {
+        const t = this._videoTx[ch];
+        if (t) {
+          this._renderers[ch].setTransform(t.rotation, t.mirror);
+        }
+      });
+      return this._videoTx;
+    }
+
+    /** 内部：断线重连后恢复订阅（画面元素不变，只重新登记） */
+    _restoreVideoSubscription() {
+      if (!this._subOpts) {
+        return;
+      }
+      this._request('video.subscribe', this._subOpts)
+        .then((res) => { this._decorateSubscription(res); })
+        .catch(() => {});
     }
 
     /**
@@ -347,6 +429,9 @@
      * @returns {Promise<{remote: Object, local?: Object}>}
      */
     unsubscribeVideo() {
+      // 主动退订要**忘掉**订阅参数：否则断线重连时会把它偷偷恢复回来，
+      // 用户看到的现象是"取消了订阅，软电话的视频窗口却一直不回来"。
+      this._subOpts = null;
       return this._request('video.unsubscribe', {}).then((res) => {
         this.clearVideo();
         return res;
@@ -463,10 +548,16 @@
       if (old && old.el !== co.el) {
         old.destroy();
       }
-      this._renderers[channel] = new VideoRenderer(co.el, {
+      const r = new VideoRenderer(co.el, {
         fps: co.fps || top.fps,
         onStats: onStats ? (stats) => onStats(channel, stats) : null
       });
+      // 旋转/镜像状态不随（重新）订阅丢失：新渲染器套用当前状态
+      const t = this._videoTx && this._videoTx[channel];
+      if (t) {
+        r.setTransform(t.rotation, t.mirror);
+      }
+      this._renderers[channel] = r;
     }
 
     /** 内部：启动心跳（每 25 秒发一条空消息，重置服务端读超时） */
@@ -566,9 +657,14 @@
 
       this.fps = 0;       // 每秒帧数（统计值）
       this.kbps = 0;      // 每秒码率（统计值）
-      this.width = 0;     // 最近一帧的宽
+      this.width = 0;     // 当前画面的宽（含旋转：90°/270° 时是源图的高）
       this.height = 0;
       this.frames = 0;    // 累计帧数
+
+      this.rotation = 0;  // 旋转角度（0/90/180/270，顺时针）
+      this.mirror = false; // 水平镜像
+      this.srcW = 0;      // 最近一帧的原始宽高（算旋转后的框用）
+      this.srcH = 0;
 
       this._busy = false; // 有帧正在解码/绘制
       this._n = 0;        // 统计窗口内的帧数
@@ -596,19 +692,54 @@
       }
       this._busy = true;
       createImageBitmap(blob).then((bmp) => {
-        if (this.canvas.width !== bmp.width || this.canvas.height !== bmp.height) {
-          this.canvas.width = bmp.width;
-          this.canvas.height = bmp.height;
-          this.width = bmp.width;
-          this.height = bmp.height;
+        const rot = ((this.rotation % 360) + 360) % 360;
+        const swap = (rot === 90 || rot === 270);
+        const w = swap ? bmp.height : bmp.width;
+        const h = swap ? bmp.width : bmp.height;
+        this.srcW = bmp.width;
+        this.srcH = bmp.height;
+        if (this.canvas.width !== w || this.canvas.height !== h) {
+          this.canvas.width = w;   // 旋转 90°/270° 时宽高互换
+          this.canvas.height = h;
+          this.width = w;
+          this.height = h;
+          this._applyAspect();
         }
-        this.ctx.drawImage(bmp, 0, 0);
+        const ctx = this.ctx;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, w, h); // 旋转后四角不留上一帧的残影
+        ctx.translate(w / 2, h / 2);
+        ctx.rotate(rot * Math.PI / 180);
+        if (this.mirror) {
+          ctx.scale(-1, 1);       // 先镜像再旋转（与桌面端一致）
+        }
+        ctx.drawImage(bmp, -bmp.width / 2, -bmp.height / 2);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
         if (bmp.close) { bmp.close(); }
         this._tick(blob.size);
         this._busy = false;
       }).catch(() => {
         this._busy = false;
       });
+    }
+
+    /** 设定旋转/镜像（状态由软电话下发，见 SDK 的 _applyTransformState）。 */
+    setTransform(rotation, mirror) {
+      this.rotation = ((Number(rotation) || 0) % 360 + 360) % 360;
+      this.mirror = !!mirror;
+      this._applyAspect();
+    }
+
+    /** 按旋转后的宽高比调整 <video> 的显示框（CSS aspect-ratio 覆盖默认值）。 */
+    _applyAspect() {
+      if (!this.el || !this.el.style || !this.srcW || !this.srcH) {
+        return;
+      }
+      const swap = (this.rotation === 90 || this.rotation === 270);
+      const w = swap ? this.srcH : this.srcW;
+      const h = swap ? this.srcW : this.srcH;
+      this.el.style.aspectRatio = w + ' / ' + h;
     }
 
     /**

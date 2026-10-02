@@ -385,10 +385,6 @@ func (panelRowsLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	}
 }
 
-
-
-
-
 type vPadLayout struct{ pad float32 }
 
 func (l vPadLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
@@ -419,20 +415,20 @@ func (l vPadLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	}
 }
 
-
 // dialCallButtonHeight 主窗体「呼叫 / 视频呼叫」按钮高度（DIP）。
 // REQ-VIDEO-003：为给视频按钮腾位置，呼叫按钮比原 36 略矮。
 const dialCallButtonHeight = 32
 
 // 通话面板按钮配色（与主界面主题色观感一致）。
 var (
-	colorDangerRed    = color.NRGBA{R: 0xe5, G: 0x39, B: 0x35, A: 0xff} // 挂断
-	colorSuccessGreen = color.NRGBA{R: 0x43, G: 0xa0, B: 0x47, A: 0xff} // 接听/呼叫
-	colorHoldYellow   = color.NRGBA{R: 0xfb, G: 0xc0, B: 0x2d, A: 0xff} // 保持
-	colorHoldBlue     = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff} // 取消保持/开关开
-	colorSwitchGray   = color.NRGBA{R: 0xbd, G: 0xbd, B: 0xbd, A: 0xff} // 开关关
-	colorIconBlack    = color.NRGBA{R: 0x1a, G: 0x1a, B: 0x1a, A: 0xff} // 呼叫按钮文字（固定黑）
-	colorIconWhite    = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff} // 挂断态文字（红底白字）
+	colorDangerRed     = color.NRGBA{R: 0xe5, G: 0x39, B: 0x35, A: 0xff} // 挂断
+	colorSuccessGreen  = color.NRGBA{R: 0x43, G: 0xa0, B: 0x47, A: 0xff} // 接听/呼叫
+	colorHoldYellow    = color.NRGBA{R: 0xfb, G: 0xc0, B: 0x2d, A: 0xff} // 保持
+	colorHoldBlue      = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff} // 取消保持/开关开
+	colorSwitchGray    = color.NRGBA{R: 0xbd, G: 0xbd, B: 0xbd, A: 0xff} // 开关关
+	colorTransformGray = color.NRGBA{R: 0x44, G: 0x48, B: 0x4f, A: 0xf2} // 旋转/镜像未生效（深灰，压在画面上）
+	colorIconBlack     = color.NRGBA{R: 0x1a, G: 0x1a, B: 0x1a, A: 0xff} // 呼叫按钮文字（固定黑）
+	colorIconWhite     = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff} // 挂断态文字（红底白字）
 )
 
 // compactButton 通话面板紧凑按钮（REQ-UI-025 修订）：默认 36×36

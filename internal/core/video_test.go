@@ -165,6 +165,75 @@ func TestPendingVideoStateBeforeCallRegistered(t *testing.T) {
 	}
 }
 
+// TestVideoTransformSharedState 旋转/镜像的共享状态（REQ-VIDEO-012）：
+// 两条通道各一套、旋转 +90° 循环、变更广播 video.transform、快照进 State()。
+func TestVideoTransformSharedState(t *testing.T) {
+	bus := NewBus()
+	app := New(config.Default(), nil, bus)
+	sub := bus.Subscribe()
+	defer bus.Unsubscribe(sub)
+
+	if st := app.VideoTransforms(); st.Remote.Rotation != 0 || st.Local.Mirror {
+		t.Fatalf("初始状态应为零值: %+v", st)
+	}
+
+	// 远端转 4 次回到 0，且每次变化都广播
+	for i := 1; i <= 4; i++ {
+		st, err := app.RotateVideo(VideoChannelRemote)
+		if err != nil {
+			t.Fatalf("RotateVideo: %v", err)
+		}
+		want := (i * 90) % 360
+		if st.Remote.Rotation != want {
+			t.Fatalf("第 %d 次旋转后角度 = %d，期望 %d", i, st.Remote.Rotation, want)
+		}
+		if st.Local.Rotation != 0 {
+			t.Fatalf("旋转远端不该动到本地: %+v", st.Local)
+		}
+		ev := <-sub
+		if ev.Name != "video.transform" {
+			t.Fatalf("期望 video.transform 事件，实际 %s", ev.Name)
+		}
+		if got := ev.Data.(VideoTransforms); got.Remote.Rotation != want {
+			t.Fatalf("事件负载角度 = %d，期望 %d", got.Remote.Rotation, want)
+		}
+	}
+
+	// 远端镜像 + 本地旋转（互不影响）
+	if _, err := app.SetVideoMirror(VideoChannelRemote, true); err != nil {
+		t.Fatalf("SetVideoMirror: %v", err)
+	}
+	<-sub
+	st, err := app.RotateVideo(VideoChannelLocal)
+	if err != nil {
+		t.Fatalf("RotateVideo(local): %v", err)
+	}
+	if !st.Remote.Mirror || st.Local.Rotation != 90 {
+		t.Fatalf("两条通道应各管各的: %+v", st)
+	}
+	<-sub
+
+	// 状态快照要出现在 State() 里（网页重连时据此对齐）
+	if got := app.State().Video; got != st {
+		t.Fatalf("State().Video = %+v，期望 %+v", got, st)
+	}
+
+	// 幂等：设成同样的值不发事件
+	if _, err := app.SetVideoMirror(VideoChannelRemote, true); err != nil {
+		t.Fatalf("SetVideoMirror: %v", err)
+	}
+	select {
+	case ev := <-sub:
+		t.Fatalf("状态未变化却发了事件：%+v", ev)
+	default:
+	}
+
+	// 未知通道报错
+	if _, err := app.RotateVideo("bogus"); err == nil {
+		t.Fatal("未知通道应报错")
+	}
+}
+
 // TestLocalVideoWanted 界面之外的本地帧消费者判定（REQ-VIDEO-009）：
 // 只有订阅了本地画面的网页才算，且关闭界面回显不影响它。
 func TestLocalVideoWanted(t *testing.T) {

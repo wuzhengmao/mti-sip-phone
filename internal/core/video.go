@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"image"
 	"sync"
 )
@@ -136,6 +137,80 @@ func (a *App) LocalVideoWanted() bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// 显示用的旋转 / 水平镜像（REQ-VIDEO-012）
+// ---------------------------------------------------------------------------
+
+// VideoTransform 一条通道的旋转/水平镜像。
+type VideoTransform struct {
+	Rotation int  `json:"rotation"` // 0/90/180/270（顺时针，90/270 宽高互换）
+	Mirror   bool `json:"mirror"`   // 水平镜像
+}
+
+// VideoTransforms 远端画面与本地回显各自的变换状态。
+//
+// **存在软电话侧、两端共用一份**（用户要求）：桌面视频窗口的按钮与网页的按钮
+// 改的是同一份状态，互相同步；订阅/退订、网页断线重连都不丢。
+type VideoTransforms struct {
+	Remote VideoTransform `json:"remote"` // 远端画面
+	Local  VideoTransform `json:"local"`  // 本地回显
+}
+
+// VideoChannelRemote / VideoChannelLocal video.setTransform 的通道名。
+const (
+	VideoChannelRemote = "remote"
+	VideoChannelLocal  = "local"
+)
+
+// VideoTransforms 当前变换状态快照。
+func (a *App) VideoTransforms() VideoTransforms {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.videoTx
+}
+
+// RotateVideo 指定通道顺时针 +90°（90/270 时宽高互换），返回新状态。
+func (a *App) RotateVideo(channel string) (VideoTransforms, error) {
+	return a.setVideoTransform(channel, func(t *VideoTransform) {
+		t.Rotation = (t.Rotation + 90) % 360
+	})
+}
+
+// SetVideoRotation 直接设定旋转角度（取模到 0/90/180/270 的整圈值）。
+func (a *App) SetVideoRotation(channel string, deg int) (VideoTransforms, error) {
+	deg = ((deg % 360) + 360) % 360
+	deg = (deg / 90) * 90
+	return a.setVideoTransform(channel, func(t *VideoTransform) { t.Rotation = deg })
+}
+
+// SetVideoMirror 指定通道的水平镜像开关，返回新状态。
+func (a *App) SetVideoMirror(channel string, on bool) (VideoTransforms, error) {
+	return a.setVideoTransform(channel, func(t *VideoTransform) { t.Mirror = on })
+}
+
+// setVideoTransform 改一条通道的变换并发 video.transform 事件（变化才发）。
+func (a *App) setVideoTransform(channel string, fn func(*VideoTransform)) (VideoTransforms, error) {
+	a.mu.Lock()
+	var t *VideoTransform
+	switch channel {
+	case VideoChannelRemote, "":
+		t = &a.videoTx.Remote
+	case VideoChannelLocal:
+		t = &a.videoTx.Local
+	default:
+		a.mu.Unlock()
+		return VideoTransforms{}, fmt.Errorf("未知通道: %s（应为 remote/local）", channel)
+	}
+	old := *t
+	fn(t)
+	st := a.videoTx
+	a.mu.Unlock()
+	if *t != old {
+		a.bus.Publish("video.transform", st)
+	}
+	return st, nil
 }
 
 // WebVideoState 当前网页订阅状态快照。

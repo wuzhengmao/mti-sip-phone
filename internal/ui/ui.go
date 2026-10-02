@@ -166,12 +166,21 @@ type App struct {
 	videoSized      bool          // 窗口尺寸是否已按对端比例初始化
 	videoFullscreen bool
 	webVideoOn      bool // 有网页正在接收视频画面（REQ-VIDEO-009，此时不显示视频窗口）
+	ringbackOn      bool // 正在放本地回铃音（没有早期媒体时自己放，避免重复放）
+	videoTopmost    bool // 视频窗口是否被用户置顶（默认不置顶，手动开启）
 
 	// 帧投递：媒体层 goroutine 写、主线程读（合并刷新，见 ui_video.go）
 	remoteFrame   atomic.Pointer[frameRef]
 	localFrame    atomic.Pointer[frameRef]
 	remotePending atomic.Bool
 	localPending  atomic.Bool
+
+	// 旋转/水平镜像（显示用，媒体层 goroutine 逐帧读取，故用原子量）。
+	// 会话内记忆：不随通话结束复位（同一路摄像头/同一个对端的摆法通常不变）。
+	remoteRot    atomic.Int32 // 远端画面旋转角度（0/90/180/270）
+	remoteMirror atomic.Bool  // 远端画面水平镜像
+	localRot     atomic.Int32 // 本地回显旋转角度
+	localMirror  atomic.Bool  // 本地回显水平镜像
 
 	// loadingForm 表单回填标志：回填期间屏蔽 OnChanged 自动保存，避免
 	// 初始化把旧值覆盖进配置
@@ -983,6 +992,11 @@ func (a *App) subscribeEvents() {
 	a.updateWindowTitle()
 
 	sub := a.core.Bus().Subscribe()
+	// **订阅之后再取一次快照**：网页可能在 UI 订阅事件之前就连上并订阅了视频
+	//（软电话重启时页面会自动重连重订阅），漏掉那个 video.web 事件的后果是
+	//"网页在看画面，桌面视频窗口却也打开了"（用户实测）。旋转/镜像状态同理。
+	a.webVideoOn = a.core.WebVideoState().Active
+	a.applyVideoTransforms(a.core.VideoTransforms())
 	go func() {
 		for ev := range sub {
 			fyne.Do(func() { a.onEvent(ev) })
@@ -1060,6 +1074,12 @@ func (a *App) onEvent(ev core.Event) {
 			// callHasVideo 决定，顺序上 call.video 一定先被处理。
 		}
 
+	case "video.transform":
+		// 画面旋转/镜像变化（桌面与网页共用一份状态，谁改都广播）
+		if st, ok := ev.Data.(core.VideoTransforms); ok {
+			a.applyVideoTransforms(st)
+		}
+
 	case "video.web":
 		// 网页端视频订阅状态变化（REQ-VIDEO-009）：有网页在看画面时
 		// 软电话自动关闭视频窗口；网页退订后按当前内容恢复显示。
@@ -1093,12 +1113,29 @@ func (a *App) onEvent(ev core.Event) {
 
 	case "call.ringing":
 		// 呼出振铃：通话面板保持"呼叫中"（对方信息可能更新）。
-		// 回铃音由 SIP 服务器以 183 早期媒体下发，媒体层直接接收播放。
 		// 183 附 SDP 时媒体引擎已创建：把会话内记忆的扬声器/麦克风
-		// 状态下发（呼叫阶段关闭扬声器即可屏蔽回铃音，REQ-UI-023）
+		// 状态下发（呼叫阶段关闭扬声器即可屏蔽回铃音，REQ-UI-023）。
+		//
+		// 回铃音（用户要求）：**有早期媒体**（183+SDP）时由对端下发、媒体层
+		// 直接播放，本端不放；**没有早期媒体**才放本地回铃音（ringback.wav）。
 		if callID, call := callData(ev.Data); call != nil && callID == a.activeCallID {
 			a.activeCall = call
 			a.applySessionAudioState()
+			early := false
+			if m, ok := ev.Data.(map[string]any); ok {
+				early, _ = m["earlyMedia"].(bool)
+			}
+			if a.audioMgr != nil {
+				if early && a.ringbackOn {
+					a.ringbackOn = false
+					logx.Logger().Info("对端已下发早期媒体，停止本地回铃音")
+					a.audioMgr.StopRing() // 对端开始送回铃音了，停掉本地的
+				} else if !early && !a.ringbackOn {
+					a.ringbackOn = true
+					logx.Logger().Info("无早期媒体，播放本地回铃音")
+					a.audioMgr.PlayRingback()
+				}
+			}
 		}
 
 	case "call.video-established":
@@ -1109,24 +1146,32 @@ func (a *App) onEvent(ev core.Event) {
 			a.activeCall = call
 			a.savedNumber = call.Remote
 			a.setCallUI(uiInCall, callRemoteName(call))
-			// 通话建立：停止振铃音
+			// 通话建立：停止振铃音（含本地回铃音）
+			a.ringbackOn = false
 			if a.audioMgr != nil {
 				a.audioMgr.StopRing()
 			}
 		}
 
 	case "call.terminated", "call.failed":
-		// 停止振铃音并播放挂断提示音
+		// 停止振铃音，并按结果放提示音：遇忙放忙音，其余放挂断音
+		reason := ""
+		if m, ok := ev.Data.(map[string]any); ok {
+			reason, _ = m["reason"].(string)
+		}
 		if a.audioMgr != nil {
+			a.ringbackOn = false
 			a.audioMgr.StopRing()
-			a.audioMgr.PlayHangup()
+			if isBusyReason(reason) {
+				logx.Logger().Info("对端忙，播放遇忙音", "reason", reason)
+				a.audioMgr.PlayBusy()
+			} else {
+				a.audioMgr.PlayHangup()
+			}
 		}
 		if ev.Name == "call.failed" {
-			reason := "未知原因"
-			if m, ok := ev.Data.(map[string]any); ok {
-				if r, ok := m["reason"].(string); ok {
-					reason = r
-				}
+			if reason == "" {
+				reason = "未知原因"
 			}
 			a.showCallFailed(reason)
 			return
@@ -1151,6 +1196,16 @@ func (a *App) onEvent(ev core.Event) {
 			a.applySpeakerButton()
 		}
 	}
+}
+
+// isBusyReason 呼叫失败原因是否属于"忙"：486 Busy Here / 600 Busy Everywhere
+// （sip 层给的 reason 形如 "486 Busy Here"）。
+func isBusyReason(reason string) bool {
+	code := 0
+	if _, err := fmt.Sscanf(reason, "%d", &code); err != nil {
+		return false
+	}
+	return code == 486 || code == 600
 }
 
 // regText 注册状态中文文案。

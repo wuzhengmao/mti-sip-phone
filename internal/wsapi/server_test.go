@@ -32,7 +32,7 @@ func (s *stubTel) Dial(ctx context.Context, target string) (string, error) {
 	go func() {
 		// 等待 App 完成通话登记（避免事件先于 calls 登记到达被丢弃）
 		time.Sleep(20 * time.Millisecond)
-		s.app.OnRinging(id)
+		s.app.OnRinging(id, false)
 		s.app.OnEstablished(id)
 	}()
 	return id, nil
@@ -307,6 +307,37 @@ func TestDialFlow(t *testing.T) {
 	msg, _ = waitResponseAndEvent(t, conn, "call.terminated")
 	if msg.OK == nil || !*msg.OK {
 		t.Fatalf("挂断应成功，收到: %+v", msg)
+	}
+}
+
+// TestCallFailedCarriesReason call.failed / call.terminated 事件必须带 reason
+// （回归：publishCall 的附加字段要**键值成对**，早先只传了一个值，
+// 事件里因此一直没有 reason，网页显示的失败原因恒为空）。
+func TestCallFailedCarriesReason(t *testing.T) {
+	ts, app := newTestServer(t)
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+
+	app.OnIncoming("c1", "1002", "1002", false)
+	ev := waitEvent(t, conn, "call.incoming")
+	if d, _ := ev.Data.(map[string]any); d["callId"] != "c1" {
+		t.Fatalf("来电事件异常: %+v", d)
+	}
+
+	app.OnFailed("c1", "486 Busy Here")
+	ev = waitEvent(t, conn, "call.failed")
+	d, _ := ev.Data.(map[string]any)
+	if d["reason"] != "486 Busy Here" {
+		t.Fatalf("call.failed 应带 reason，实际: %+v", d)
+	}
+
+	app.OnIncoming("c2", "1003", "1003", false)
+	waitEvent(t, conn, "call.incoming")
+	app.OnTerminated("c2", "remote_hangup")
+	ev = waitEvent(t, conn, "call.terminated")
+	d, _ = ev.Data.(map[string]any)
+	if d["reason"] != "remote_hangup" {
+		t.Fatalf("call.terminated 应带 reason，实际: %+v", d)
 	}
 }
 

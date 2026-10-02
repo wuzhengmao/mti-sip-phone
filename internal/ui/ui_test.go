@@ -1,11 +1,87 @@
 package ui
 
 import (
+	"image"
 	"math"
 	"testing"
 
 	"mti-sip-phone/internal/core"
 )
+
+// TestIsBusyReason 遇忙音判定：486/600 才算忙（sip 层给的 reason 形如
+// "486 Busy Here"），其余失败走挂断音。
+func TestIsBusyReason(t *testing.T) {
+	busy := []string{"486 Busy Here", "600 Busy Everywhere", "486"}
+	notBusy := []string{"", "404 Not Found", "603 Decline", "488 Not Acceptable Here", "未知原因"}
+	for _, r := range busy {
+		if !isBusyReason(r) {
+			t.Errorf("%q 应判为忙", r)
+		}
+	}
+	for _, r := range notBusy {
+		if isBusyReason(r) {
+			t.Errorf("%q 不该判为忙", r)
+		}
+	}
+}
+
+// TestTransformFrame 旋转/镜像变换（显示用）：宽高互换、像素映射正确、
+// **不改原帧**（同一块数据还要给网页订阅的出口用）。
+func TestTransformFrame(t *testing.T) {
+	// 2×3 的图，用像素值编码坐标便于断言
+	src := image.NewRGBA(image.Rect(0, 0, 2, 3))
+	set := func(x, y int, v byte) {
+		i := y*src.Stride + x*4
+		src.Pix[i], src.Pix[i+1], src.Pix[i+2], src.Pix[i+3] = v, 0, 0, 0xff
+	}
+	//  1 2
+	//  3 4
+	//  5 6
+	set(0, 0, 1)
+	set(1, 0, 2)
+	set(0, 1, 3)
+	set(1, 1, 4)
+	set(0, 2, 5)
+	set(1, 2, 6)
+	at := func(img *image.RGBA, x, y int) byte { return img.Pix[y*img.Stride+x*4] }
+
+	// 无变换：原样返回（不复制）
+	if got := transformFrame(src, 0, false); got != src {
+		t.Fatal("无变换时应原样返回")
+	}
+
+	// 顺时针 90°：2×3 → 3×2，src(x,y) → dst(h-1-y, x)：顶行变成右列
+	r90 := transformFrame(src, 90, false)
+	if b := r90.Bounds(); b.Dx() != 3 || b.Dy() != 2 {
+		t.Fatalf("旋转 90° 后应为 3×2，实际 %d×%d", b.Dx(), b.Dy())
+	}
+	if at(r90, 2, 0) != 1 || at(r90, 1, 0) != 3 || at(r90, 0, 0) != 5 {
+		t.Fatalf("旋转 90° 映射不符：%d %d %d，期望 1 3 5", at(r90, 2, 0), at(r90, 1, 0), at(r90, 0, 0))
+	}
+
+	// 180°：尺寸不变，四角对调
+	r180 := transformFrame(src, 180, false)
+	if at(r180, 1, 2) != 1 || at(r180, 0, 0) != 6 {
+		t.Fatalf("旋转 180° 映射不符：%d %d，期望 1 6", at(r180, 1, 2), at(r180, 0, 0))
+	}
+
+	// 水平镜像：src(x,y) → dst(w-1-x, y)
+	m := transformFrame(src, 0, true)
+	if at(m, 1, 0) != 1 || at(m, 0, 0) != 2 {
+		t.Fatalf("镜像映射不符：%d %d，期望 1 2", at(m, 1, 0), at(m, 0, 0))
+	}
+
+	// 镜像 + 旋转：先镜像再旋转
+	mr := transformFrame(src, 90, true)
+	if at(mr, 2, 0) != 2 { // src'(0,0)=src(1,0)=2
+		t.Fatalf("镜像+旋转映射不符：%d，期望 2", at(mr, 2, 0))
+	}
+
+	// 原帧一个像素都不能被改（网页订阅的出口共用这块数据）
+	if at(src, 0, 0) != 1 || at(src, 1, 2) != 6 {
+		t.Fatal("原帧被就地修改了")
+	}
+}
 
 // TestWantVideoWindowWhileSendingLocal 视频呼叫「拨出即显示」：
 // 本端在推本地视频且回显开着时，不等视频协商、不等对端画面就显示窗口

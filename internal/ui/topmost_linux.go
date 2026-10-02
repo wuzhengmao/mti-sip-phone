@@ -178,6 +178,59 @@ static void sp_above(Display *d, Window win) {
 	sp_add_state(d, win, "_NET_WM_STATE_ABOVE");
 }
 
+// 从窗口的 _NET_WM_STATE 里移除一个状态（属性与 ClientMessage 两种形式都做）。
+static void sp_remove_state(Display *d, Window win, const char *name) {
+	Atom state = XInternAtom(d, "_NET_WM_STATE", False);
+	Atom atom = XInternAtom(d, name, False);
+
+	// 1) 属性形式：读出列表，剔除目标后写回
+	Atom list[9];
+	int n = 0;
+	Atom type;
+	int format;
+	unsigned long nitems, after;
+	unsigned char *data = NULL;
+	if (XGetWindowProperty(d, win, state, 0, 8, False, XA_ATOM, &type, &format,
+	                       &nitems, &after, &data) == Success && data != NULL) {
+		unsigned long *v = (unsigned long *)data;
+		for (unsigned long i = 0; i < nitems && n < 8; i++) {
+			if ((Atom)v[i] != atom) {
+				list[n++] = (Atom)v[i];
+			}
+		}
+		XFree(data);
+		XChangeProperty(d, win, state, XA_ATOM, 32, PropModeReplace,
+		                (unsigned char *)list, n);
+	}
+
+	// 2) ClientMessage 形式（action=0 移除状态），发往根窗口
+	XEvent ev;
+	memset(&ev, 0, sizeof(ev));
+	ev.xclient.type = ClientMessage;
+	ev.xclient.window = win;
+	ev.xclient.message_type = state;
+	ev.xclient.format = 32;
+	ev.xclient.data.l[0] = 0; // _NET_WM_STATE_REMOVE
+	ev.xclient.data.l[1] = (long)atom;
+	ev.xclient.data.l[2] = 0;
+	ev.xclient.data.l[3] = 1; // 来源：应用
+	ev.xclient.data.l[4] = 0;
+	XSendEvent(d, DefaultRootWindow(d), False,
+	           SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+	XFlush(d);
+}
+
+// 置顶开关：_NET_WM_STATE_ABOVE（EWMH 的"置顶"状态）。
+// on=0 时移除——Wayland 合成器下能否生效由合成器决定（Xwayland 下 labwc
+// 等会读属性；纯 Wayland 会话本就用不了 X11 手段）。
+static void sp_set_above(Display *d, Window win, int on) {
+	if (on) {
+		sp_add_state(d, win, "_NET_WM_STATE_ABOVE");
+	} else {
+		sp_remove_state(d, win, "_NET_WM_STATE_ABOVE");
+	}
+}
+
 static void sp_move(Display *d, Window win, int x, int y) {
 	XMoveWindow(d, win, x, y);
 	XFlush(d);
@@ -243,6 +296,31 @@ const callPanelMargin = 16
 // 去装饰后边框几何变化，再延后校正两次（节奏同 Windows 实现）。
 func moveCallWindowToCorner(w fyne.Window) {
 	moveWindowToCorner(w, callPanelWidth, callPanelHeight, "通话面板")
+}
+
+// setVideoWindowTopmost 视频窗口置顶开关（用户要求，可撤销）。
+// X11 下用 EWMH 的 _NET_WM_STATE_ABOVE；窗口号经 RunNative 取（同 placeVideoWindow）。
+func setVideoWindowTopmost(w fyne.Window, on bool) {
+	if w == nil {
+		return
+	}
+	go func() { // fyne.DoAndWait 不可在主线程调用（本函数由 UI 事件回调触发）
+		handle := callPanelHandle(w)
+		if handle == 0 {
+			logx.Logger().Debug("未取得视频窗口 X11 句柄，跳过置顶")
+			return
+		}
+		d := C.sp_open_display()
+		if d == nil {
+			return
+		}
+		defer C.sp_close_display(d)
+		v := C.int(0)
+		if on {
+			v = 1
+		}
+		C.sp_set_above(d, C.Window(handle), v)
+	}()
 }
 
 // placeVideoWindow 把视频窗口摆到通话面板正上方、右边缘对齐（**只移动**）。
@@ -326,7 +404,7 @@ func moveWindowToCorner(w fyne.Window, wDip, hDip float32, name string) {
 			time.Sleep(50 * time.Millisecond)
 		}
 		if handle == 0 {
-			logx.Logger().Warn(name+"未取得 X11 窗口句柄，跳过定位")
+			logx.Logger().Warn(name + "未取得 X11 窗口句柄，跳过定位")
 			return
 		}
 		placeCornerWindow(handle, targetW, targetH, scale, contentMin, name)
