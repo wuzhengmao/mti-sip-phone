@@ -38,7 +38,63 @@ func speakerIconSVG(color string, off bool) string {
 </svg>`
 }
 
+// videoIconSVG 摄像头图标（Material Design videocam / videocam_off path），
+// 视频呼叫按钮与通话面板视频开关用（REQ-VIDEO-003/008）。
+func videoIconSVG(color string, off bool) string {
+	path := `M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z`
+	if off {
+		path = `M21 6.5l-4 4V7c0-.55-.45-1-1-1H9.82L21 17.18V6.5zM3.27 2L2 3.27 4.73 6H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.21 0 .39-.08.54-.18L19.73 21 21 19.73 3.27 2z`
+	}
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<path fill="` + color + `" d="` + path + `"/>
+</svg>`
+}
+
+// rotateIconSVG 画面旋转图标（Material Design rotate_right path）。
+// 视频窗口工具栏用：远端画面与本地回显各一个。
+func rotateIconSVG(color string) string {
+	path := `M15.55 5.55L11 1v3.07C7.06 4.56 4 7.92 4 12s3.05 7.44 7 7.93v-2.02c-2.84-.48-5-2.94-5-5.91s2.16-5.43 5-5.91V10l4.55-4.45zM19.93 11a7.9 7.9 0 0 0-1.62-3.89l-1.42 1.42c.54.75.88 1.6 1.02 2.47h2.02zM13 17.91v2.02c1.39-.22 2.68-.75 3.79-1.5l-1.44-1.44c-.71.51-1.51.84-2.35.92zm3.77-2.88l1.42 1.42c.75-1.11 1.28-2.4 1.5-3.79h-2.02c-.13.87-.47 1.72-1.02 2.47z`
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<path fill="` + color + `" d="` + path + `"/>
+</svg>`
+}
+
+// pinIconSVG 置顶图标（Material Design push_pin path）：视频窗口工具栏用。
+func pinIconSVG(color string) string {
+	path := `M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z`
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<path fill="` + color + `" d="` + path + `"/>
+</svg>`
+}
+
+// mirrorIconSVG 水平镜像图标（Material Design flip path：中线左侧实体、
+// 右侧虚框）。
+func mirrorIconSVG(color string) string {
+	path := `M15 21h2v-2h-2v2zm4-12h2V7h-2v2zM3 5v14c0 1.1.9 2 2 2h4v-2H5V5h4V3H5c-1.1 0-2 .9-2 2zm16-2v2h2c0-1.1-.9-2-2-2zm-8 20h2V1h-2v22zm8-6h2v-2h-2v2zM15 5h2V3h-2v2zm4 8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2z`
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<path fill="` + color + `" d="` + path + `"/>
+</svg>`
+}
+
 var (
+	// IconVideoOn 摄像头开：白色前景（配蓝色底）。
+	IconVideoOn = fyne.NewStaticResource("video-on.svg", []byte(videoIconSVG("#ffffff", false)))
+	// IconVideoOff 摄像头关：红色斜线（浅灰底上清晰可见）。
+	IconVideoOff = fyne.NewStaticResource("video-off.svg", []byte(videoIconSVG("#e53935", true)))
+	// IconVideoCall 主窗体视频呼叫按钮（绿底黑图标，与呼叫按钮同色系）。
+	IconVideoCall = fyne.NewStaticResource("video-call.svg", []byte(videoIconSVG("#1a1a1a", false)))
+	// IconVideoGreen 视频窗口图标（绿色摄像头；不继承应用的红色话机图标）。
+	IconVideoGreen = fyne.NewStaticResource("video-green.svg", []byte(videoIconSVG("#43a047", false)))
+	// IconVideoAnswer 来电「视频接听」按钮（绿底白图标）。
+	IconVideoAnswer = fyne.NewStaticResource("video-answer.svg", []byte(videoIconSVG("#ffffff", false)))
+
+	// IconRotate 画面旋转（视频窗口工具栏：远端画面 / 本地回显各一个按钮）。
+	IconRotate = fyne.NewStaticResource("rotate.svg", []byte(rotateIconSVG("#ffffff")))
+	// IconMirror 水平镜像（视频窗口工具栏）。
+	IconMirror = fyne.NewStaticResource("mirror.svg", []byte(mirrorIconSVG("#ffffff")))
+	// IconPin 视频窗口置顶开关（工具栏）。
+	IconPin = fyne.NewStaticResource("pin.svg", []byte(pinIconSVG("#ffffff")))
+
 	// IconPhoneRed 未注册状态托盘图标（红色话机）。
 	IconPhoneRed = fyne.NewStaticResource("phone-red.svg", []byte(phoneIconSVG("#e53935")))
 	// IconPhoneGreen 已注册状态托盘图标（绿色话机）。

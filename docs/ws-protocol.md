@@ -54,13 +54,20 @@
 
 | 方法 | 参数 | 成功返回 | 说明 |
 | --- | --- | --- | --- |
-| `call.dial` | `{ "target": "1001" }` | `{ "callId": "..." }` | 拨号；target 为号码或 SIP URI |
-| `call.answer` | `{ "callId": "..." }` | `{ "callId": "..." }` | 接听 |
+| `call.dial` | `{ "target": "1001", "video": false }` | `{ "callId": "..." }` | 拨号；target 为号码或 SIP URI；`video: true` 发起视频呼叫（REQ-VIDEO-001） |
+| `call.answer` | `{ "callId": "...", "video": false }` | `{ "callId": "..." }` | 接听；`video: true` 视频接听——打开摄像头双向视频（REQ-VIDEO-004） |
 | `call.hangup` | `{ "callId": "..." }` | `{ "callId": "..." }` | 挂断 |
 | `call.reject` | `{ "callId": "...", "code": 486 }` | `{ "callId": "..." }` | 拒接；code 为 SIP 状态码，默认 486 |
-| `call.mute` | `{ "callId": "...", "muted": true }` | `{ "callId": "..." }` | 静音切换（仅通话建立后有效） |
-| `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态） |
+| `call.mute` | `{ "callId": "...", "muted": true }` | `{ "callId": "..." }` | 保持（静音）切换（仅通话建立后有效） |
+| `call.muteMic` | `{ "callId": "...", "muted": true }` | `{ "callId": "..." }` | 麦克风开关（纯本地动作，不发 SIP 信令）；状态变化推 `call.audio`（REQ-UI-023） |
+| `call.muteSpeaker` | `{ "callId": "...", "muted": true }` | `{ "callId": "..." }` | 扬声器开关（纯本地动作，继续接收）；状态变化推 `call.audio` |
+| `call.setVideo` | `{ "callId": "...", "enabled": true }` | `{ "callId": "..." }` | 视频总开关（纯本地动作，REQ-VIDEO-008）：关 = 不显示远端、不推送本地、视频窗口关闭；状态变化推 `call.video` |
+| `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态、自动接听开关） |
+| `system.setAutoAnswer` | `{ "enabled": true }` | `{ "enabled": true }` | 自动接听开关（REQ-CALL-014）：与软电话界面上的「自动接听」按钮**共用一份状态**，变更后广播 `system.autoAnswer`，桌面按钮与网页据此同步。视频来电自动接听时按「视频接听」接通（REQ-VIDEO-004） |
 | `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64" }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.3" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选 |
+| `video.subscribe` | `{ "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 }, "local": { "maxWidth": 160, "maxHeight": 120 } }` | 见下 | 订阅视频画面（REQ-VIDEO-009）：**必定订阅远端画面**（`remote` 不传也有默认参数），`local` 可选——不传就是**不订阅本地回显**；两条通道各带各的参数（本地回显通常小一号）。订阅期间**软电话自动关闭视频窗口**，画面以二进制帧推送（见 4.1） |
+| `video.unsubscribe` | `{}` | `{ "local": false, "remote": false }` | 取消本连接的全部视频订阅（两条通道都已退订）；软电话恢复显示视频窗口 |
+| `video.setTransform` | `{ "channel": "remote", "rotate": true }` / `{ "channel": "local", "mirror": true }` / `{ "channel": "remote", "rotation": 90 }` | `{ "remote": { "rotation": 90, "mirror": false }, "local": { "rotation": 0, "mirror": false } }` | 画面旋转/水平镜像（REQ-VIDEO-012）：`rotate: true` = 顺时针 +90°，`rotation` 直接设角度，`mirror` 设水平镜像；`channel` 为 `remote`（远端画面，可省）或 `local`（本地回显）。**状态存在软电话侧、桌面与网页共用一份**，谁改都广播 `video.transform` |
 
 ### system.getState 返回示例
 
@@ -85,12 +92,19 @@
     "info": { "version": "1.1.0", "url": "http://dl.x/app.exe" },
     "host": "dl.x",
     "progress": 0
-  }
+  },
+  "video": {
+    "remote": { "rotation": 90, "mirror": false },
+    "local": { "rotation": 0, "mirror": true }
+  },
+  "autoAnswer": false
 }
 ```
 
 - `version` / `os` / `arch`：软电话版本号与编译目标平台/架构——前端据此到业务平台查询该架构下是否有更高版本。
 - `update`：自动更新状态，无可用更新时省略（字段说明见 4. 事件 `system.update`）。
+- `video`：画面旋转/水平镜像（REQ-VIDEO-012），远端与本地回显各一份；网页连上（含断线重连）即可据此把按钮和渲染状态对齐。
+- `autoAnswer`：自动接听开关当前状态（与软电话界面的按钮共用一份，可用 `system.setAutoAnswer` 修改）。
 
 ### system.notifyUpdate 说明
 
@@ -100,19 +114,52 @@
 - 受理后软电话会在右下角弹出提示窗并在主界面显示更新提示行；**是否下载/重启由用户在软电话界面上确认**，本方法不会自动下载。
 - 重复告知同一版本为幂等操作（仍返回 ok）。
 
+### video.subscribe 返回示例
+
+```json
+{
+  "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 },
+  "local": { "maxWidth": 160, "maxHeight": 120, "fps": 10, "quality": 75 },
+  "call": { "id": "abc", "hasVideo": true, "video": { "negotiated": true, "sending": true, "width": 640, "height": 480 } }
+}
+```
+
+- 请求里 `remote` / `local` 都是**参数对象、可缺字段**：`{}` 或整个缺省都表示"用默认值"。
+- 返回的是**生效参数**（每条通道一份）：越界值会被钳制到合法范围（`maxWidth`/`maxHeight` ∈ [64, 1920]，`fps` ∈ [1, 30]，`quality` ∈ [30, 95]），不报错。
+- **远端恒订阅**（不传 `remote` 也照样订阅，否则会出现"桌面窗口被隐藏、远端画面却没人看"的糊涂状态）；`local` 不传 = 不订阅本地回显，此时返回里没有 `local` 字段。
+- `call` 为当前进行中的通话快照（无通话时为 `null`）。
+- 订阅是**连接级**的：连接断开自动退订；订阅一直有效（跨通话），通话开始后画面自动推来。
+
 ## 4. 事件
 
 | 事件 | 负载 | 说明 |
 | --- | --- | --- |
 | `system.state` | 与 getState 返回相同 | 连接建立时推送状态快照 |
-| `call.incoming` | `{ "callId", "call" }` | 来电振铃 |
-| `call.ringing` | `{ "callId", "call" }` | 呼出已振铃（180/183） |
+| `call.dialing` | `{ "callId", "call" }` | 呼出已发起（本地拨号按钮与 WS 拨号共用） |
+| `call.incoming` | `{ "callId", "call" }` | 来电振铃；`call.hasVideo` 为 true 表示对端带视频 |
+| `call.ringing` | `{ "callId", "call", "earlyMedia" }` | 呼出已振铃（180/183）；`earlyMedia: true` 表示本次振铃带**早期媒体**（183+SDP，回铃音由对端下发，软电话不再放本地回铃音） |
 | `call.established` | `{ "callId", "call" }` | 通话建立 |
 | `call.terminated` | `{ "callId", "call", "reason" }` | 通话结束；reason：`local_hangup` / `remote_hangup` / `rejected` |
 | `call.failed` | `{ "callId", "call", "reason" }` | 呼叫失败；reason：`busy` / `no_answer` / `not_found` 等 |
-| `call.muted` | `{ "callId", "muted" }` | 静音状态变化 |
+| `call.muted` | `{ "callId", "muted" }` | 保持（静音）状态变化 |
+| `call.audio` | `{ "callId", "call" }` | 麦克风/扬声器开关变化（`call.micMuted` / `call.speakerMuted`，REQ-UI-023） |
+| `call.video` | `{ "callId", "call" }` | 视频状态变化（协商成功/开关切换/拿到对端分辨率）；状态见 `call.video` |
+| `video.web` | `{ "active", "local", "remote", "viewers" }` | 网页视频订阅状态变化（任一连接订阅/退订时广播）。`active: true` 表示有网页在看画面，此时软电话**不显示视频窗口** |
+| `video.transform` | `{ "remote": { "rotation", "mirror" }, "local": { "rotation", "mirror" } }` | 画面旋转/水平镜像变化（桌面视频窗口或网页任一侧改动都会广播）；重连时也可从 `system.state` 的 `video` 字段取当前值 |
 | `register.state` | `{ "state", "account", "reason" }` | 注册状态变化 |
+| `system.autoAnswer` | `{ "enabled": true }` | 自动接听开关变化（桌面按钮点击或网页 `system.setAutoAnswer` 设置都会广播）；重连时也可从 `system.state` 的 `autoAnswer` 字段取当前值 |
 | `system.update` | 更新状态对象，见下 | 自动更新状态变化（受理/下载进度/就绪/失败） |
+
+`call` 对象中的视频相关字段（REQ-VIDEO-*）：
+
+| 字段 | 说明 |
+| --- | --- |
+| `hasVideo` | 本次通话涉及视频（呼入时对端 offer 含视频段；呼出时本端发起了视频呼叫） |
+| `video.negotiated` | 视频已协商成功 |
+| `video.enabled` | 视频总开关（对应通话面板的「关闭视频」） |
+| `video.previewOn` | 本地回显开关（**只影响本地显示，不影响推送到远端**） |
+| `video.sending` | 本次通话要推送本地视频（意图，不随回显开关变化） |
+| `video.width` / `video.height` | 对端视频分辨率（未收到帧时为 0） |
 
 更新状态对象字段：
 
@@ -126,7 +173,22 @@
 | `waitingCall` | 已下载完成，等通话结束后自动重启安装 |
 | `error` | 失败原因（中文，面向用户展示） |
 
-通话对象（`call`）字段：`id`、`direction`（incoming/outgoing）、`remote`、`remoteName`、`state`（ringing/established/terminated）、`muted`。
+通话对象（`call`）字段：`id`、`direction`（incoming/outgoing）、`remote`、`remoteName`、`state`（ringing/established/terminated）、`muted`（保持）、`micMuted`、`speakerMuted`、`hasVideo`、`video`（见上）。
+
+### 4.1 视频画面帧（二进制消息）
+
+订阅后画面以 **WS 二进制消息**逐帧推送（JPEG 逐帧，MJPEG 式），不套 JSON：
+
+```
+偏移 0:   通道（1 = 远端画面，2 = 本地画面）
+偏移 1-4: 序号（uint32 大端，逐帧自增，客户端可据此发现丢帧/乱序）
+偏移 5..: JPEG 数据（image/jpeg）
+```
+
+- 只有**订阅的通道**会推：`local: false` 时不会收到本地画面帧。
+- 编码参数按订阅参数：大于 `maxWidth`/`maxHeight` 时等比缩放；`fps` 为上限（软电话侧按编码速度丢帧，不排队）；`quality` 为 JPEG 质量。
+- 画面帧**不进事件日志**：帧率可达 30fps，混在事件流里会刷屏；画面状态变化仍走 `call.video`。
+- 软电话侧永远只编码「最新一帧」（编码跟不上就丢旧帧），延迟不累积。
 
 ## 5. 错误码
 

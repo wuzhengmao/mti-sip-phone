@@ -39,6 +39,14 @@ type Call struct {
 	RemoteName string    `json:"remoteName"` // 对方显示名
 	State      CallState `json:"state"`
 	Muted      bool      `json:"muted"`
+	// MicMuted / SpeakerMuted 麦克风与扬声器静音（纯本地动作，REQ-UI-023；
+	// 桌面通话面板与网页控制共用同一份状态，变更时发 call.audio 事件）。
+	MicMuted     bool `json:"micMuted"`
+	SpeakerMuted bool `json:"speakerMuted"`
+	// HasVideo 本次通话涉及视频（呼入时对端 offer 含视频段；呼出时本端发起了视频呼叫）。
+	HasVideo bool `json:"hasVideo"`
+	// Video 视频状态快照（未协商成功时为零值）。
+	Video VideoState `json:"video"`
 }
 
 // RegisterInfo 注册状态快照。
@@ -56,6 +64,10 @@ type State struct {
 	Register RegisterInfo  `json:"register"`
 	Calls    []Call        `json:"calls"`
 	Update   *UpdateStatus `json:"update,omitempty"` // 更新状态（无更新时省略）
+	// AutoAnswer 自动接听开关（桌面按钮与网页开关共用一份状态）
+	AutoAnswer bool `json:"autoAnswer"`
+	// Video 显示用的旋转/镜像（远端 + 本地回显），网页连上就能拿到并与桌面同步
+	Video VideoTransforms `json:"video"`
 }
 
 // 常见错误，供接口层映射为错误码。
@@ -73,10 +85,24 @@ type App struct {
 	upd     Updater // 自动更新能力（nil = 未接入）
 	bus     *Bus
 
-	mu        sync.RWMutex
-	reg       RegisterInfo
-	calls     map[string]*Call
-	callOrder []string // 保持创建顺序
+	mu         sync.RWMutex
+	reg        RegisterInfo
+	calls      map[string]*Call
+	callOrder  []string             // 保持创建顺序
+	video      *videoDemux          // 视频帧多播出口（恒定对象，见 video.go）
+	webViewers map[uint64]webViewer // 网页视频订阅（连接级，REQ-VIDEO-009）
+	// pendingVideo 早到的视频状态（通话尚未登记，如视频呼叫拨出即开摄像头）
+	pendingVideo map[string]VideoState
+	// videoTx 显示用的旋转/镜像（桌面与网页共用一份，见 video.go）
+	videoTx VideoTransforms
+	// autoAnswer 自动接听开关（桌面按钮与网页开关共用一份，
+	// 变更后广播 system.autoAnswer，见 SetAutoAnswer）
+	autoAnswer bool
+}
+
+// AutoAnswerState 自动接听开关状态（system.autoAnswer 事件负载）。
+type AutoAnswerState struct {
+	Enabled bool `json:"enabled"`
 }
 
 // New 创建 App。tel 为 nil 时表示电话能力未接入（调用会返回 ErrTelephonyNotReady）。
@@ -87,6 +113,7 @@ func New(cfg *config.Config, tel Telephony, bus *Bus) *App {
 		bus:   bus,
 		reg:   RegisterInfo{State: RegUnregistered},
 		calls: make(map[string]*Call),
+		video: &videoDemux{},
 	}
 }
 
@@ -168,12 +195,14 @@ func (a *App) State() State {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	st := State{
-		Version:  Version,
-		OS:       runtime.GOOS,
-		Arch:     runtime.GOARCH,
-		Register: a.reg,
-		Calls:    make([]Call, 0, len(a.callOrder)),
-		Update:   upd,
+		Version:    Version,
+		OS:         runtime.GOOS,
+		Arch:       runtime.GOARCH,
+		Register:   a.reg,
+		Calls:      make([]Call, 0, len(a.callOrder)),
+		Update:     upd,
+		Video:      a.videoTx,
+		AutoAnswer: a.autoAnswer,
 	}
 	for _, id := range a.callOrder {
 		st.Calls = append(st.Calls, *a.calls[id])
@@ -298,11 +327,30 @@ func (a *App) Reject(callID string, code int) error {
 }
 
 // SetAutoAnswer 开关自动接听。
+//
+// 状态存在 core（而不是各界面各存一份）：桌面「自动接听」按钮与网页
+// system.setAutoAnswer 都改这里，变更后广播 system.autoAnswer，两边据此
+// 同步显示（否则网页一开，桌面按钮还显示旧状态）。
+// 来电自动接听时的视频策略见 internal/sip（视频呼叫按视频接听处理）。
 func (a *App) SetAutoAnswer(enabled bool) error {
 	if a.tel == nil {
 		return ErrTelephonyNotReady
 	}
-	return a.tel.SetAutoAnswer(enabled)
+	if err := a.tel.SetAutoAnswer(enabled); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.autoAnswer = enabled
+	a.mu.Unlock()
+	a.bus.Publish("system.autoAnswer", AutoAnswerState{Enabled: enabled})
+	return nil
+}
+
+// AutoAnswer 当前自动接听开关状态。
+func (a *App) AutoAnswer() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.autoAnswer
 }
 
 // SetRPort 动态切换 rport（运行中立即生效）。
@@ -355,6 +403,7 @@ func (a *App) Mute(callID string, muted bool) error {
 }
 
 // MuteMic 麦克风静音（纯本地，无 SIP 信令；通话面板麦克风开关用）。
+// 记入通话状态并广播 call.audio——桌面面板与网页都要据此同步开关外观。
 func (a *App) MuteMic(callID string, muted bool) error {
 	if a.getCall(callID) == nil {
 		return ErrCallNotFound
@@ -366,10 +415,14 @@ func (a *App) MuteMic(callID string, muted bool) error {
 		return err
 	}
 	logx.Logger().Info("麦克风静音", "callId", callID, "muted", muted)
+	if a.updateCall(callID, func(c *Call) { c.MicMuted = muted }) {
+		a.publishCall("call.audio", callID)
+	}
 	return nil
 }
 
 // MuteSpeaker 扬声器静音（纯本地，继续接收；通话面板扬声器开关用）。
+// 状态与事件同 MuteMic。
 func (a *App) MuteSpeaker(callID string, muted bool) error {
 	if a.getCall(callID) == nil {
 		return ErrCallNotFound
@@ -381,7 +434,150 @@ func (a *App) MuteSpeaker(callID string, muted bool) error {
 		return err
 	}
 	logx.Logger().Info("扬声器静音", "callId", callID, "muted", muted)
+	if a.updateCall(callID, func(c *Call) { c.SpeakerMuted = muted }) {
+		a.publishCall("call.audio", callID)
+	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 视频（REQ-VIDEO-*）
+// ---------------------------------------------------------------------------
+
+// ErrVideoUnsupported 当前构建不支持视频。
+var ErrVideoUnsupported = errors.New("当前构建未启用视频支持")
+
+// SetVideoSink 注册视频帧出口的主槽（界面层启动时调用一次）。
+func (a *App) SetVideoSink(s VideoSink) { a.video.setPrimary(s) }
+
+// AddVideoSink 追加一个视频帧订阅者（网页视频中枢等；帧会同时投递给主槽）。
+func (a *App) AddVideoSink(s VideoSink) { a.video.add(s) }
+
+// RemoveVideoSink 移除附加订阅者（主槽用 SetVideoSink 覆盖）。
+func (a *App) RemoveVideoSink(s VideoSink) { a.video.remove(s) }
+
+// VideoFrameSink 电话层用来投递视频帧的出口，**恒不为 nil**。
+// sip 层在建立/接听时取一次并接到视频引擎上；出口是多播对象，
+// 之后增删订阅者无需重新取（见 videoDemux）。
+func (a *App) VideoFrameSink() VideoSink { return a.video }
+
+// VideoSupported 当前构建是否具备视频能力。
+func (a *App) VideoSupported() bool {
+	return a.tel != nil && a.tel.VideoSupported()
+}
+
+// CameraSupported 本构建/平台是否有摄像头采集能力。
+func (a *App) CameraSupported() bool {
+	return a.tel != nil && a.tel.CameraSupported()
+}
+
+// DialVideo 发起视频呼叫。
+func (a *App) DialVideo(ctx context.Context, target string) (string, error) {
+	if a.tel == nil {
+		return "", ErrTelephonyNotReady
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", errors.New("呼叫目标不能为空")
+	}
+	if a.HasActiveCall() {
+		return "", errors.New("已有进行中的通话")
+	}
+	callID, err := a.tel.DialVideo(ctx, target)
+	if err != nil {
+		return "", err
+	}
+	a.upsertCall(&Call{
+		ID:        callID,
+		Direction: "outgoing",
+		Remote:    target,
+		State:     CallRinging,
+		HasVideo:  true,
+	})
+	a.addRecentDial(target)
+	a.publishCall("call.dialing", callID)
+	// 视频呼叫拨出即开摄像头/回显（sip 侧），其首个状态可能早于本次登记到达，
+	// 已被 upsertCall 并入通话——这里补发一次事件，界面才会立刻显示本地画面
+	//（顺序必须在 call.dialing 之后：界面要先有 activeCallID 才认这条事件）。
+	// 条件带上 Enabled：摄像头禁用时 Sending=false，界面同样要拿到"视频已开启"
+	// 才能把远端画面显示出来。
+	if c := a.getCall(callID); c != nil && (c.Video.Enabled || c.Video.Sending || c.Video.Negotiated) {
+		a.publishCall("call.video", callID)
+	}
+	return callID, nil
+}
+
+// AnswerVideo 视频接听（打开摄像头，双向视频）。
+func (a *App) AnswerVideo(callID string) error {
+	if a.getCall(callID) == nil {
+		return ErrCallNotFound
+	}
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	return a.tel.AnswerVideo(callID)
+}
+
+// IncomingHasVideo 该来电的 offer 是否含可用视频段。
+func (a *App) IncomingHasVideo(callID string) bool {
+	if a.tel == nil {
+		return false
+	}
+	return a.tel.IncomingHasVideo(callID)
+}
+
+// VideoActive 该通话的视频是否已协商成功且处于开启状态。
+func (a *App) VideoActive(callID string) bool {
+	if a.tel == nil {
+		return false
+	}
+	return a.tel.VideoActive(callID)
+}
+
+// SetVideoEnabled 需求 8：关闭/恢复视频（不显示远端、不推本地、关闭视频窗口）。
+func (a *App) SetVideoEnabled(callID string, on bool) error {
+	if a.getCall(callID) == nil {
+		return ErrCallNotFound
+	}
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	if err := a.tel.SetVideoEnabled(callID, on); err != nil {
+		return err
+	}
+	logx.Logger().Info("视频开关", "callId", callID, "on", on)
+	return nil
+}
+
+// SetVideoPreview 需求 7：本地视频回显/推送开关。
+func (a *App) SetVideoPreview(callID string, on bool) error {
+	if a.getCall(callID) == nil {
+		return ErrCallNotFound
+	}
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	if err := a.tel.SetVideoPreview(callID, on); err != nil {
+		return err
+	}
+	logx.Logger().Info("本地视频开关", "callId", callID, "on", on)
+	return nil
+}
+
+// SetCamera 选择摄像头（空 = 系统默认，config.CameraDisabled = 禁用）。
+func (a *App) SetCamera(deviceID string) error {
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	return a.tel.SetCamera(deviceID)
+}
+
+// VideoDevices 枚举摄像头（可能耗时，调用方放后台 goroutine）。
+func (a *App) VideoDevices() []VideoDevice {
+	if a.tel == nil {
+		return nil
+	}
+	return a.tel.VideoDevices()
 }
 
 // ---------------------------------------------------------------------------
@@ -389,22 +585,46 @@ func (a *App) MuteSpeaker(callID string, muted bool) error {
 // ---------------------------------------------------------------------------
 
 // OnIncoming 呼入。创建呼入通话并进入振铃状态。
-func (a *App) OnIncoming(callID, remote, remoteName string) {
+func (a *App) OnIncoming(callID, remote, remoteName string, hasVideo bool) {
 	a.upsertCall(&Call{
 		ID:         callID,
 		Direction:  "incoming",
 		Remote:     remote,
 		RemoteName: remoteName,
 		State:      CallRinging,
+		HasVideo:   hasVideo,
 	})
-	logx.Logger().Info("收到来电", "callId", callID, "remote", remote)
+	logx.Logger().Info("收到来电", "callId", callID, "remote", remote, "hasVideo", hasVideo)
 	a.publishCall("call.incoming", callID)
 }
 
-// OnRinging 呼出振铃。
-func (a *App) OnRinging(callID string) {
+// OnVideoState 视频状态变化（协商成功、开关切换、拿到对端分辨率）。
+//
+// 视频呼叫在 sip 侧是**拨出即开摄像头/回显**的，状态可能在本 App 登记通话
+// 之前就到达（Dial 返回后调用方才 upsertCall）。此时先存进 pendingVideo，
+// 由 upsertCall 并入通话，并由 Dial/DialVideo 补发一次事件——否则首个
+// "发送中" 状态会被丢掉，界面一直不显示视频窗口。
+func (a *App) OnVideoState(callID string, st VideoState) {
+	a.mu.Lock()
+	c, ok := a.calls[callID]
+	if !ok {
+		if a.pendingVideo == nil {
+			a.pendingVideo = make(map[string]VideoState)
+		}
+		a.pendingVideo[callID] = st
+		a.mu.Unlock()
+		return
+	}
+	c.Video = st
+	c.HasVideo = c.HasVideo || st.Negotiated
+	a.mu.Unlock()
+	a.publishCall("call.video", callID)
+}
+
+// OnRinging 呼出振铃（earlyMedia 见 EventSink.OnRinging）。
+func (a *App) OnRinging(callID string, earlyMedia bool) {
 	if a.updateCall(callID, func(c *Call) { c.State = CallRinging }) {
-		a.publishCall("call.ringing", callID)
+		a.publishCall("call.ringing", callID, "earlyMedia", earlyMedia)
 	}
 }
 
@@ -420,7 +640,7 @@ func (a *App) OnEstablished(callID string) {
 func (a *App) OnTerminated(callID, reason string) {
 	if a.updateCall(callID, func(c *Call) { c.State = CallTerminated }) {
 		logx.Logger().Info("通话结束", "callId", callID, "reason", reason)
-		a.publishCall("call.terminated", callID, reason)
+		a.publishCall("call.terminated", callID, "reason", reason)
 	}
 }
 
@@ -428,7 +648,7 @@ func (a *App) OnTerminated(callID, reason string) {
 func (a *App) OnFailed(callID, reason string) {
 	if a.updateCall(callID, func(c *Call) { c.State = CallTerminated }) {
 		logx.Logger().Info("呼叫失败", "callId", callID, "reason", reason)
-		a.publishCall("call.failed", callID, reason)
+		a.publishCall("call.failed", callID, "reason", reason)
 	}
 }
 
@@ -472,10 +692,16 @@ func (a *App) getCall(callID string) *Call {
 }
 
 // upsertCall 插入或覆盖通话记录，并记录创建顺序。
+// 顺带并入早到的视频状态（见 OnVideoState 的说明）。
 func (a *App) upsertCall(c *Call) {
 	a.mu.Lock()
 	if _, ok := a.calls[c.ID]; !ok {
 		a.callOrder = append(a.callOrder, c.ID)
+	}
+	if st, ok := a.pendingVideo[c.ID]; ok {
+		c.Video = st
+		c.HasVideo = c.HasVideo || st.Negotiated
+		delete(a.pendingVideo, c.ID)
 	}
 	a.calls[c.ID] = c
 	a.mu.Unlock()

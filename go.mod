@@ -6,10 +6,12 @@ go 1.24.0
 require (
 	fyne.io/fyne/v2 v2.8.1
 	fyne.io/systray v1.12.3-0.20260810170012-af4e8e793ec4
+	github.com/blackjack/webcam v0.6.1
 	github.com/coder/websocket v1.8.15
 	github.com/emiago/sipgo v1.6.0
 	github.com/gen2brain/malgo v0.11.26
 	github.com/google/uuid v1.6.0
+	github.com/pion/mediadevices v0.10.0
 	github.com/pion/rtcp v1.2.18
 	github.com/pion/rtp v1.10.5
 	github.com/pion/sdp/v3 v3.0.20
@@ -45,7 +47,7 @@ require (
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/nicksnyder/go-i18n/v2 v2.5.1 // indirect
 	github.com/pion/dtls/v2 v2.2.7 // indirect
-	github.com/pion/logging v0.2.2 // indirect
+	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/transport/v2 v2.2.1 // indirect
 	github.com/rymdport/portal v0.4.2 // indirect
@@ -55,7 +57,7 @@ require (
 	github.com/yuin/goldmark v1.8.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.33.0 // indirect
-	golang.org/x/image v0.24.0 // indirect
+	golang.org/x/image v0.24.0
 	golang.org/x/net v0.35.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/text v0.22.0 // indirect

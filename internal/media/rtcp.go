@@ -25,17 +25,36 @@ type rtcpSession struct {
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 
-	eng *Engine
+	ep rtcpEndpoint
 
 	// 对端信息（收到 SR 后记录，供 RR 报告块与日志使用）
 	peerSSRC atomic.Uint32
+
+	// PLI/FIR 发送限流（防止对端解码器被关键帧请求打爆）
+	pliMu   sync.Mutex
+	lastPLI time.Time
+}
+
+// rtcpEndpoint RTCP 报告所需的端点快照。音频 Engine 与视频 VideoEngine 都实现它。
+// 抽成接口是为了让两个媒体引擎共用这一份 RTCP 收发实现。
+type rtcpEndpoint interface {
+	rtcpSSRC() uint32
+	rtcpRTPTime() uint32
+	rtcpTxStats() (packets, bytes uint64)
+	// rtcpRecvState 返回最近接收序号与丢包计数；ok=false 表示尚未收到过媒体。
+	rtcpRecvState() (lastSeq uint16, extSeq uint32, lost uint64, ok bool)
+	// rtcpOnFeedback 处理对端反馈包（视频用 PLI/FIR 触发关键帧；音频忽略）。
+	rtcpOnFeedback(pkt rtcp.Packet)
 }
 
 // RTCP 报告发送周期。
 const rtcpInterval = 5 * time.Second
 
-func newRTCPSession(conn *net.UDPConn, eng *Engine) *rtcpSession {
-	return &rtcpSession{conn: conn, eng: eng, stopCh: make(chan struct{})}
+// PLI/FIR 最小发送间隔（RFC 5104 建议的拥塞控制下限量级）。
+const pliMinInterval = 500 * time.Millisecond
+
+func newRTCPSession(conn *net.UDPConn, ep rtcpEndpoint) *rtcpSession {
+	return &rtcpSession{conn: conn, ep: ep, stopCh: make(chan struct{})}
 }
 
 // setRemote 更新对端 RTCP 地址（媒体协商时随 RTP 地址一起更新）。
@@ -79,7 +98,7 @@ func (r *rtcpSession) sendBye() {
 	if remote == nil || r.conn == nil {
 		return
 	}
-	bye := &rtcp.Goodbye{Sources: []uint32{r.eng.ssrc}}
+	bye := &rtcp.Goodbye{Sources: []uint32{r.ep.rtcpSSRC()}}
 	data, err := bye.Marshal()
 	if err != nil {
 		return
@@ -138,7 +157,39 @@ func (r *rtcpSession) handlePacket(p rtcp.Packet, raddr *net.UDPAddr) {
 		logx.Logger().Debug("收到 RTCP RR", "src", raddr.String(), "ssrc", p.SSRC)
 	case *rtcp.Goodbye:
 		logx.Logger().Info("收到 RTCP Goodbye（对端媒体结束）", "src", raddr.String())
+	case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+		// 对端画面损坏，请求关键帧（视频用；音频实现忽略）
+		r.ep.rtcpOnFeedback(p)
 	}
+}
+
+// sendPLI 发送 RTCP PLI（Picture Loss Indication）请求对端立即编一个关键帧。
+// 内部限流：至少间隔 pliMinInterval，避免丢包抖动时把对端编码器打爆。
+func (r *rtcpSession) sendPLI(mediaSSRC uint32) {
+	r.pliMu.Lock()
+	if time.Since(r.lastPLI) < pliMinInterval {
+		r.pliMu.Unlock()
+		return
+	}
+	r.lastPLI = time.Now()
+	r.pliMu.Unlock()
+
+	r.mu.RLock()
+	remote := r.remote
+	r.mu.RUnlock()
+	if remote == nil || r.conn == nil {
+		return
+	}
+	pli := &rtcp.PictureLossIndication{SenderSSRC: r.ep.rtcpSSRC(), MediaSSRC: mediaSSRC}
+	data, err := pli.Marshal()
+	if err != nil {
+		return
+	}
+	if _, err := r.conn.WriteToUDP(data, remote); err != nil {
+		logx.Logger().Debug("RTCP PLI 发送失败", "err", err)
+		return
+	}
+	logx.Logger().Debug("已请求关键帧（RTCP PLI）")
 }
 
 // sendLoop 周期发送 RTCP 报告。
@@ -160,7 +211,7 @@ func (r *rtcpSession) sendLoop() {
 // 仅在本端发送过媒体（txPackets > 0）时发送；收到过对端 SR 时附带
 // 接收报告块。
 func (r *rtcpSession) sendReport() {
-	tx := r.eng.txPackets.Load()
+	tx, txBytes := r.ep.rtcpTxStats()
 	if tx == 0 {
 		return // 未发送过媒体，无需报告
 	}
@@ -172,23 +223,24 @@ func (r *rtcpSession) sendReport() {
 	}
 
 	sr := &rtcp.SenderReport{
-		SSRC:        r.eng.ssrc,
+		SSRC:        r.ep.rtcpSSRC(),
 		NTPTime:     ntpNow(),
-		RTPTime:     r.eng.rtpTimestamp(),
+		RTPTime:     r.ep.rtcpRTPTime(),
 		PacketCount: uint32(tx),
-		OctetCount:  uint32(r.eng.txBytes.Load()),
+		OctetCount:  uint32(txBytes),
 	}
 	pkts := []rtcp.Packet{sr}
 	// 收到过对端 SR：附上接收报告块
 	if peer := r.peerSSRC.Load(); peer != 0 {
-		lastSeq, extSeq := r.eng.playState()
-		sr.Reports = []rtcp.ReceptionReport{{
-			SSRC:               peer,
-			FractionLost:       0, // 精确丢包率统计后续版本实现
-			TotalLost:          uint32(r.eng.rxLost.Load()),
-			LastSequenceNumber: extSeq<<16 | uint32(lastSeq),
-			Jitter:             0,
-		}}
+		if lastSeq, extSeq, lost, ok := r.ep.rtcpRecvState(); ok {
+			sr.Reports = []rtcp.ReceptionReport{{
+				SSRC:               peer,
+				FractionLost:       0, // 精确丢包率统计后续版本实现
+				TotalLost:          uint32(lost),
+				LastSequenceNumber: extSeq<<16 | uint32(lastSeq),
+				Jitter:             0,
+			}}
+		}
 	}
 	data, err := rtcp.Marshal(pkts)
 	if err != nil {
@@ -199,7 +251,7 @@ func (r *rtcpSession) sendReport() {
 		logx.Logger().Debug("RTCP 发送失败", "err", err)
 		return
 	}
-	logx.Logger().Debug("已发送 RTCP SR", "packets", tx, "octets", r.eng.txBytes.Load())
+	logx.Logger().Debug("已发送 RTCP SR", "packets", tx, "octets", txBytes)
 }
 
 // ntpNow 当前时间的 NTP 时间戳（RTCP SR 用）。

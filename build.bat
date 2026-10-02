@@ -33,12 +33,14 @@ if defined BUILD_TS set "LDFLAGS=%LDFLAGS% -X mti-sip-phone/internal/core.BuildT
 
 rem 1) Windows amd64 GUI: no console, tray app, CGO+audio
 echo [1/3] Building dist\sip-phone-windows-amd64.exe (GUI, audio)...
-go build -ldflags "%LDFLAGS% -H=windowsgui" -o dist\sip-phone-windows-amd64.exe .\cmd\sip-phone
+call :video_setup windows-amd64
+go build %VIDEO_TAGS% -ldflags "%LDFLAGS% -H=windowsgui" -o dist\sip-phone-windows-amd64.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 
 rem 2) Windows console build (-headless server mode / command line debug)
 echo [2/3] Building dist\sip-phone-console.exe (console, for headless)...
-go build -ldflags "%LDFLAGS%" -o dist\sip-phone-console.exe .\cmd\sip-phone
+call :video_setup windows-amd64
+go build %VIDEO_TAGS% -ldflags "%LDFLAGS%" -o dist\sip-phone-console.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 
 rem 3) Windows 386 GUI: needs 32-bit MinGW, otherwise skipped
@@ -53,7 +55,8 @@ set CGO_ENABLED=1
 set CC=%GCC32%
 set GOOS=windows
 set GOARCH=386
-go build -ldflags "%LDFLAGS% -H=windowsgui -extldflags -static" -o dist\sip-phone-windows-386.exe .\cmd\sip-phone
+call :video_setup windows-386
+go build %VIDEO_TAGS% -ldflags "%LDFLAGS% -H=windowsgui -extldflags -static" -o dist\sip-phone-windows-386.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 goto :summary
 
@@ -74,3 +77,39 @@ exit /b 0
 :err
 echo Build FAILED
 exit /b 1
+
+rem ---------------------------------------------------------------
+rem Video static libraries (third_party\video\<target>, built once by
+rem scripts\build-video-libs.bat). Complete -> -tags video and the
+rem include/lib paths; missing -> build without video, audio unaffected.
+rem The go compiler reads the include/lib paths from the Go environment,
+rem so CGO_CFLAGS/CGO_LDFLAGS are set here.
+rem
+rem Must check every .a the linker needs, not just the lib directory:
+rem an aborted/failed libs build leaves an empty shell behind, and
+rem treating it as usable fails the go build with a missing header
+rem (fatal error: wels/codec_api.h -- seen in practice).
+rem Keep in sync with the #cgo LDFLAGS in internal\video\ffmpeg.go.
+rem ---------------------------------------------------------------
+:video_setup
+set "VIDEO_TAGS="
+set "CGO_CFLAGS="
+set "CGO_LDFLAGS="
+if not exist "third_party\video\%~1\lib" goto :video_none
+if not exist "third_party\video\%~1\lib\libavcodec.a" goto :video_incomplete
+if not exist "third_party\video\%~1\lib\libswscale.a" goto :video_incomplete
+if not exist "third_party\video\%~1\lib\libavutil.a" goto :video_incomplete
+if not exist "third_party\video\%~1\lib\libvpx.a" goto :video_incomplete
+if not exist "third_party\video\%~1\lib\libopenh264.a" goto :video_incomplete
+set "VIDEO_TAGS=-tags video"
+set "CGO_CFLAGS=-I%CD%\third_party\video\%~1\include"
+set "CGO_LDFLAGS=-L%CD%\third_party\video\%~1\lib"
+goto :eof
+:video_none
+echo       hint: third_party\video\%~1 not found, building without video
+echo             run scripts\build-video-libs.bat once to enable it
+goto :eof
+:video_incomplete
+echo       hint: third_party\video\%~1 is incomplete (a required .a is missing),
+echo             building without video - re-run scripts\build-video-libs.bat
+goto :eof

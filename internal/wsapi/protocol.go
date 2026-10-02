@@ -29,37 +29,50 @@ type Error struct {
 
 // 错误码定义。
 const (
-	CodeUnknownMethod   = "unknown_method"   // 未知方法
-	CodeInvalidParams   = "invalid_params"   // 参数缺失或非法
-	CodeNotReady        = "not_ready"        // 电话能力尚未接入
-	CodeCallNotFound    = "call_not_found"   // 通话不存在
-	CodeInternal        = "internal"         // 内部错误
-	CodeUpdateNotNewer  = "update_not_newer" // 告知的版本不高于当前版本
+	CodeUnknownMethod  = "unknown_method"   // 未知方法
+	CodeInvalidParams  = "invalid_params"   // 参数缺失或非法
+	CodeNotReady       = "not_ready"        // 电话能力尚未接入
+	CodeCallNotFound   = "call_not_found"   // 通话不存在
+	CodeInternal       = "internal"         // 内部错误
+	CodeUpdateNotNewer = "update_not_newer" // 告知的版本不高于当前版本
 )
 
 // 请求方法名。
 const (
-	MethodDial         = "call.dial"           // 拨号
-	MethodAnswer       = "call.answer"         // 接听
-	MethodHangup       = "call.hangup"         // 挂断
-	MethodReject       = "call.reject"         // 拒接
-	MethodMute         = "call.mute"           // 静音
-	MethodGetState     = "system.getState"     // 查询状态
-	MethodNotifyUpdate = "system.notifyUpdate" // 前端告知新版本
+	MethodDial              = "call.dial"            // 拨号
+	MethodAnswer            = "call.answer"          // 接听
+	MethodHangup            = "call.hangup"          // 挂断
+	MethodReject            = "call.reject"          // 拒接
+	MethodMute              = "call.mute"            // 保持（静音）
+	MethodMuteMic           = "call.muteMic"         // 麦克风开关（纯本地，REQ-UI-023）
+	MethodMuteSpeaker       = "call.muteSpeaker"     // 扬声器开关（纯本地，REQ-UI-023）
+	MethodSetVideo          = "call.setVideo"        // 视频总开关（纯本地，REQ-VIDEO-008）
+	MethodGetState          = "system.getState"      // 查询状态
+	MethodSetAutoAnswer     = "system.setAutoAnswer" // 自动接听开关（桌面按钮与网页共用一份）
+	MethodNotifyUpdate      = "system.notifyUpdate"  // 前端告知新版本
+	MethodVideoSubscribe    = "video.subscribe"      // 订阅视频画面（REQ-VIDEO-009）
+	MethodVideoUnsubscribe  = "video.unsubscribe"    // 退订视频画面
+	MethodVideoSetTransform = "video.setTransform"   // 画面旋转/水平镜像（REQ-VIDEO-012）
 )
 
 // 事件名。
 const (
-	EvSystemReady     = "system.ready"     // 服务就绪（全局总线事件）
-	EvSystemState     = "system.state"     // 状态快照（连接建立时推送给该连接）
-	EvCallIncoming    = "call.incoming"    // 来电（振铃）
-	EvCallRinging     = "call.ringing"     // 呼出振铃
-	EvCallEstablished = "call.established" // 通话建立
-	EvCallTerminated  = "call.terminated"  // 通话结束
-	EvCallFailed      = "call.failed"      // 呼叫失败
-	EvCallMuted       = "call.muted"       // 静音状态变化
-	EvRegisterState   = "register.state"   // 注册状态变化
-	EvSystemUpdate    = "system.update"    // 自动更新状态变化（phase/进度/失败原因）
+	EvSystemReady     = "system.ready"      // 服务就绪（全局总线事件）
+	EvSystemState     = "system.state"      // 状态快照（连接建立时推送给该连接）
+	EvCallIncoming    = "call.incoming"     // 来电（振铃）
+	EvCallRinging     = "call.ringing"      // 呼出振铃
+	EvCallEstablished = "call.established"  // 通话建立
+	EvCallTerminated  = "call.terminated"   // 通话结束
+	EvCallFailed      = "call.failed"       // 呼叫失败
+	EvCallMuted       = "call.muted"        // 保持（静音）状态变化
+	EvCallAudio       = "call.audio"        // 麦克风/扬声器开关变化（纯本地，REQ-UI-023）
+	EvCallDialing     = "call.dialing"      // 呼出已发起（本地与 WS 拨号共用）
+	EvCallVideo       = "call.video"        // 视频状态变化（协商/开关/对端分辨率，REQ-VIDEO-001）
+	EvVideoWeb        = "video.web"         // 网页视频订阅状态变化（订阅后软电话隐藏视频窗口）
+	EvVideoTransform  = "video.transform"   // 画面旋转/镜像变化（桌面与网页共用一份状态）
+	EvRegisterState   = "register.state"    // 注册状态变化
+	EvSystemUpdate    = "system.update"     // 自动更新状态变化（phase/进度/失败原因）
+	EvAutoAnswer      = "system.autoAnswer" // 自动接听开关变化（桌面与网页共用一份状态）
 )
 
 // newError 构造错误信息。

@@ -10,6 +10,13 @@
  *   await sdk.connect();
  *   await sdk.dial('1001');
  *
+ * 视频（REQ-VIDEO-009）：
+ *   await sdk.dialVideo('1001');                     // 视频呼叫
+ *   await sdk.subscribeVideo({                       // 订阅并把画面渲染到 <video>
+ *     remote: document.getElementById('remoteVideo'),  // 必传
+ *     local:  document.getElementById('localVideo')    // 可选（不传 = 不订阅本地回显）
+ *   });
+ *
  * 协议详见 docs/ws-protocol.md。
  */
 (function (global) {
@@ -44,12 +51,27 @@
       this._seq = 0;                 // 请求 ID 自增
       this._pending = new Map();     // id -> { resolve, reject }
       this._handlers = new Map();    // event -> Set<fn>
+      this._renderers = {};          // channel -> VideoRenderer（订阅视频时绑定）
+      this._videoRouted = false;     // 帧路由与生命周期清理是否已安装
+      this._videoSubActive = false;  // 当前是否处于订阅状态（未订阅不套用旋转/宽高）
+      this._subOpts = null;          // 最近一次 video.subscribe 的参数（断线重连后自动恢复）
+      // 旋转/镜像的**权威状态在软电话侧**（桌面视频窗口与网页共用一份）：
+      // 这里只是本地镜像，订阅/退订/断线重连都不丢
+      this._videoTx = { remote: { rotation: 0, mirror: false }, local: { rotation: 0, mirror: false } };
       this._ws = null;
       this._closed = false;          // 用户主动关闭，不再重连
       this._connected = false;
       this._heartbeat = null;        // 心跳定时器（保持连接不被服务端读超时断开）
       this._everConnected = false;   // 是否曾成功连接过
       this._launchAttempted = false; // 是否已尝试过通过协议拉起软电话（仅一次）
+
+      // 旋转/镜像状态：连上（含断线重连）时从状态快照恢复，变化时由事件同步
+      this.on('system.state', (st) => {
+        if (st && st.video) { this._applyTransformState(st.video); }
+      });
+      this.on('video.transform', (st) => this._applyTransformState(st));
+      // 断线重连后自动恢复订阅（订阅是连接级的，新连接默认没有订阅）
+      this.on('connected', () => this._restoreVideoSubscription());
     }
 
     /** 是否已连接 */
@@ -75,6 +97,8 @@
           return;
         }
         this._ws = ws;
+        // 视频帧是二进制消息：用 arraybuffer 接收（Blob 还要异步转换一次）
+        ws.binaryType = 'arraybuffer';
 
         ws.onopen = () => {
           this._connected = true;
@@ -121,8 +145,12 @@
     /**
      * 订阅事件。
      * 事件名：call.incoming / call.ringing / call.established / call.terminated /
-     *         call.failed / call.muted / register.state / system.state /
-     *         system.update（自动更新状态：phase/progress/error 等）/ connected / disconnected
+     *         call.failed / call.muted / call.audio（麦克风/扬声器开关）/
+     *         call.dialing / call.video / video.web /
+     *         register.state / system.state /
+     *         system.update（自动更新状态：phase/progress/error 等）/
+     *         video.frame（订阅视频后逐帧推送，data 为 {channel, seq, blob, size}）/
+     *         connected / disconnected
      * @param {string} event 事件名，'*' 订阅全部
      * @param {Function} fn 回调 (data) => {}
      * @returns {this}
@@ -150,19 +178,41 @@
     /**
      * 拨号。
      * @param {string} target 号码或 SIP URI
+     * @param {{video?: boolean}} [options] video=true 发起视频呼叫
      * @returns {Promise<{callId: string}>}
      */
-    dial(target) {
-      return this._request('call.dial', { target: target });
+    dial(target, options) {
+      options = options || {};
+      return this._request('call.dial', { target: target, video: !!options.video });
+    }
+
+    /**
+     * 视频呼叫（dial 的便捷写法）。
+     * @param {string} target 号码或 SIP URI
+     * @returns {Promise<{callId: string}>}
+     */
+    dialVideo(target) {
+      return this.dial(target, { video: true });
     }
 
     /**
      * 接听。
      * @param {string} callId
+     * @param {{video?: boolean}} [options] video=true 视频接听（打开摄像头双向视频）
      * @returns {Promise<{callId: string}>}
      */
-    answer(callId) {
-      return this._request('call.answer', { callId: callId });
+    answer(callId, options) {
+      options = options || {};
+      return this._request('call.answer', { callId: callId, video: !!options.video });
+    }
+
+    /**
+     * 视频接听（answer 的便捷写法）。
+     * @param {string} callId
+     * @returns {Promise<{callId: string}>}
+     */
+    answerVideo(callId) {
+      return this.answer(callId, { video: true });
     }
 
     /**
@@ -185,7 +235,7 @@
     }
 
     /**
-     * 静音切换。
+     * 保持（静音）切换。
      * @param {string} callId
      * @param {boolean} muted
      * @returns {Promise<{callId: string}>}
@@ -195,9 +245,52 @@
     }
 
     /**
+     * 麦克风开关（纯本地动作，不发 SIP 信令；状态变化推 call.audio 事件）。
+     * @param {string} callId
+     * @param {boolean} muted true = 静音麦克风（停止发送本地音频）
+     * @returns {Promise<{callId: string}>}
+     */
+    muteMic(callId, muted) {
+      return this._request('call.muteMic', { callId: callId, muted: !!muted });
+    }
+
+    /**
+     * 扬声器开关（纯本地动作，继续接收）。
+     * @param {string} callId
+     * @param {boolean} muted true = 静音扬声器（停止本地播放）
+     * @returns {Promise<{callId: string}>}
+     */
+    muteSpeaker(callId, muted) {
+      return this._request('call.muteSpeaker', { callId: callId, muted: !!muted });
+    }
+
+    /**
+     * 视频总开关（纯本地动作，不发 SIP 信令，REQ-VIDEO-008）：
+     * 关闭 = 不显示远端视频、不推送本地视频、视频窗口关闭；状态见 call.video 事件。
+     * @param {string} callId
+     * @param {boolean} enabled
+     * @returns {Promise<{callId: string}>}
+     */
+    setVideo(callId, enabled) {
+      return this._request('call.setVideo', { callId: callId, enabled: !!enabled });
+    }
+
+    /**
+     * 自动接听开关（与软电话界面上的「自动接听」按钮共用一份状态）：
+     * 开启后来电自动接听；视频呼叫按视频接听处理（打开摄像头双向视频，
+     * 摄像头不可用时只收不发）。
+     * 变更后软电话广播 system.autoAnswer 事件，桌面按钮与网页据此同步。
+     * @param {boolean} enabled
+     * @returns {Promise<{enabled: boolean}>}
+     */
+    setAutoAnswer(enabled) {
+      return this._request('system.setAutoAnswer', { enabled: !!enabled });
+    }
+
+    /**
      * 查询软电话当前状态（注册状态、通话列表等）。
      * 返回值含 version / os / arch（前端据此到业务平台查询对应架构的
-     * 最新版本，见 notifyUpdate）。
+     * 最新版本，见 notifyUpdate）与 autoAnswer（自动接听开关当前状态）。
      * @returns {Promise<Object>}
      */
     getState() {
@@ -228,6 +321,158 @@
     }
 
 
+    /**
+     * 订阅视频画面（REQ-VIDEO-009）。**SDK 自己把画面渲染到传入的 <video>**，
+     * 页面不必处理 video.frame、也不用建渲染器。
+     *
+     *   await sdk.subscribeVideo({
+     *     remote: document.getElementById('remoteVideo'),  // 必传
+     *     local:  document.getElementById('localVideo'),   // 可选：不传 = 不订阅本地回显
+     *     fps: 30, quality: 75,                            // 可选：两路共用的参数
+     *     onStats: (channel, stats) => { ... }             // 可选：每秒回调一次
+     *   });
+     *
+     * 每条通道也可以写成**带参数的对象**，两路各要各的（本地回显通常小一号）：
+     *   remote: { el: remoteVideo, maxWidth: 640, maxHeight: 480, fps: 30, quality: 75 }
+     * maxWidth/maxHeight 不传时直接取 <video> 元素当前的显示尺寸。
+     *
+     * **订阅必定包含远端画面**（软电话强制）；订阅期间软电话不再显示视频窗口，
+     * 关闭视频/挂断/退订时 SDK 会把画面清成黑底。
+     * 参数越界会被软电话钳制到合法范围（返回值里是生效值）。
+     *
+     * @param {{remote: (HTMLVideoElement|Object), local?: (HTMLVideoElement|Object),
+     *          maxWidth?: number, maxHeight?: number, fps?: number, quality?: number,
+     *          onStats?: function}} options
+     * @returns {Promise<{remote: Object, local?: Object, call: Object|null}>}
+     */
+    subscribeVideo(options) {
+      options = options || {};
+      const remote = pickChannel(options.remote);
+      if (!remote) {
+        return Promise.reject(new Error('subscribeVideo 需要 remote 视频元素'));
+      }
+      const local = pickChannel(options.local);
+      const params = { remote: channelParams(remote, options) };
+      if (local) {
+        params.local = channelParams(local, options);
+      }
+
+      this._subOpts = params; // 记住订阅参数：断线重连后自动恢复
+      return this._request('video.subscribe', params).then((res) => {
+        this._ensureVideoRouting();
+        // 订阅时以软电话的当前状态为准（转/镜像可能是桌面那边设的）：
+        // 先记录，再绑定渲染器（绑定即套用当前状态），最后标记"订阅中"
+        this._applyTransformState(res.transforms);
+        this._bindVideoChannel('remote', remote, options);
+        if (local) {
+          this._bindVideoChannel('local', local, options);
+        }
+        this._videoSubActive = true;
+        return this._decorateSubscription(res);
+      });
+    }
+
+    /**
+     * 画面旋转（每次顺时针 +90°，90°/270° 时宽高互换，<video> 的框跟着变）。
+     * 状态存在软电话侧：桌面视频窗口的按钮会同步变，断线/退订都不丢。
+     * @param {string} [channel] 'remote'（默认）或 'local'
+     * @returns {Promise<{remote: Object, local: Object}>} 旋转后的完整状态
+     */
+    rotateVideo(channel) {
+      return this._request('video.setTransform', { channel: channel || 'remote', rotate: true })
+        .then((st) => this._applyTransformState(st));
+    }
+
+    /**
+     * 画面水平镜像开关（本地回显常用作自拍镜像）。状态同 rotateVideo。
+     * @param {string} [channel] 'remote'（默认）或 'local'
+     * @returns {Promise<{remote: Object, local: Object}>} 切换后的完整状态
+     */
+    mirrorVideo(channel) {
+      const ch = channel || 'remote';
+      const cur = (this._videoTx && this._videoTx[ch]) || { mirror: false };
+      return this._request('video.setTransform', { channel: ch, mirror: !cur.mirror })
+        .then((st) => this._applyTransformState(st));
+    }
+
+    /**
+     * 当前已知的旋转/镜像状态（远端 + 本地回显）。
+     * @returns {{remote: {rotation: number, mirror: boolean}, local: {rotation: number, mirror: boolean}}}
+     */
+    videoTransforms() {
+      return this._videoTx;
+    }
+
+    /** 内部：给订阅响应挂上 rotate/mirror/clear 控制方法 */
+    _decorateSubscription(res) {
+      const sdk = this;
+      res.rotate = function (channel) { return sdk.rotateVideo(channel || 'remote'); };
+      res.mirror = function (channel) { return sdk.mirrorVideo(channel || 'remote'); };
+      res.clear = function () { sdk.clearVideo(); };
+      res.transforms = function () { return sdk.videoTransforms(); };
+      return res;
+    }
+
+    /** 内部：状态同步到本地（渲染器 + 供页面查询） */
+    _applyTransformState(st) {
+      if (!st) {
+        return;
+      }
+      const zero = { rotation: 0, mirror: false };
+      this._videoTx = { remote: st.remote || zero, local: st.local || zero };
+      // **未订阅不改画面/宽高**（用户要求）：桌面那边旋转视频窗口时，网页上
+      // 那两个 <video> 的尺寸不该跟着变；订阅时才按当前状态套用。
+      if (!this._videoSubActive) {
+        return this._videoTx;
+      }
+      Object.keys(this._renderers).forEach((ch) => {
+        const t = this._videoTx[ch];
+        if (t) {
+          this._renderers[ch].setTransform(t.rotation, t.mirror);
+        }
+      });
+      return this._videoTx;
+    }
+
+    /** 内部：断线重连后恢复订阅（画面元素不变，只重新登记） */
+    _restoreVideoSubscription() {
+      if (!this._subOpts) {
+        return;
+      }
+      this._request('video.subscribe', this._subOpts)
+        .then((res) => { this._decorateSubscription(res); })
+        .catch(() => {});
+    }
+
+    /**
+     * 取消本连接的视频订阅（软电话恢复显示视频窗口），画面清成黑底。
+     * @returns {Promise<{remote: Object, local?: Object}>}
+     */
+    unsubscribeVideo() {
+      // 主动退订要**忘掉**订阅参数：否则断线重连时会把它偷偷恢复回来，
+      // 用户看到的现象是"取消了订阅，软电话的视频窗口却一直不回来"。
+      this._subOpts = null;
+      this._videoSubActive = false;
+      return this._request('video.unsubscribe', {}).then((res) => {
+        this.clearVideo();
+        // 取消订阅后不再受旋转/镜像影响：<video> 恢复默认宽高比（用户要求）
+        Object.keys(this._renderers).forEach((ch) => {
+          this._renderers[ch].resetAspect();
+        });
+        return res;
+      });
+    }
+
+    /**
+     * 清空已订阅的画面（黑底）。关闭视频、挂断、退订时 SDK 会自动调用，
+     * 页面一般不用自己调。
+     */
+    clearVideo() {
+      Object.keys(this._renderers).forEach((ch) => {
+        this._renderers[ch].clear();
+      });
+    }
+
     /** 内部：发送请求并等待响应 */
     _request(method, params) {
       if (!this._connected) {
@@ -245,8 +490,16 @@
       });
     }
 
-    /** 内部：处理服务端消息 */
+    /** 内部：处理服务端消息（文本 JSON 或二进制视频帧） */
     _onMessage(raw) {
+      if (raw instanceof ArrayBuffer) {
+        this._onBinary(raw);
+        return;
+      }
+      if (typeof Blob !== 'undefined' && raw instanceof Blob) {
+        raw.arrayBuffer().then((buf) => this._onBinary(buf)).catch(() => {});
+        return;
+      }
       let msg;
       try {
         msg = JSON.parse(raw);
@@ -272,6 +525,64 @@
           }
         }
       }
+    }
+
+    /**
+     * 内部：解析二进制视频帧并派发 video.frame 事件。
+     * 帧格式：[1字节 通道（1=远端 2=本地）][4字节序号 大端][JPEG 数据]
+     */
+    _onBinary(buf) {
+      if (!buf || buf.byteLength < 5) {
+        return;
+      }
+      const view = new DataView(buf);
+      const data = {
+        channel: view.getUint8(0) === 2 ? 'local' : 'remote',
+        seq: view.getUint32(1),
+        blob: new Blob([new Uint8Array(buf, 5)], { type: 'image/jpeg' })
+      };
+      data.size = data.blob.size;
+      this._emit('video.frame', data);
+      this._emit('*', { event: 'video.frame', data: data });
+    }
+
+    /** 内部：帧路由 + 生命周期清理只装一次 */
+    _ensureVideoRouting() {
+      if (this._videoRouted) {
+        return;
+      }
+      this._videoRouted = true;
+      // 订阅的通道自动渲染（video.frame 事件仍会派发，供需要自定义显示的页面用）
+      this.on('video.frame', (f) => {
+        const r = this._renderers[f.channel];
+        if (r) { r.render(f.blob); }
+      });
+      // 关闭视频 / 挂断 / 呼叫失败：画面清成黑底，别定格在最后一帧
+      this.on('call.video', (data) => {
+        const v = data && data.call && data.call.video;
+        if (v && !v.enabled) { this.clearVideo(); }
+      });
+      this.on('call.terminated', () => this.clearVideo());
+      this.on('call.failed', () => this.clearVideo());
+    }
+
+    /** 内部：把一条通道绑定到 <video> 元素（含 onStats 回调） */
+    _bindVideoChannel(channel, co, top) {
+      const onStats = co.onStats || top.onStats || null;
+      const old = this._renderers[channel];
+      if (old && old.el !== co.el) {
+        old.destroy();
+      }
+      const r = new VideoRenderer(co.el, {
+        fps: co.fps || top.fps,
+        onStats: onStats ? (stats) => onStats(channel, stats) : null
+      });
+      // 旋转/镜像状态不随（重新）订阅丢失：新渲染器套用当前状态
+      const t = this._videoTx && this._videoTx[channel];
+      if (t) {
+        r.setTransform(t.rotation, t.mirror);
+      }
+      this._renderers[channel] = r;
     }
 
     /** 内部：启动心跳（每 25 秒发一条空消息，重置服务端读超时） */
@@ -307,6 +618,210 @@
             console.error('[sip-phone-sdk] 事件回调异常', event, e);
           }
         });
+      }
+    }
+  }
+
+  /**
+   * pickChannel 归一化一条视频通道：允许直接传 <video> 元素，或传
+   * { el, maxWidth, maxHeight, fps, quality, onStats }。无效时返回 null。
+   */
+  function pickChannel(ch) {
+    if (!ch) {
+      return null;
+    }
+    if (ch.nodeType) {
+      return { el: ch }; // 直接给了 <video> 元素
+    }
+    if (typeof ch === 'object' && ch.el && ch.el.nodeType) {
+      return ch;
+    }
+    return null;
+  }
+
+  /**
+   * channelParams 算出某条通道要发给软电话的参数：
+   * 通道自己的值 → 顶层默认值 → <video> 元素当前显示尺寸。
+   * 都没有的字段就不传，由软电话取默认（640×640 / 30fps / 质量 75）。
+   */
+  function channelParams(co, top) {
+    const num = function (v) { return (typeof v === 'number' && v > 0) ? v : 0; };
+    const el = co.el || {};
+    const p = {};
+    const w = num(co.maxWidth) || num(top.maxWidth) || num(el.clientWidth) || num(el.getAttribute && el.getAttribute('width'));
+    const h = num(co.maxHeight) || num(top.maxHeight) || num(el.clientHeight) || num(el.getAttribute && el.getAttribute('height'));
+    if (w) { p.maxWidth = w; }
+    if (h) { p.maxHeight = h; }
+    const fps = num(co.fps) || num(top.fps);
+    if (fps) { p.fps = fps; }
+    const q = num(co.quality) || num(top.quality);
+    if (q) { p.quality = q; }
+    return p;
+  }
+
+  /**
+   * VideoRenderer 视频渲染器（SDK 内部使用）：把 JPEG 帧画进 canvas，再由 canvas.captureStream()
+   * 产出 MediaStream 喂给 h5 <video>。
+   *
+   * 为什么不用 blob URL + <img>/MSE：需求要求用 h5 video 显示；而 MediaSource
+   * 不支持 MJPEG，逐帧 blob URL 又要反复创建/回收。canvas 画布流既满足 <video>
+   * 播放，每帧也只是往画布上贴一张图。
+   *
+   * 渲染跟不上时**直接丢帧**（同一时刻只允许一帧在解码），不排队——
+   * 与软电话侧的丢帧策略一致，延迟不累积。
+   */
+  class VideoRenderer {
+    constructor(videoEl, options) {
+      options = options || {};
+      this.el = videoEl;
+      this.canvas = document.createElement('canvas');
+      this.canvas.width = 2;
+      this.canvas.height = 2;
+      this.ctx = this.canvas.getContext('2d');
+      this.onStats = options.onStats || null;
+
+      this.fps = 0;       // 每秒帧数（统计值）
+      this.kbps = 0;      // 每秒码率（统计值）
+      this.width = 0;     // 当前画面的宽（含旋转：90°/270° 时是源图的高）
+      this.height = 0;
+      this.frames = 0;    // 累计帧数
+
+      this.rotation = 0;  // 旋转角度（0/90/180/270，顺时针）
+      this.mirror = false; // 水平镜像
+      this.srcW = 0;      // 最近一帧的原始宽高（算旋转后的框用）
+      this.srcH = 0;
+
+      this._busy = false; // 有帧正在解码/绘制
+      this._n = 0;        // 统计窗口内的帧数
+      this._bytes = 0;    // 统计窗口内的字节数
+      this._at = 0;       // 统计窗口起点
+
+      if (this.canvas.captureStream) {
+        this.stream = this.canvas.captureStream(options.fps || 30);
+        if (videoEl) {
+          videoEl.srcObject = this.stream;
+          videoEl.muted = true; // 画面无音轨；静音避免自动播放被策略拦截
+          const p = videoEl.play();
+          if (p && p.catch) { p.catch(() => {}); }
+        }
+      }
+    }
+
+    /**
+     * 渲染一帧（来自 video.frame 事件的 blob）。
+     * @param {Blob} blob image/jpeg
+     */
+    render(blob) {
+      if (this._busy || !blob || !this.ctx) {
+        return; // 上一帧还没画完：丢这一帧
+      }
+      this._busy = true;
+      createImageBitmap(blob).then((bmp) => {
+        const rot = ((this.rotation % 360) + 360) % 360;
+        const swap = (rot === 90 || rot === 270);
+        const w = swap ? bmp.height : bmp.width;
+        const h = swap ? bmp.width : bmp.height;
+        this.srcW = bmp.width;
+        this.srcH = bmp.height;
+        if (this.canvas.width !== w || this.canvas.height !== h) {
+          this.canvas.width = w;   // 旋转 90°/270° 时宽高互换
+          this.canvas.height = h;
+          this.width = w;
+          this.height = h;
+          this._applyAspect();
+        }
+        const ctx = this.ctx;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, w, h); // 旋转后四角不留上一帧的残影
+        ctx.translate(w / 2, h / 2);
+        ctx.rotate(rot * Math.PI / 180);
+        if (this.mirror) {
+          ctx.scale(-1, 1);       // 先镜像再旋转（与桌面端一致）
+        }
+        ctx.drawImage(bmp, -bmp.width / 2, -bmp.height / 2);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        if (bmp.close) { bmp.close(); }
+        this._tick(blob.size);
+        this._busy = false;
+      }).catch(() => {
+        this._busy = false;
+      });
+    }
+
+    /** 设定旋转/镜像（状态由软电话下发，见 SDK 的 _applyTransformState）。 */
+    setTransform(rotation, mirror) {
+      this.rotation = ((Number(rotation) || 0) % 360 + 360) % 360;
+      this.mirror = !!mirror;
+      this._applyAspect();
+    }
+
+    /** 恢复 <video> 的默认宽高比（取消订阅时调用）。 */
+    resetAspect() {
+      if (this.el && this.el.style) {
+        this.el.style.aspectRatio = '';
+      }
+    }
+
+    /** 按旋转后的宽高比调整 <video> 的显示框（CSS aspect-ratio 覆盖默认值）。 */
+    _applyAspect() {
+      if (!this.el || !this.el.style || !this.srcW || !this.srcH) {
+        return;
+      }
+      const swap = (this.rotation === 90 || this.rotation === 270);
+      const w = swap ? this.srcH : this.srcW;
+      const h = swap ? this.srcW : this.srcH;
+      this.el.style.aspectRatio = w + ' / ' + h;
+    }
+
+    /**
+     * 清空画面（关闭视频/挂断/取消订阅时调用）：填成黑底并清零统计。
+     * 不这么做的话，视频停掉以后 <video> 会一直定格在最后一帧上。
+     */
+    clear() {
+      this._busy = false;
+      this._n = 0;
+      this._bytes = 0;
+      this._at = 0;
+      this.fps = 0;
+      this.kbps = 0;
+      this.frames = 0;
+      if (!this.ctx) { return; }
+      this.ctx.fillStyle = '#000';
+      this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+
+    /** 释放画布流（页面切换/通话结束时调用）。 */
+    destroy() {
+      if (this.stream) {
+        this.stream.getTracks().forEach((t) => t.stop());
+        this.stream = null;
+      }
+      if (this.el) {
+        this.el.srcObject = null;
+      }
+    }
+
+    /** 内部：统计 fps 与码率，每秒回调一次 onStats */
+    _tick(bytes) {
+      this.frames++;
+      this._n++;
+      this._bytes += bytes || 0;
+      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      if (!this._at) {
+        this._at = now;
+        return;
+      }
+      const dt = now - this._at;
+      if (dt >= 1000) {
+        this.fps = Math.round(this._n * 1000 / dt);
+        this.kbps = Math.round(this._bytes * 8 / dt); // 字节/毫秒 = kbit/s
+        this._n = 0;
+        this._bytes = 0;
+        this._at = now;
+        if (this.onStats) {
+          this.onStats({ fps: this.fps, kbps: this.kbps, width: this.width, height: this.height });
+        }
       }
     }
   }

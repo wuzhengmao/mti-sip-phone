@@ -9,7 +9,7 @@ import "fyne.io/fyne/v2"
 
 const (
 	callPanelWidth      = 260
-	callPanelHeight     = 126
+	callPanelHeight     = 140
 	callPanelButtonSize = 36
 )
 
@@ -27,6 +27,9 @@ func setTopMost(on bool) {
 
 func moveCallWindowToCorner(w fyne.Window) {}
 
+// placeVideoWindow 其他平台不做定位/尺寸控制（窗口保持默认）。
+func placeVideoWindow(w fyne.Window) {}
+
 // moveUpdateWindowToCorner 其他平台不做定位（窗口保持默认居中）。
 func moveUpdateWindowToCorner(w fyne.Window) {}
 
@@ -42,10 +45,29 @@ func callWindowTitle(account string) string {
 	return title
 }
 
+// videoWindowTitle 视频窗口标题。
+func videoWindowTitle(account string) string {
+	title := "视频通话"
+	if account != "" {
+		title += " - " + account
+	}
+	return title
+}
+
+// raiseVideoWindow 其他平台不做窗口提升（同 setTopMost 的取舍）。
+func raiseVideoWindow(fyne.Window, bool) {}
+
+// setVideoWindowTopmost 其他平台不做窗口置顶（同 setTopMost 的取舍）。
+func setVideoWindowTopmost(fyne.Window, bool) {}
+
 // markTrayQuit 其他平台不打 IsQuit 标记（Fyne 会自动补 Quit 项）。
 func markTrayQuit(item *fyne.MenuItem) {}
 
 func findWindowByTitlePrefix(prefix string) uintptr { return 0 }
+
+// screenWorkArea 屏幕工作区尺寸（物理像素）：其他平台取不到，
+// 用一个保守默认值（视频窗口仍会按对端比例摆放）。
+func screenWorkArea() (float32, float32) { return 1280, 800 }
 
 func flashWindowEx(hwnd uintptr)         {}
 func stopFlashWindowEx(hwnd uintptr)     {}

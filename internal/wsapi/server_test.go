@@ -32,7 +32,7 @@ func (s *stubTel) Dial(ctx context.Context, target string) (string, error) {
 	go func() {
 		// 等待 App 完成通话登记（避免事件先于 calls 登记到达被丢弃）
 		time.Sleep(20 * time.Millisecond)
-		s.app.OnRinging(id)
+		s.app.OnRinging(id, false)
 		s.app.OnEstablished(id)
 	}()
 	return id, nil
@@ -55,6 +55,23 @@ func (s *stubTel) AudioDevices() ([]core.AudioDevice, []core.AudioDevice) {
 	return nil, nil
 }
 func (s *stubTel) Close() error { return nil }
+
+// ---- 视频（本桩按「未启用视频的构建」行为实现）----
+
+func (s *stubTel) VideoSupported() bool { return false }
+func (s *stubTel) DialVideo(ctx context.Context, target string) (string, error) {
+	return "", core.ErrVideoUnsupported
+}
+func (s *stubTel) AnswerVideo(callID string) error     { return core.ErrVideoUnsupported }
+func (s *stubTel) IncomingHasVideo(callID string) bool { return false }
+func (s *stubTel) VideoActive(callID string) bool      { return false }
+func (s *stubTel) SetVideoEnabled(callID string, on bool) error {
+	return core.ErrVideoUnsupported
+}
+func (s *stubTel) SetVideoPreview(callID string, on bool) error { return core.ErrVideoUnsupported }
+func (s *stubTel) SetCamera(deviceID string) error              { return core.ErrVideoUnsupported }
+func (s *stubTel) VideoDevices() []core.VideoDevice             { return nil }
+func (s *stubTel) CameraSupported() bool                        { return false }
 
 // newTestServer 构造测试用服务：stub 电话层 + 真实更新器 + httptest 服务。
 // 更新器指向临时目录下的假 exe 路径（只做参数校验与状态机，不触发下载）。
@@ -291,6 +308,112 @@ func TestDialFlow(t *testing.T) {
 	msg, _ = waitResponseAndEvent(t, conn, "call.terminated")
 	if msg.OK == nil || !*msg.OK {
 		t.Fatalf("挂断应成功，收到: %+v", msg)
+	}
+}
+
+// TestCallFailedCarriesReason call.failed / call.terminated 事件必须带 reason
+// （回归：publishCall 的附加字段要**键值成对**，早先只传了一个值，
+// 事件里因此一直没有 reason，网页显示的失败原因恒为空）。
+func TestCallFailedCarriesReason(t *testing.T) {
+	ts, app := newTestServer(t)
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+
+	app.OnIncoming("c1", "1002", "1002", false)
+	ev := waitEvent(t, conn, "call.incoming")
+	if d, _ := ev.Data.(map[string]any); d["callId"] != "c1" {
+		t.Fatalf("来电事件异常: %+v", d)
+	}
+
+	app.OnFailed("c1", "486 Busy Here")
+	ev = waitEvent(t, conn, "call.failed")
+	d, _ := ev.Data.(map[string]any)
+	if d["reason"] != "486 Busy Here" {
+		t.Fatalf("call.failed 应带 reason，实际: %+v", d)
+	}
+
+	app.OnIncoming("c2", "1003", "1003", false)
+	waitEvent(t, conn, "call.incoming")
+	app.OnTerminated("c2", "remote_hangup")
+	ev = waitEvent(t, conn, "call.terminated")
+	d, _ = ev.Data.(map[string]any)
+	if d["reason"] != "remote_hangup" {
+		t.Fatalf("call.terminated 应带 reason，实际: %+v", d)
+	}
+}
+
+// TestMuteMicSpeakerFlow 麦克风/扬声器开关（REQ-UI-023）：方法生效、
+// 状态记入通话快照，并广播 call.audio 事件（桌面面板与网页据此同步按钮外观）。
+func TestMuteMicSpeakerFlow(t *testing.T) {
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("1"), Method: "call.dial",
+		Params: json.RawMessage(`{"target":"1001"}`)})
+	msg, _ := waitResponseAndEvent(t, conn, "call.dialing")
+	callID := msg.Data.(map[string]any)["callId"].(string)
+	waitEvent(t, conn, "call.established")
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("2"), Method: MethodMuteMic,
+		Params: json.RawMessage(`{"callId":"` + callID + `","muted":true}`)})
+	resp, ev := waitResponseAndEvent(t, conn, EvCallAudio)
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("麦克风静音应成功，收到: %+v", resp)
+	}
+	if call := ev.Data.(map[string]any)["call"].(map[string]any); call["micMuted"] != true {
+		t.Fatalf("call.audio 事件里 micMuted 应为 true: %+v", call)
+	}
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("3"), Method: MethodMuteSpeaker,
+		Params: json.RawMessage(`{"callId":"` + callID + `","muted":true}`)})
+	resp, ev = waitResponseAndEvent(t, conn, EvCallAudio)
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("扬声器静音应成功，收到: %+v", resp)
+	}
+	call := ev.Data.(map[string]any)["call"].(map[string]any)
+	if call["speakerMuted"] != true || call["micMuted"] != true {
+		t.Fatalf("call.audio 事件状态不符: %+v", call)
+	}
+}
+
+// TestSetAutoAnswerFlow 网页设置自动接听开关：响应回生效值、广播
+// system.autoAnswer，且状态查询里能查到当前值（桌面按钮与网页共用一份）。
+func TestSetAutoAnswerFlow(t *testing.T) {
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("1"), Method: MethodSetAutoAnswer,
+		Params: json.RawMessage(`{"enabled":true}`)})
+	resp, ev := waitResponseAndEvent(t, conn, EvAutoAnswer)
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("开启自动接听应成功，收到: %+v", resp)
+	}
+	if d, _ := resp.Data.(map[string]any); d["enabled"] != true {
+		t.Fatalf("响应应回生效值 enabled=true: %+v", resp.Data)
+	}
+	if d, _ := ev.Data.(map[string]any); d["enabled"] != true {
+		t.Fatalf("system.autoAnswer 事件负载应为 enabled=true: %+v", ev.Data)
+	}
+
+	// 状态快照里也要带上当前值（网页刷新/重连后据此显示勾选状态）
+	sendRequest(t, conn, Message{ID: json.RawMessage("2"), Method: MethodGetState,
+		Params: json.RawMessage(`{}`)})
+	st := waitResponse(t, conn)
+	if d, _ := st.Data.(map[string]any); d["autoAnswer"] != true {
+		t.Fatalf("getState 应包含 autoAnswer=true: %+v", st.Data)
+	}
+
+	// 关掉：事件与响应都要反映
+	sendRequest(t, conn, Message{ID: json.RawMessage("3"), Method: MethodSetAutoAnswer,
+		Params: json.RawMessage(`{"enabled":false}`)})
+	resp, ev = waitResponseAndEvent(t, conn, EvAutoAnswer)
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("关闭自动接听应成功，收到: %+v", resp)
+	}
+	if d, _ := ev.Data.(map[string]any); d["enabled"] != false {
+		t.Fatalf("system.autoAnswer 事件负载应为 enabled=false: %+v", ev.Data)
 	}
 }
 

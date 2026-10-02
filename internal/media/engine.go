@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
 
@@ -28,6 +29,11 @@ var supportedCodecs = []Codec{
 type Engine struct {
 	codecMu sync.RWMutex
 	codec   Codec
+	// activePT 线上实际使用的负载类型号。**不是 codec.PayloadType()**：
+	// 本端作为 answerer 时必须复用对端 offer 里的号（RFC 3264），否则
+	// 动态负载类型（视频全部是动态 PT）会协商串味。音频 PCMA/PCMU 是
+	// 静态 PT 8/0，两种取值恰好相同，故此前未暴露。
+	activePT atomic.Uint32
 
 	conn      *net.UDPConn
 	rtcp      *rtcpSession
@@ -59,6 +65,9 @@ type Engine struct {
 	// 采集累积：不足一帧的样本留待下次回调
 	micMu  sync.Mutex
 	micBuf []int16
+
+	// lastTrimLog 播放缓冲截断日志限频（避免刷屏）
+	lastTrimLog time.Time
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -95,10 +104,17 @@ func NewEngine(localIP string) (*Engine, error) {
 		ring:      newPlayRing(8),
 		stop:      make(chan struct{}),
 	}
+	e.activePT.Store(uint32(e.codec.PayloadType()))
 	e.rtcp = newRTCPSession(rtcpConn, e)
 	logx.Logger().Debug("媒体引擎已创建", "codec", e.codec.Name(), "localPort", e.localPort, "rtcpPort", e.localPort+1)
 	return e, nil
 }
+
+// payloadType 线上使用的负载类型号（见 activePT 字段说明）。
+func (e *Engine) payloadType() uint8 { return uint8(e.activePT.Load()) }
+
+// PayloadType 线上使用的音频负载类型号（answer 必须复用它，RFC 3264）。
+func (e *Engine) PayloadType() uint8 { return e.payloadType() }
 
 // bindRTPRTCP 绑定一对连续 UDP 端口（RTP 与 RTCP）。
 func bindRTPRTCP(ip string) (*net.UDPConn, *net.UDPConn, error) {
@@ -234,7 +250,7 @@ func (e *Engine) recvLoop() {
 		e.codecMu.RLock()
 		codec := e.codec
 		e.codecMu.RUnlock()
-		if pkt.PayloadType != codec.PayloadType() {
+		if pkt.PayloadType != e.payloadType() {
 			continue
 		}
 		frame, err := codec.Decode(pkt.Payload)
@@ -290,7 +306,16 @@ func (e *Engine) playPush(ssrc uint32, seq uint16, frame []int16) {
 		e.ring.Write(make([]int16, int(gap)*len(frame)))
 	}
 	e.lastSeq = seq
-	e.ring.Write(frame)
+	if dropped := e.ring.Write(frame); dropped > 0 {
+		// 缓冲超深被截断：说明读侧已经落后（丢包补静音、对端突发都会垫高深度）。
+		// 限频打日志，这是排查"声音延迟越来越大"的第一手线索。
+		if time.Since(e.lastTrimLog) > 10*time.Second {
+			e.lastTrimLog = time.Now()
+			logx.Logger().Warn("播放缓冲超深已截断（声音延迟被压回目标值）",
+				"丢弃样本", dropped, "当前深度ms", e.ring.Depth()*1000/8000,
+				"累计丢弃", e.ring.Trimmed())
+		}
+	}
 }
 
 // FeedMic 音频采集回调：接受任意帧长输入（音频回调帧长不一定等于
@@ -360,7 +385,7 @@ func (e *Engine) sendPacket(codec Codec, payload []byte) {
 	pkt := &rtp.Packet{
 		Header: rtp.Header{
 			Version:        2,
-			PayloadType:    codec.PayloadType(),
+			PayloadType:    e.payloadType(),
 			SequenceNumber: e.seq,
 			Timestamp:      e.ts,
 			SSRC:           e.ssrc,
@@ -427,6 +452,25 @@ func (e *Engine) rtpTimestamp() uint32 {
 	defer e.sndMu.Unlock()
 	return e.ts
 }
+
+// --- rtcpEndpoint 实现（音频）---
+
+func (e *Engine) rtcpSSRC() uint32  { return e.ssrc }
+func (e *Engine) rtcpRTPTime() uint32 { return e.rtpTimestamp() }
+
+func (e *Engine) rtcpTxStats() (packets, bytes uint64) {
+	return e.txPackets.Load(), e.txBytes.Load()
+}
+
+func (e *Engine) rtcpRecvState() (uint16, uint32, uint64, bool) {
+	e.playMu.Lock()
+	has, lastSeq, extSeq := e.hasSeq, e.lastSeq, e.extSeq
+	e.playMu.Unlock()
+	return lastSeq, extSeq, e.rxLost.Load(), has
+}
+
+// rtcpOnFeedback 音频不处理 PLI/FIR（仅视频有意义）。
+func (e *Engine) rtcpOnFeedback(rtcp.Packet) {}
 
 // SendDTMF 发送一个 DTMF 音（RFC 2833 telephone-event，负载类型 101）。
 // 异步发送：起始包（M=1）→ 持续包 → 结束包（E=1），总时长约 200ms。
@@ -545,11 +589,10 @@ func (e *Engine) SDPOfferWithDirection(dir string) string {
 
 // SDPNegotiatedAnswer 呼入接听时的 200 answer：仅含协商后的编解码器
 //（RFC 3264 answer 只列双方协商结果）。
+// 用 activePT（对端号）而非 codec.PayloadType()（本端号）——音频静态 PT
+// 两者相同，动态 PT 下必须用对端号。
 func (e *Engine) SDPNegotiatedAnswer() string {
-	e.codecMu.RLock()
-	pt := e.codec.PayloadType()
-	e.codecMu.RUnlock()
-	return e.sdp("sendrecv", []uint8{pt})
+	return e.sdp("sendrecv", []uint8{e.payloadType()})
 }
 
 // SDPAnswer 解析远端 offer，协商编解码并返回本地 answer。
@@ -561,172 +604,226 @@ func (e *Engine) SDPAnswer(offer []byte) (string, error) {
 // SDPAnswerWithDirection 解析远端 offer 并返回指定方向的 answer
 //（对端 re-INVITE 用：方向镜像，如对端 recvonly → 本端 sendonly）。
 func (e *Engine) SDPAnswerWithDirection(offer []byte, dir string) (string, error) {
-	remote, pt, rtcpPort, err := parseSDPOffer(offer)
+	remote, codec, peerPT, rtcpPort, err := parseSDPOffer(offer)
 	if err != nil {
 		return "", err
 	}
 	e.codecMu.Lock()
-	e.codec = codecByPT(pt)
+	e.codec = codec
 	e.codecMu.Unlock()
+	// answerer：线上用**对端**的负载类型号（RFC 3264）
+	e.activePT.Store(uint32(peerPT))
 	e.setRemote(remote, rtcpPort)
 	// 远端地址更新后打洞（NAT 下对端媒体包需先有出向包放行）
 	e.punchHole()
-	return e.sdp(dir, []uint8{pt}), nil
+	return e.sdp(dir, []uint8{peerPT}), nil
 }
 
 // SDPApplyAnswer 处理远端对本地 offer 的应答：提取远端 RTP 地址并切换编解码。
 func (e *Engine) SDPApplyAnswer(answer []byte) error {
-	remote, pt, rtcpPort, err := parseSDPAnswer(answer, e.localPort)
+	remote, codec, pt, rtcpPort, err := parseSDPAnswer(answer, e.localPort)
 	if err != nil {
 		return err
 	}
 	e.codecMu.Lock()
-	e.codec = codecByPT(pt)
+	e.codec = codec
 	e.codecMu.Unlock()
+	// offerer：answer 里的号取自本端 offer，即为本端号
+	e.activePT.Store(uint32(pt))
 	e.setRemote(remote, rtcpPort)
 	// 远端地址更新（如 183 → 200 端口变化）后重新打洞
 	e.punchHole()
-	logx.Logger().Debug("SDP 协商完成", "codec", codecByPT(pt).Name(), "remote", remote.String())
+	logx.Logger().Debug("SDP 协商完成", "codec", codec.Name(), "remote", remote.String())
 	return nil
 }
 
-// sdp 构造 SDP 文本。c= 使用 SDP 宣告地址（NAT 场景为对端可达地址，
-// 未设置时为本机地址）。rtcpPort 为本端 RTCP 端口（RTP + 1）。
+// sdpIPForSDP 取 SDP 宣告地址（NAT 场景为对端可达地址，未设置时为本机地址）。
+func (e *Engine) sdpIPForSDP() string {
+	if e.sdpIP != "" {
+		return e.sdpIP
+	}
+	return e.localIP
+}
+
+// audioSection m=audio 段（不含会话头）。
+// pts 按优先级顺序；telephone-event（101）恒在末尾。
+func (e *Engine) audioSection(dir string, pts []uint8) sdpSection {
+	codecs := make([]sdpCodec, 0, len(pts)+1)
+	for _, pt := range pts {
+		// 注意用 Name()（"PCMA"）而不是 RTPMap()（"PCMA/8000"）——
+		// buildSDP 会自己拼 "/<ClockRate>"，用 RTPMap 会输出
+		// "a=rtpmap:8 PCMA/8000/8000" 这种非法行。
+		codecs = append(codecs, sdpCodec{
+			PT:        pt,
+			Encoding:  codecByPT(pt).Name(),
+			ClockRate: 8000,
+		})
+	}
+	codecs = append(codecs, sdpCodec{PT: telephoneEventPT, Encoding: "telephone-event", ClockRate: 8000, FMTP: "0-16"})
+	return sdpSection{
+		Kind:     "audio",
+		Port:     e.localPort,
+		RTCPPort: e.localPort + 1,
+		Codecs:   codecs,
+		Dir:      dir,
+	}
+}
+
+// sdp 构造纯音频 SDP 文本（会话头 + m=audio）。
 func (e *Engine) sdp(dir string, pts []uint8) string {
-	ip := e.sdpIP
-	if ip == "" {
-		ip = e.localIP
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "v=0\r\no=- %d 1 IN IP4 %s\r\ns=mti-sip-phone\r\nc=IN IP4 %s\r\nt=0 0\r\n",
-		e.ssrc, ip, ip)
-	fmt.Fprintf(&b, "m=audio %d RTP/AVP", e.localPort)
-	for _, pt := range pts {
-		fmt.Fprintf(&b, " %d", pt)
-	}
-	b.WriteString(" 101\r\n")
-	for _, pt := range pts {
-		fmt.Fprintf(&b, "a=rtpmap:%d %s\r\n", pt, codecByPT(pt).RTPMap())
-	}
-	fmt.Fprintf(&b, "a=rtpmap:101 telephone-event/8000\r\n"+
-		"a=fmtp:101 0-16\r\n"+
-		"a=rtcp:%d\r\n"+
-		"a=%s\r\n", e.localPort+1, dir)
-	return b.String()
+	return buildSDP(e.ssrc, e.sdpIPForSDP(), []sdpSection{e.audioSection(dir, pts)})
 }
 
-// parseSDPOffer 解析 offer：提取远端 RTP 地址、首选编解码负载类型与
-// 对端声明的 RTCP 端口（0 = 未声明）。
-// 编码选择规则：双方能力交集按本地优先级（PCMA > PCMU）。
-func parseSDPOffer(offer []byte) (*net.UDPAddr, uint8, int, error) {
-	sd := &sdp.SessionDescription{}
-	if err := sd.Unmarshal(offer); err != nil {
-		return nil, 0, 0, fmt.Errorf("SDP 解析失败: %w", err)
+// SDPOfferFor 构造呼出 / 重协商用的 offer：会话头 + m=audio + 可选 m=video。
+// videoDir 为空时按本端能力推导（能发 → sendrecv，只能收 → recvonly）；
+// v 为 nil 或本构建无视频能力时不输出 m=video。
+func SDPOfferFor(audio *Engine, v *VideoEngine, audioDir, videoDir string) string {
+	sections := []sdpSection{audio.audioSection(audioDir, allCodecPTs())}
+	if v != nil {
+		if s := v.offerSection(videoDir); s != nil {
+			sections = append(sections, *s)
+		}
 	}
-	return negotiateSDP(sd)
+	return buildSDP(audio.ssrc, audio.sdpIPForSDP(), sections)
 }
 
-// parseSDPAnswer 解析 answer（对端响应）。
-func parseSDPAnswer(answer []byte, localPort int) (*net.UDPAddr, uint8, int, error) {
-	sd := &sdp.SessionDescription{}
-	if err := sd.Unmarshal(answer); err != nil {
-		return nil, 0, 0, fmt.Errorf("SDP 解析失败: %w", err)
+// SDPAnswerFor 构造 200 OK 的 answer，**严格跟随对端 offer 的媒体顺序与数量**
+// （RFC 3264 §6）：对端 offer 是 video,audio 时 answer 也必须 video 在前，
+// 否则严格的对端（FreeSWITCH 部分版本）会回 488。
+//
+// audioPT 为对端 offer 中音频协商到的 PT 号（answer 必须复用对端号）。
+// videoDir 为空或 v 为 nil（含本构建无视频能力、摄像头被禁用且只收不发等）
+// 时，若对端 offer 含 m=video 则输出 m=video 0 拒绝段——**不能省略该行**。
+func SDPAnswerFor(audio *Engine, v *VideoEngine, offer *Offer, audioPT uint8, videoDir string) string {
+	var sections []sdpSection
+	order := []string{"audio", "video"}
+	if offer != nil && len(offer.Order()) > 0 {
+		order = offer.Order()
 	}
-	remote, pt, rtcpPort, err := negotiateSDP(sd)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	// answer 中若 m= 端口为 0 表示拒绝该媒体
-	if remote.Port == 0 {
-		return nil, 0, 0, fmt.Errorf("对端拒绝了音频媒体")
-	}
-	return remote, pt, rtcpPort, nil
-}
-
-// negotiateSDP 从 SDP 中提取连接地址、端口、编解码协商结果与 RTCP 端口。
-func negotiateSDP(sd *sdp.SessionDescription) (*net.UDPAddr, uint8, int, error) {
-	if len(sd.MediaDescriptions) == 0 {
-		return nil, 0, 0, fmt.Errorf("SDP 缺少媒体描述")
-	}
-	md := sd.MediaDescriptions[0]
-
-	// 连接地址：m= 行的 c= 优先，其次会话级 c=
-	ip := sd.ConnectionInformation
-	port := md.MediaName.Port.Value
-	if md.ConnectionInformation != nil {
-		ip = md.ConnectionInformation
-	}
-	if ip == nil {
-		return nil, 0, 0, fmt.Errorf("SDP 缺少连接信息")
-	}
-	addr := &net.UDPAddr{IP: net.ParseIP(ip.Address.Address), Port: port}
-	if addr.IP == nil {
-		return nil, 0, 0, fmt.Errorf("SDP 连接地址非法: %s", ip.Address.Address)
-	}
-
-	// 对端声明的 RTCP 端口（a=rtcp，RFC 3605；未声明按惯例 RTP + 1）
-	rtcpPort := 0
-	for _, attr := range md.Attributes {
-		if attr.Key == "rtcp" {
-			if v, err := strconv.Atoi(attr.Value); err == nil {
-				rtcpPort = v
+	for _, kind := range order {
+		switch kind {
+		case "audio":
+			sections = append(sections, audio.audioSection("sendrecv", []uint8{audioPT}))
+		case "video":
+			var sec *sdpSection
+			if v != nil {
+				// answer 只列协商到的那一个编码，且用对端 PT（见 answerSection 注释）
+				sec = v.answerSection(videoDir)
+			}
+			if sec == nil {
+				// 不接受视频：回拒绝段（带对端的负载类型列表）
+				info, err := offer.Media("video")
+				if err != nil {
+					continue
+				}
+				sections = append(sections, sdpSection{Raw: RejectedSection(info)})
+			} else {
+				sections = append(sections, *sec)
 			}
 		}
 	}
-
-	// 提取对端支持的编解码负载类型
-	remotePTs := make(map[uint8]bool)
-	for _, pt := range md.MediaName.Formats {
-		v, err := strconv.ParseUint(pt, 10, 8)
-		if err == nil {
-			remotePTs[uint8(v)] = true
-		}
+	if len(sections) == 0 {
+		sections = append(sections, audio.audioSection("sendrecv", []uint8{audioPT}))
 	}
-
-	// 按本地优先级协商
-	for _, c := range supportedCodecs {
-		if remotePTs[c.PayloadType()] {
-			return addr, c.PayloadType(), rtcpPort, nil
-		}
-	}
-	return nil, 0, 0, fmt.Errorf("无共同编解码器（对端支持: %s）", strings.Join(md.MediaName.Formats, ","))
+	return buildSDP(audio.ssrc, audio.sdpIPForSDP(), sections)
 }
 
-// SDPDirection 提取 SDP 媒体方向属性（sendonly/sendrecv/recvonly/inactive）。
-// 无方向属性时按 RFC 3264 默认双向。
-func SDPDirection(sdpText []byte) string {
+// parseSDPOffer 解析 offer：提取远端 RTP 地址、**对端 offer 中的负载类型号**
+// 与对端声明的 RTCP 端口（0 = 未声明）。
+// 编码选择规则：双方能力交集按本地优先级（PCMA > PCMU）。
+//
+// 返回值第二项是**对端的** PT 号——本端作为 answerer 必须复用该号
+// （RFC 3264）。音频静态 PT 下它与本地号相同，动态 PT 下不同。
+func parseSDPOffer(offer []byte) (*net.UDPAddr, Codec, uint8, int, error) {
 	sd := &sdp.SessionDescription{}
-	if err := sd.Unmarshal(sdpText); err != nil {
-		return "sendrecv"
+	if err := sd.Unmarshal(offer); err != nil {
+		return nil, nil, 0, 0, fmt.Errorf("SDP 解析失败: %w", err)
 	}
-	if len(sd.MediaDescriptions) == 0 {
-		return "sendrecv"
+	return negotiateMedia(sd, "audio")
+}
+
+// parseSDPAnswer 解析 answer（对端响应）。
+// answer 中的 PT 号必然取自本端 offer，故直接按号取编解码器。
+func parseSDPAnswer(answer []byte, localPort int) (*net.UDPAddr, Codec, uint8, int, error) {
+	sd := &sdp.SessionDescription{}
+	if err := sd.Unmarshal(answer); err != nil {
+		return nil, nil, 0, 0, fmt.Errorf("SDP 解析失败: %w", err)
 	}
-	for _, attr := range sd.MediaDescriptions[0].Attributes {
-		switch attr.Key {
-		case "sendonly", "sendrecv", "recvonly", "inactive":
-			return attr.Key
+	remote, codec, pt, rtcpPort, err := negotiateMedia(sd, "audio")
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	// answer 中若 m= 端口为 0 表示拒绝该媒体
+	if remote.Port == 0 {
+		return nil, nil, 0, 0, fmt.Errorf("对端拒绝了音频媒体")
+	}
+	return remote, codec, pt, rtcpPort, nil
+}
+
+// negotiateMedia 从 SDP 中协商指定媒体类型：返回远端 RTP 地址、本地编解码器、
+// **对端 PT 号**（answer 复用）与对端 RTCP 端口。
+//
+// 媒体定位按类型（audio/video）而非 MediaDescriptions[0]：视频加入后
+// 第一段未必是音频（部分对端 offer 把 video 排在前面）。
+// 编解码匹配按 rtpmap 编码名（PCMA/PCMU），兼顾无 rtpmap 的纯静态号码对端。
+func negotiateMedia(sd *sdp.SessionDescription, kind string) (*net.UDPAddr, Codec, uint8, int, error) {
+	info, err := mediaInfoOf(sd, kind)
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	if info.Rejected {
+		return nil, nil, 0, 0, fmt.Errorf("对端拒绝了%s媒体", mediaKindName(kind))
+	}
+	if info.Addr == nil {
+		return nil, nil, 0, 0, fmt.Errorf("SDP 缺少%s的连接信息", mediaKindName(kind))
+	}
+
+	codec, pt, ok := matchAudioCodec(info)
+	if !ok {
+		return nil, nil, 0, 0, fmt.Errorf("无共同编解码器（对端支持: %s）", ptListString(info.PTs))
+	}
+	return info.Addr, codec, pt, info.RTCPPort, nil
+}
+
+// matchAudioCodec 按本地优先级在 offer 的负载类型中挑音频编解码器。
+// 先按 rtpmap 名匹配，再回退到静态负载类型号（对端未写 a=rtpmap 的旧式实现）。
+func matchAudioCodec(info *MediaInfo) (Codec, uint8, bool) {
+	for _, c := range supportedCodecs {
+		for _, pt := range info.PTs {
+			if info.EncodingMatches(pt, c.Name()) {
+				return c, pt, true
+			}
 		}
 	}
-	return "sendrecv"
-}
-
-// MirrorDirection 镜像媒体方向（对端 offer 的方向 → 本端 answer 的方向）：
-// 对端只发不收（sendonly）→ 本端只收不发（recvonly），依此类推。
-func MirrorDirection(dir string) string {
-	switch dir {
-	case "sendonly":
-		return "recvonly"
-	case "recvonly":
-		return "sendonly"
-	case "inactive":
-		return "inactive"
-	default:
-		return "sendrecv"
+	// 回退：静态负载类型号直接命中
+	for _, c := range supportedCodecs {
+		for _, pt := range info.PTs {
+			if pt == c.PayloadType() && info.Rtpmap[pt] == "" {
+				return c, pt, true
+			}
+		}
 	}
+	return nil, 0, false
 }
 
-// codecByPT 按负载类型取编解码器（协商失败兜底 PCMU）。
+// mediaKindName 媒体类型的中文名（日志与错误信息用）。
+func mediaKindName(kind string) string {
+	if kind == "video" {
+		return "视频"
+	}
+	return "音频"
+}
+
+// ptListString 负载类型列表转字符串（错误信息用）。
+func ptListString(pts []uint8) string {
+	parts := make([]string, len(pts))
+	for i, pt := range pts {
+		parts[i] = strconv.Itoa(int(pt))
+	}
+	return strings.Join(parts, ",")
+}
+
+// codecByPT 按负载类型取编解码器（协商失败兜底 PCMA）。
 func codecByPT(pt uint8) Codec {
 	for _, c := range supportedCodecs {
 		if c.PayloadType() == pt {
