@@ -80,16 +80,27 @@ exit /b 1
 
 rem ---------------------------------------------------------------
 rem Video static libraries (third_party\video\<target>, built once by
-rem scripts\build-video-libs.bat). Present -> -tags video and the
+rem scripts\build-video-libs.bat). Complete -> -tags video and the
 rem include/lib paths; missing -> build without video, audio unaffected.
 rem The go compiler reads the include/lib paths from the Go environment,
 rem so CGO_CFLAGS/CGO_LDFLAGS are set here.
+rem
+rem Must check every .a the linker needs, not just the lib directory:
+rem an aborted/failed libs build leaves an empty shell behind, and
+rem treating it as usable fails the go build with a missing header
+rem (fatal error: wels/codec_api.h -- seen in practice).
+rem Keep in sync with the #cgo LDFLAGS in internal\video\ffmpeg.go.
 rem ---------------------------------------------------------------
 :video_setup
 set "VIDEO_TAGS="
 set "CGO_CFLAGS="
 set "CGO_LDFLAGS="
 if not exist "third_party\video\%~1\lib" goto :video_none
+if not exist "third_party\video\%~1\lib\libavcodec.a" goto :video_incomplete
+if not exist "third_party\video\%~1\lib\libswscale.a" goto :video_incomplete
+if not exist "third_party\video\%~1\lib\libavutil.a" goto :video_incomplete
+if not exist "third_party\video\%~1\lib\libvpx.a" goto :video_incomplete
+if not exist "third_party\video\%~1\lib\libopenh264.a" goto :video_incomplete
 set "VIDEO_TAGS=-tags video"
 set "CGO_CFLAGS=-I%CD%\third_party\video\%~1\include"
 set "CGO_LDFLAGS=-L%CD%\third_party\video\%~1\lib"
@@ -97,4 +108,8 @@ goto :eof
 :video_none
 echo       hint: third_party\video\%~1 not found, building without video
 echo             run scripts\build-video-libs.bat once to enable it
+goto :eof
+:video_incomplete
+echo       hint: third_party\video\%~1 is incomplete (a required .a is missing),
+echo             building without video - re-run scripts\build-video-libs.bat
 goto :eof

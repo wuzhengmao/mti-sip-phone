@@ -149,9 +149,11 @@ main（组装）
 
 **静态库不由仓库携带**，由 `scripts/build-video-libs.sh`（Linux 宿主，支持 mingw/aarch64 交叉）
 或 `scripts/build-video-libs.bat`（Windows，走 git-bash + WinLibs）一次性生成到
-`third_party/video/<target>/{include,lib}`（已 gitignore）。`build.bat` / `build.sh` 探测到该目录
-就加 `-tags video` 并传 `CGO_CFLAGS`/`CGO_LDFLAGS`；**缺失则自动降级为无视频构建**（音频完全不受
-影响，UI 隐藏视频入口）。视频给最终二进制加约 10MB（链接器按需拉取，静态库本身 48MB）。
+`third_party/video/<target>/{include,lib}`（已 gitignore）。**库按目标分别生成**：不带参数只出
+本机原生目标，交叉目标（windows-amd64 / windows-386 / linux-对侧arch）要用 `all` 或显式指定，
+否则那些产物**静默降级为无视频**。`build.bat` / `build.sh` 探测到链接
+所需的 5 个 `.a` 齐全就加 `-tags video` 并传 `CGO_CFLAGS`/`CGO_LDFLAGS`；**缺失则自动降级为
+无视频构建**（音频完全不受影响，UI 隐藏视频入口）。视频给最终二进制加约 10MB（链接器按需拉取，静态库本身 48MB）。
 
 FFmpeg 的 configure **刻意不启用 libvpx/libopenh264**（只解码），因此不需要 pkg-config
 ——WinLibs 工具链里没有 pkg-config，这是方案能落地的前提；编码直接由 cgo 链接那两个库。
@@ -244,11 +246,46 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
      64 位目标文件**，链接报一堆 undefined reference；
   2. libvpx 的 `vpx_dsp_rtcd.h` 等由 `rtcd.pl` 按架构生成，沿用 64 位的表会引用
      只存在于 `fwd_txfm_ssse3_x86_64.asm` 的符号 → 32 位链接报 `_ssse3` 未定义。
-- **视频静态库：32 位 Windows 目标需要 `-lstdc++`**。OpenH264 是 C++ 实现
-  （用到 `operator delete(void*, unsigned int)` 这类 C++14 定长释放）。amd64 上
-  因为 mediadevices 的摄像头是 C++，Go 会自动用 `g++` 链接所以没事；386 上摄像头
-  被排除、Go 改用 `gcc` 链接，不带 libstdc++ 就报未定义。已在 `internal/video/ffmpeg.go`
-  的 `#cgo windows LDFLAGS` 里显式加上。
+- **视频静态库：链接必须带 `-lstdc++`**（OpenH264 是 C++ 实现，用到
+  `operator delete(void*, unsigned int)` 这类 C++14 定长释放）。Windows 上 386 目标因
+  摄像头被排除、Go 改用 `gcc` 链接（amd64 有 C++ 摄像头源所以自动走 g++）；**Linux 上
+  本包没有 C++ 源、Go 一律用 `gcc` 链接**，同样中招（实测 Debian 报
+  `undefined reference to 'operator new(unsigned long)'` / `__gxx_personality_v0`）。
+  两处都在 `internal/video/ffmpeg.go` 的 `#cgo LDFLAGS` 里显式加上。
+- **cgo 前导块（`/* ... */`）里的 `//` 注释中不能出现星号加斜杠**——那是 C 块注释的
+  结束符，会把整个前导块提前截断，后面的注释文字被当成 Go 代码解析，报一堆
+  `non-declaration statement outside function body` / `invalid character '（'`
+  （踩过：注释里写 `pthread_` 星号 `sem_` 星号）。改完前导块用 `gofmt -e` 当场查。
+- **视频静态库：Windows 链接必须显式 `-lwinpthread`**。mingw 下 libvpx 检测到
+  pthread.h 就用 pthread 线程模型，其 `.a` 里有大量 `pthread_*`/`sem_*` 未定义符号
+  （实测 70 处）。WinLibs 是 **posix** 线程模型的工具链，gcc/g++ 驱动会**隐式**带上
+  libwinpthread（所以 Windows 产物动态依赖 `libwinpthread-1.dll`，分发时要一起给），
+  本机构建因此从不暴露；Debian 的 mingw 不会自动带，交叉链接报
+  `undefined reference to 'pthread_mutex_lock'` / `'sem_post'`。已在
+  `#cgo windows LDFLAGS` 显式加上（重复链接同一库是空操作，对两条路径都无副作用）。
+- **交叉 Windows 必须显式给 `CXX`**（`build.sh` 已设成与 CC 同前缀的 g++，并在带视频
+  时检查它存在）。Go 的 `cfg.DefaultCXX` 对交叉目标返回裸 `"g++"`，也就是**宿主的**
+  g++；而 cgo 编 C++ 与「包里含 C++ 源时的链接驱动」都走 CXX。不带视频时 Windows
+  交叉没有 C++ 源，所以一直没暴露；`-tags video` 引入 mediadevices 的
+  `camera_windows.cpp` 后就变成「用 Linux 的 g++ 编 Windows 源码」——`<iostream>`、
+  `<unistd.h>` 都能找到、**唯独 `<dshow.h>` 找不到**（实测，报错极具误导性），链接
+  同样会落到宿主 g++。Debian 上 mingw 的 g++ 是独立包（`g++-mingw-w64-*`）。
+- **视频静态库：FFmpeg 必须 `--disable-autodetect`**（只关 `--disable-libdrm` 不够）。
+  autodetect 类外部库不受 `--disable-everything` 约束，会按宿主装的开发包自动启用：
+  踩过的是 libdrm（走 pkg-config，Linux 构建机装了 libdrm-dev 就把 `hwcontext_drm.o`
+  编进 `libavutil.a`，链接报 `undefined reference to 'drmGetVersion'`），同类还有
+  zlib/bzlib/lzma/xlib/vaapi/vdpau/vulkan/cuda/nvdec 等——**Windows 宿主没有
+  pkg-config 所以从不触发**，交叉 mingw/arm64 时宿主 pkg-config 尤其容易误判。
+  全关不影响我们启用的组件；线程（pthreads/w32threads）不在 AUTODETECT 之列。
+- **视频静态库：libvpx 的 x86 目标硬性要求 nasm/yasm，没有降级路径**。libvpx 1.15 的
+  configure 只认 `--as={yasm|nasm|auto}`，**没有 `--disable-asm`**（脚本原先的「找不到
+  汇编器就关闭汇编」分支直接让 configure 报 `Unknown option "--disable-asm"` 失败），
+  且 x86 下 `.asm` 源文件必编，缺汇编器时 libvpx 自己就 die。Debian/Ubuntu 上
+  `sudo apt install nasm`。失败时脚本会 `rm -rf` 掉该目标目录，`build.sh`/`build.bat`
+  也必须逐个检查 5 个 `.a`（libavcodec/swscale/avutil/vpx/openh264，与
+  `internal/video/ffmpeg.go` 的 `#cgo LDFLAGS` 对应）才算「库齐全」——**只看 `lib`
+  目录存在会把半成品当可用**，`-tags video` 后编译立刻报缺头文件（实测
+  `fatal error: wels/codec_api.h`）。
 - **无边框窗口一律用 Fyne 的 splash 窗口（`desktop.Driver.CreateSplashWindow`），
   不要在 Win32 侧 `stripWindowChrome` 硬抹样式**。硬抹是**绕过 GLFW** 改窗口的：
   GLFW 缓存的边框尺寸因此永久失准，它仍按"有标题栏"换算客户区，Fyne 于是认为

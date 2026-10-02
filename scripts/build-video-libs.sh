@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# 允许用 sh(dash) 调用（部分用户习惯 `sh scripts/xxx.sh`）：本脚本使用了 bash
+# 专有语法（数组、${var//a/b}），dash 直接跑会在解析到那些行时报
+# Syntax error: "(" unexpected。dash 是逐条执行顶层命令的，所以这条守卫会在
+# 读到后面的 bash 语法之前先 exec 切回 bash。
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
 # 视频编解码静态库构建脚本
 #
 # 产出三个静态库到 third_party/video/<target>/{include,lib}：
@@ -14,6 +21,11 @@
 #   ./scripts/build-video-libs.sh windows-amd64      # 指定目标
 #   ./scripts/build-video-libs.sh all                # 全部目标（缺工具链的自动跳过）
 #   ./scripts/build-video-libs.sh --clean windows-amd64
+#
+# 注意：不带参数时**只**构建本机原生目标。build.sh 交叉产出的
+# windows-amd64 / windows-386 / linux-<对侧arch> 想要带视频，必须先用
+# `all`（或逐个指定）生成对应目标的库；没有对应库时那些产物会静默降级为
+# 无视频版本（build.sh 只打印一行提示）。
 #
 # 目标：windows-amd64 / windows-386 / linux-amd64 / linux-arm64
 # 产物不入库（.gitignore 已忽略 third_party/video 与 third_party/src）。
@@ -73,7 +85,9 @@ else
     JOBS="${NUMBER_OF_PROCESSORS:-4}"
 fi
 
+TARGETS_DEFAULTED=0
 if [ -z "$TARGETS" ]; then
+    TARGETS_DEFAULTED=1
     case "$HOST_OS" in
         windows) TARGETS="windows-amd64" ;;
         linux)   TARGETS="linux-$(go env GOARCH 2>/dev/null || echo amd64)" ;;
@@ -199,6 +213,22 @@ setup_toolchain() {
     [ -n "$STRIP" ] || STRIP="$(command -v strip || true)"
     [ -n "$WINDRES" ] || WINDRES="$(command -v windres || true)"
 
+    # OpenH264 是 C++ 实现，构建必须有与 CC 配套的 C++ 编译器（CXX）。Debian 上
+    # 交叉工具链的 g++ 常与 gcc 分属两个包（gcc-aarch64-linux-gnu 不含 g++），
+    # 只装 gcc 时要在 openh264 的 make 阶段才失败，错误很难对号入座，这里提前报。
+    # （Windows 宿主下 CXX 可能是不带 .exe 的路径，探测要两种写法都试。）
+    cxx_ok=0
+    if [ -n "$CXX" ] &&
+       { command -v "$CXX" >/dev/null 2>&1 || command -v "$CXX.exe" >/dev/null 2>&1; }; then
+        cxx_ok=1
+    fi
+    if [ "$cxx_ok" != 1 ]; then
+        echo "  缺少 C++ 编译器（OpenH264 是 C++，需要与 CC=「${CC:-未找到}」配套的 CXX）" >&2
+        echo "    Debian/Ubuntu：本机 sudo apt install g++；交叉工具链的 g++ 常是独立包，" >&2
+        echo "    如 g++-aarch64-linux-gnu / g++-x86-64-linux-gnu / g++-mingw-w64-x86-64" >&2
+        return 1
+    fi
+
     # libvpx 的 configure 只认环境变量（CC/CXX/AR/LD/AS/STRIP），没有 --cc= 之类的选项；
     # FFmpeg 也会优先读环境变量。统一导出，两个库共用。
     export CC CXX AR NM RANLIB STRIP WINDRES
@@ -258,7 +288,14 @@ build_libvpx() {
         local cfg=(--target="$VPX_TARGET" --prefix="$pfx"
                    --disable-shared --enable-static
                    --disable-examples --disable-tools --disable-docs --disable-unit-tests)
-        # 仅 x86 目标需要外部汇编器；arm64 走 gcc 内置汇编
+        # 仅 x86 目标需要外部汇编器；arm64 走 gcc 内置汇编。
+        #
+        # x86 目标是**硬性要求** nasm/yasm，不能降级：libvpx 1.15 的 configure
+        # 只认 --as={yasm|nasm|auto}，没有 --disable-asm（实测报
+        # Unknown option "--disable-asm"）；且 x86 下 .asm 源文件是必编的，
+        # 汇编器缺失时 build/make/configure.sh 直接 die
+        # "Neither yasm nor nasm have been found."。
+        # 所以这里只能缺啥报错，并把安装办法打出来。
         case "$VPX_TARGET" in
             *win64-gcc|*win32-gcc|x86_64-linux-gcc)
                 if command -v nasm >/dev/null 2>&1; then
@@ -266,8 +303,11 @@ build_libvpx() {
                 elif command -v yasm >/dev/null 2>&1; then
                     cfg+=(--as=yasm)
                 else
-                    echo "  未找到 nasm/yasm，关闭汇编优化（性能下降）"
-                    cfg+=(--disable-asm)
+                    echo "  错误：libvpx 的 x86 目标必须用 nasm 或 yasm 汇编（libvpx 无 --disable-asm 选项）" >&2
+                    echo "    Debian/Ubuntu:  sudo apt install nasm" >&2
+                    echo "    Fedora/RHEL:    sudo dnf install nasm" >&2
+                    echo "    Windows 宿主:   MSYS2 pacman -S nasm，或把 nasm.exe 放进 PATH" >&2
+                    return 1
                 fi
                 ;;
         esac
@@ -310,12 +350,21 @@ build_ffmpeg() {
         purge_objects .
         "$MAKE" distclean >/dev/null 2>&1 || true
         # --disable-everything 关掉全部组件，所以后三项与每个 decoder/parser 都要显式列出。
-        # 只留解码器 + h263 编码器 + swscale/avcodec/avutil，无需任何外部库，因此不需要 pkg-config。
+        # 只留解码器 + h263 编码器 + swscale/avcodec/avutil，不启用任何外部库，因此不
+        # 依赖 pkg-config（WinLibs 工具链里没有它）。
+        # --disable-autodetect：autodetect 类外部库**不受 --disable-everything 约束**，
+        # 会按构建机装了哪些开发包自动启用——踩过的是 libdrm（Linux 宿主装了 libdrm-dev
+        # 就把 hwcontext_drm.o 编进 libavutil.a，链接报 undefined reference to
+        # `drmGetVersion'；Windows 宿主没有 pkg-config 所以从不触发）。同类还有
+        # zlib/bzlib/lzma/xlib/vaapi/vdpau/vulkan/cuda/nvdec 等，交叉 mingw/arm64 时
+        # 宿主 pkg-config 尤其容易误判。我们只用软件解码，全关不影响任何启用的组件；
+        # 线程（pthreads/w32threads）不在 AUTODETECT 之列，不受影响。
         "$here/configure" \
             --prefix="$pfx" \
             $FF_EXTRA \
             --enable-static --disable-shared \
             --disable-programs --disable-doc --disable-network \
+            --disable-autodetect \
             --disable-everything \
             --enable-avcodec --enable-avutil --enable-swscale \
             --enable-decoder=h264,h263,h263p,h263i,vp8,vp9 \
@@ -372,9 +421,12 @@ for T in $TARGETS; do
         fi
         "$@"
     }
-    if ! built_or_run libvpx.a    build_libvpx "$PFX_MK";   then echo "  libvpx 构建失败";   FAILED="$FAILED $T"; continue; fi
-    if ! built_or_run libopenh264.a build_openh264 "$PFX_MK"; then echo "  openh264 构建失败"; FAILED="$FAILED $T"; continue; fi
-    if ! built_or_run libavcodec.a build_ffmpeg "$PFX_MK";   then echo "  ffmpeg 构建失败";   FAILED="$FAILED $T"; continue; fi
+    # 失败时把目标目录整个删掉：只建了一半的 third_party/video/<target> 会被
+    # build.sh / build.bat 的探测当成「库齐全」，加上 -tags video 后编译立刻
+    # 报缺头文件（如 wels/codec_api.h），现场与真正的库构建失败对不上号。
+    if ! built_or_run libvpx.a    build_libvpx "$PFX_MK";   then echo "  libvpx 构建失败";   FAILED="$FAILED $T"; rm -rf "$PFX"; continue; fi
+    if ! built_or_run libopenh264.a build_openh264 "$PFX_MK"; then echo "  openh264 构建失败"; FAILED="$FAILED $T"; rm -rf "$PFX"; continue; fi
+    if ! built_or_run libavcodec.a build_ffmpeg "$PFX_MK";   then echo "  ffmpeg 构建失败";   FAILED="$FAILED $T"; rm -rf "$PFX"; continue; fi
 
     # 合并三个库的头文件，便于 cgo 用单一的 -I
     for inc in vpx openh264 wels libavcodec libavutil libswscale; do
@@ -389,5 +441,11 @@ done
 echo
 echo "构建完成：${BUILT:- （无）}"
 [ -n "$FAILED" ] && echo "跳过（缺工具链）：$FAILED"
+if [ "$TARGETS_DEFAULTED" = 1 ]; then
+    echo
+    echo "提示：本次只构建了本机原生目标（${TARGETS# }）。build.sh 交叉产出的"
+    echo "      windows-amd64 / windows-386 / linux-<对侧arch> 想带视频，须先执行："
+    echo "      sh scripts/build-video-libs.sh all"
+fi
 echo
 echo "下一步：build.bat / build.sh 会自动探测 third_party/video/<target> 并加上 -tags video。"
