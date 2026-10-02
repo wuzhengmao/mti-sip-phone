@@ -202,7 +202,10 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - 订阅期间软电话**不显示视频窗口**：`App.SetWebVideoViewer` 聚合多连接状态 → 发布
   `video.web` 事件 → UI 置 `webVideoOn`。`wantVideoWindow()` 与 `renderVideoFrame()`
   **都要拦**——后者里有直接 `Show()` 的分支，只挡前者窗口会被逐帧显示回来。
-- 测试页用 `sdk.createVideoRenderer(videoEl)`：canvas + `captureStream()` 喂 h5 `<video>`
+- SDK 的 `subscribeVideo({remote, local?, ...})` **直接收 `<video>` 元素**并自行渲染
+  （内部 canvas + `captureStream()` 喂元素；`local` 不传 = 不订阅本地回显，
+  参数缺省取元素显示尺寸，两路可各带各的参数），关闭视频/挂断/退订自动清成黑底；
+  页面拿到的只有 `onStats` 回调与 `video.frame`（低级接口，需要自定义显示时才用）
   （MSE 不支持 MJPEG，逐帧 blob URL 开销大），渲染跟不上直接丢帧。
 
 ## 重要约定

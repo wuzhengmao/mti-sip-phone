@@ -106,27 +106,25 @@ declare class SipPhoneSDK {
   notifyUpdate(info: SipUpdateInfo): Promise<{ phase: string; version: string; currentVersion: string }>;
 
   /**
-   * 订阅视频画面（REQ-VIDEO-009）。订阅期间软电话不再显示视频窗口，
-   * 画面以 JPEG 帧经 WS 二进制消息推来（video.frame 事件）。
-   * 参数越界会被钳制到合法范围，返回值里是生效值。
-   */
-  subscribeVideo(options?: SipVideoOptions): Promise<SipVideoSubscription>;
-
-  /** 取消本连接的视频订阅（软电话恢复显示视频窗口） */
-  unsubscribeVideo(): Promise<{ local: boolean; remote: boolean }>;
-
-  /**
-   * 创建视频渲染器：把 video.frame 的 JPEG 帧经 canvas 画布流喂给 h5 <video>。
+   * 订阅视频画面（REQ-VIDEO-009）。**SDK 自己把画面渲染到传入的 <video>**，
+   * 页面不用处理帧回调；关闭视频/挂断/退订时 SDK 会把画面清成黑底。
    *
-   *   const r = sdk.createVideoRenderer(document.getElementById('remoteVideo'));
-   *   sdk.on('video.frame', (f) => { if (f.channel === 'remote') r.render(f.blob); });
+   *   await sdk.subscribeVideo({
+   *     remote: document.getElementById('remoteVideo'),  // 必传
+   *     local:  document.getElementById('localVideo'),   // 可选：不传 = 不订阅本地回显
+   *     fps: 30, quality: 75,
+   *     onStats: (channel, stats) => { ... }
+   *   });
+   *
+   * 参数越界会被软电话钳制到合法范围，返回值里是生效值。
    */
-  createVideoRenderer(videoEl: HTMLVideoElement, options?: {
-    /** 画布流目标帧率，默认 30 */
-    fps?: number;
-    /** 每秒回调一次 {fps, kbps, width, height} */
-    onStats?: (stats: { fps: number; kbps: number; width: number; height: number }) => void;
-  }): SipVideoRenderer;
+  subscribeVideo(options: SipVideoSubscribeOptions): Promise<SipVideoSubscription>;
+
+  /** 取消本连接的视频订阅（软电话恢复显示视频窗口），画面清成黑底；返回两条通道都已退订 */
+  unsubscribeVideo(): Promise<{ remote: boolean; local: boolean }>;
+
+  /** 清空已订阅的画面（黑底）；关闭视频/挂断/退订时 SDK 会自动调用 */
+  clearVideo(): void;
 
 }
 
@@ -159,49 +157,73 @@ interface SipCall {
   };
 }
 
-/** 订阅视频参数（未指定的取默认：640×640 / 30fps / 质量 75） */
-interface SipVideoOptions {
-  /** 同时订阅本地画面，默认 true */
-  local?: boolean;
-  /** 保留字段：远端画面恒订阅（软电话强制），传 false 会被忽略 */
-  remote?: boolean;
-  /** 推流最大宽度（64–1920），默认 640 */
-  maxWidth?: number;
-  /** 推流最大高度（64–1920），默认 640 */
-  maxHeight?: number;
-  /** 帧率（1–30），默认 30 */
-  fps?: number;
-  /** JPEG 质量（30–95），默认 75 */
-  quality?: number;
+/** 视频通道名 */
+type SipVideoChannelName = 'local' | 'remote';
+
+/** 每秒一次的画质统计（onStats 回调参数） */
+interface SipVideoStats {
+  /** 每秒帧数 */
+  fps: number;
+  /** 每秒码率（kbit/s） */
+  kbps: number;
+  /** 当前画面宽 */
+  width: number;
+  /** 当前画面高 */
+  height: number;
 }
 
-/** video.subscribe 的返回：生效参数 + 当前通话快照 */
-interface SipVideoSubscription {
-  local: boolean;
-  remote: boolean;
+/** 单条视频通道：可以直接给 <video> 元素，也可以给带参数的对象（两路各要各的） */
+type SipVideoChannel = HTMLVideoElement | SipVideoChannelOptions;
+
+interface SipVideoChannelOptions {
+  /** 目标 <video> 元素（SDK 自动渲染，自动播放） */
+  el: HTMLVideoElement;
+  /** 该通道推流的最大宽度（64–1920），不传取顶层默认，再取 <video> 元素显示宽度 */
+  maxWidth?: number;
+  /** 该通道推流的最大高度（64–1920），不传取顶层默认，再取 <video> 元素显示高度 */
+  maxHeight?: number;
+  /** 该通道帧率（1–30），不传取顶层默认，再取默认 30 */
+  fps?: number;
+  /** 该通道 JPEG 质量（30–95），不传取顶层默认，再取默认 75 */
+  quality?: number;
+  /** 该通道的统计回调 */
+  onStats?: (channel: SipVideoChannelName, stats: SipVideoStats) => void;
+}
+
+/** subscribeVideo 参数 */
+interface SipVideoSubscribeOptions {
+  /** 远端画面（必传） */
+  remote: SipVideoChannel;
+  /** 本地回显（可选；不传 = 不订阅本地画面） */
+  local?: SipVideoChannel;
+  /** 两路共用的默认最大宽度 */
+  maxWidth?: number;
+  /** 两路共用的默认最大高度 */
+  maxHeight?: number;
+  /** 两路共用的默认帧率 */
+  fps?: number;
+  /** 两路共用的默认 JPEG 质量 */
+  quality?: number;
+  /** 两路共用的统计回调（每秒一次） */
+  onStats?: (channel: SipVideoChannelName, stats: SipVideoStats) => void;
+}
+
+/** 单条通道的生效参数 */
+interface SipVideoParams {
   maxWidth: number;
   maxHeight: number;
   fps: number;
   quality: number;
-  /** 当前进行中的通话（无则 null） */
-  call: SipCall | null;
 }
 
-/** 视频渲染器（createVideoRenderer 返回） */
-interface SipVideoRenderer {
-  /** 渲染一帧（video.frame 事件的 blob） */
-  render(blob: Blob): void;
-  /** 清空画面（填黑底并清零统计）：关闭视频/挂断/取消订阅时调用，避免定格在最后一帧 */
-  clear(): void;
-  /** 释放画布流 */
-  destroy(): void;
-  /** 最近统计值 */
-  readonly fps: number;
-  readonly kbps: number;
-  readonly width: number;
-  readonly height: number;
-  /** 累计渲染帧数 */
-  readonly frames: number;
+/** video.subscribe 的返回：生效参数 + 当前通话快照 */
+interface SipVideoSubscription {
+  /** 远端生效参数 */
+  remote: SipVideoParams;
+  /** 本地生效参数（未订阅本地画面时不存在） */
+  local?: SipVideoParams;
+  /** 当前进行中的通话（无则 null） */
+  call: SipCall | null;
 }
 
 /** 告知软电话的新版本信息（system.notifyUpdate 参数） */

@@ -64,8 +64,8 @@
 | `call.setVideo` | `{ "callId": "...", "enabled": true }` | `{ "callId": "..." }` | 视频总开关（纯本地动作，REQ-VIDEO-008）：关 = 不显示远端、不推送本地、视频窗口关闭；状态变化推 `call.video` |
 | `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态） |
 | `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64" }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.3" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选 |
-| `video.subscribe` | `{ "local": true, "maxWidth": 640, "maxHeight": 640, "fps": 30, "quality": 75 }` | 见下 | 订阅视频画面（REQ-VIDEO-009）：**必定订阅远端画面**（`remote` 恒为 true，传 false 被忽略），`local` 可选；订阅期间**软电话自动关闭视频窗口**，画面以二进制帧推送（见 4.1）；参数可省（默认 640×640 / 30fps / 质量 75） |
-| `video.unsubscribe` | `{}` | `{ "local": false, "remote": false }` | 取消本连接的全部视频订阅；软电话恢复显示视频窗口 |
+| `video.subscribe` | `{ "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 }, "local": { "maxWidth": 160, "maxHeight": 120 } }` | 见下 | 订阅视频画面（REQ-VIDEO-009）：**必定订阅远端画面**（`remote` 不传也有默认参数），`local` 可选——不传就是**不订阅本地回显**；两条通道各带各的参数（本地回显通常小一号）。订阅期间**软电话自动关闭视频窗口**，画面以二进制帧推送（见 4.1） |
+| `video.unsubscribe` | `{}` | `{ "local": false, "remote": false }` | 取消本连接的全部视频订阅（两条通道都已退订）；软电话恢复显示视频窗口 |
 
 ### system.getState 返回示例
 
@@ -109,20 +109,15 @@
 
 ```json
 {
-  "local": true,
-  "remote": true,
-  "maxWidth": 640,
-  "maxHeight": 640,
-  "fps": 30,
-  "quality": 75,
+  "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 },
+  "local": { "maxWidth": 160, "maxHeight": 120, "fps": 10, "quality": 75 },
   "call": { "id": "abc", "hasVideo": true, "video": { "negotiated": true, "sending": true, "width": 640, "height": 480 } }
 }
 ```
 
-（`remote` 恒为 true，见下。）
-
-- 返回的是**生效参数**：越界值会被钳制到合法范围（`maxWidth`/`maxHeight` ∈ [64, 1920]，`fps` ∈ [1, 30]，`quality` ∈ [30, 95]），不报错。
-- `remote` 恒为 true：订阅必定包含远端画面（否则会出现"桌面窗口被隐藏、远端画面却没人看"的糊涂状态）；空参数 `{}` 等价于「只看远端」。
+- 请求里 `remote` / `local` 都是**参数对象、可缺字段**：`{}` 或整个缺省都表示"用默认值"。
+- 返回的是**生效参数**（每条通道一份）：越界值会被钳制到合法范围（`maxWidth`/`maxHeight` ∈ [64, 1920]，`fps` ∈ [1, 30]，`quality` ∈ [30, 95]），不报错。
+- **远端恒订阅**（不传 `remote` 也照样订阅，否则会出现"桌面窗口被隐藏、远端画面却没人看"的糊涂状态）；`local` 不传 = 不订阅本地回显，此时返回里没有 `local` 字段。
 - `call` 为当前进行中的通话快照（无通话时为 `null`）。
 - 订阅是**连接级**的：连接断开自动退订；订阅一直有效（跨通话），通话开始后画面自动推来。
 

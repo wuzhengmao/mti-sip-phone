@@ -218,17 +218,19 @@
       <div class="filters">
         <label>最大宽
           <select id="vidMaxW">
+            <option value="" selected>自动</option>
             <option value="320">320</option>
-            <option value="640" selected>640</option>
+            <option value="640">640</option>
             <option value="960">960</option>
             <option value="1280">1280</option>
           </select>
         </label>
         <label>最大高
           <select id="vidMaxH">
+            <option value="" selected>自动</option>
             <option value="240">240</option>
             <option value="480">480</option>
-            <option value="640" selected>640</option>
+            <option value="640">640</option>
             <option value="720">720</option>
           </select>
         </label>
@@ -406,7 +408,7 @@
     if (currentCall && currentCall.id === data.call.id) { currentCall = data.call; }
     applyMediaButtons(data.call);
     if (!v.enabled) {
-      clearVideos(); // 视频被关闭：清成黑底，不留定格画面
+      resetStats(); // 画面由 SDK 清空，这里只需清角标
     }
     addLog('ev', '视频状态: 协商=' + v.negotiated + ' 开启=' + v.enabled +
       ' 回显=' + v.previewOn + ' 发送=' + v.sending +
@@ -494,73 +496,53 @@
   };
 
   // ---------------- 视频订阅（REQ-VIDEO-009）----------------
-  var firstFrameLogged = false; // 首帧只在日志里提示一次，之后看角标统计
-  var frameCount = { local: 0, remote: 0 };
-
+  // SDK 负责渲染：把 <video> 元素传给 subscribeVideo 即可，帧回调不用管；
+  // 只在 onStats 里更新角标（分辨率 / 帧率 / 码率），关闭视频/挂断/退订时
+  // SDK 会把画面清成黑底。
   function statText(s) {
     return s.width + '×' + s.height + ' · ' + s.fps + 'fps · ' + s.kbps + 'kbps';
   }
   function resetStats() {
     $('remoteStat').textContent = '—';
     $('localStat').textContent = '—';
-    frameCount.local = 0;
-    frameCount.remote = 0;
-    firstFrameLogged = false;
+  }
+  function onVideoStats(channel, s) {
+    $(channel === 'local' ? 'localStat' : 'remoteStat').textContent = statText(s);
   }
 
-  // 清空两路画面：视频被关闭、通话结束、取消订阅时调用（否则 <video> 定格在最后一帧）
-  function clearVideos() {
-    remoteRenderer.clear();
-    localRenderer.clear();
-    resetStats();
+  // 通道参数：选择框选「自动」就用 <video> 元素自身的尺寸（值留空即不传）
+  function channelOpts(el, checked) {
+    if (!checked) { return null; }
+    return { el: el };
   }
-
-  var remoteRenderer = sdk.createVideoRenderer($('remoteVideo'), {
-    onStats: function (s) { $('remoteStat').textContent = statText(s); }
-  });
-  var localRenderer = sdk.createVideoRenderer($('localVideo'), {
-    onStats: function (s) { $('localStat').textContent = statText(s); }
-  });
-
-  // 视频帧（JPEG blob）：按通道分别渲染；帧本身不进日志，避免刷屏
-  sdk.on('video.frame', function (f) {
-    if (f.channel === 'local') {
-      localRenderer.render(f.blob);
-      frameCount.local++;
-    } else {
-      remoteRenderer.render(f.blob);
-      frameCount.remote++;
-    }
-    if (!firstFrameLogged) {
-      firstFrameLogged = true;
-      addLog('ok', '视频帧已到达（' + (f.channel === 'local' ? '本地' : '远端') +
-        '，' + f.size + ' 字节/帧）');
-    }
-  });
 
   $('btnSubVideo').onclick = function () {
-    // 订阅必定包含远端画面（软电话强制），本地画面可选
     var opts = {
-      local: $('vidLocal').checked,
-      remote: true,
-      maxWidth: parseInt($('vidMaxW').value, 10),
-      maxHeight: parseInt($('vidMaxH').value, 10),
-      fps: parseInt($('vidFps').value, 10),
-      quality: parseInt($('vidQuality').value, 10)
+      remote: $('remoteVideo'),                      // 必传
+      local: channelOpts($('localVideo'), $('vidLocal').checked), // 不勾选 = 不订阅本地
+      onStats: onVideoStats
     };
-    addLog('info', '订阅视频: ' + JSON.stringify(opts));
+    if ($('vidMaxW').value) { opts.maxWidth = parseInt($('vidMaxW').value, 10); }
+    if ($('vidMaxH').value) { opts.maxHeight = parseInt($('vidMaxH').value, 10); }
+    if ($('vidFps').value) { opts.fps = parseInt($('vidFps').value, 10); }
+    if ($('vidQuality').value) { opts.quality = parseInt($('vidQuality').value, 10); }
+
+    var desc = '远端 ' + (opts.maxWidth || '自动') + '×' + (opts.maxHeight || '自动') +
+      ' / ' + (opts.fps || '默认') + 'fps / 质量 ' + (opts.quality || '默认') +
+      (opts.local ? '，含本地画面' : '，仅远端');
+    addLog('info', '订阅视频（' + desc + '）');
     sdk.subscribeVideo(opts).then(function (res) {
       resetStats();
       $('videoBadge').textContent = '已订阅';
       $('videoBadge').className = 'badge ok';
-      addLog('ok', '视频已订阅（生效参数 ' + res.maxWidth + '×' + res.maxHeight +
-        ' / ' + res.fps + 'fps / 质量 ' + res.quality + '）');
+      addLog('ok', '视频已订阅（远端生效参数 ' + res.remote.maxWidth + '×' + res.remote.maxHeight +
+        ' / ' + res.remote.fps + 'fps / 质量 ' + res.remote.quality +
+        (res.local ? '；本地 ' + res.local.maxWidth + '×' + res.local.maxHeight : '') + '）');
       if (res.call && res.call.video) {
         var v = res.call.video;
         addLog('info', '当前通话视频：协商=' + v.negotiated + ' 发送=' + v.sending +
           ' 远端=' + (v.width || 0) + '×' + (v.height || 0));
-      }
-      if (!res.call) {
+      } else {
         addLog('info', '当前没有通话：订阅已生效，通话开始后画面会自动推来');
       }
     }).catch(function (e) {
@@ -570,10 +552,10 @@
 
   $('btnUnsubVideo').onclick = function () {
     sdk.unsubscribeVideo().then(function () {
-      clearVideos();
+      resetStats();
       $('videoBadge').textContent = '未订阅';
       $('videoBadge').className = 'badge';
-      addLog('ok', '已取消订阅（软电话恢复显示视频窗口）');
+      addLog('ok', '已取消订阅（画面已清空，软电话恢复显示视频窗口）');
     }).catch(function (e) {
       addLog('err', '取消订阅失败: ' + e.message);
     });
@@ -715,8 +697,8 @@
     $('btnMute').style.display = 'none';
     $('btnMute').textContent = '保持';
     $('mediaRow').style.display = 'none';
-    // 通话结束：画面停了，订阅状态还在（下次通话继续推），画面清成黑底
-    clearVideos();
+    // 通话结束：画面由 SDK 清空（监听 call.terminated），这里只清角标
+    resetStats();
   }
 
   function startTimer() {

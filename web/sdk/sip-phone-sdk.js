@@ -12,9 +12,10 @@
  *
  * 视频（REQ-VIDEO-009）：
  *   await sdk.dialVideo('1001');                     // 视频呼叫
- *   await sdk.subscribeVideo({local: true, remote: true});   // 订阅视频画面
- *   const r = sdk.createVideoRenderer(document.getElementById('v'));
- *   sdk.on('video.frame', (f) => { if (f.channel === 'remote') r.render(f.blob); });
+ *   await sdk.subscribeVideo({                       // 订阅并把画面渲染到 <video>
+ *     remote: document.getElementById('remoteVideo'),  // 必传
+ *     local:  document.getElementById('localVideo')    // 可选（不传 = 不订阅本地回显）
+ *   });
  *
  * 协议详见 docs/ws-protocol.md。
  */
@@ -50,6 +51,8 @@
       this._seq = 0;                 // 请求 ID 自增
       this._pending = new Map();     // id -> { resolve, reject }
       this._handlers = new Map();    // event -> Set<fn>
+      this._renderers = {};          // channel -> VideoRenderer（订阅视频时绑定）
+      this._videoRouted = false;     // 帧路由与生命周期清理是否已安装
       this._ws = null;
       this._closed = false;          // 用户主动关闭，不再重连
       this._connected = false;
@@ -294,56 +297,70 @@
 
 
     /**
-     * 订阅视频画面（REQ-VIDEO-009）。订阅期间软电话**不再显示视频窗口**，
-     * 画面以 JPEG 帧经 WS 二进制消息推来，见 video.frame 事件。
+     * 订阅视频画面（REQ-VIDEO-009）。**SDK 自己把画面渲染到传入的 <video>**，
+     * 页面不必处理 video.frame、也不用建渲染器。
      *
-     * **订阅必定包含远端画面**：软电话强制订阅远端（`remote` 传 false 也会被忽略），
-     * `local` 只表示要不要本地画面。
+     *   await sdk.subscribeVideo({
+     *     remote: document.getElementById('remoteVideo'),  // 必传
+     *     local:  document.getElementById('localVideo'),   // 可选：不传 = 不订阅本地回显
+     *     fps: 30, quality: 75,                            // 可选：两路共用的参数
+     *     onStats: (channel, stats) => { ... }             // 可选：每秒回调一次
+     *   });
      *
+     * 每条通道也可以写成**带参数的对象**，两路各要各的（本地回显通常小一号）：
+     *   remote: { el: remoteVideo, maxWidth: 640, maxHeight: 480, fps: 30, quality: 75 }
+     * maxWidth/maxHeight 不传时直接取 <video> 元素当前的显示尺寸。
+     *
+     * **订阅必定包含远端画面**（软电话强制）；订阅期间软电话不再显示视频窗口，
+     * 关闭视频/挂断/退订时 SDK 会把画面清成黑底。
      * 参数越界会被软电话钳制到合法范围（返回值里是生效值）。
-     * @param {{local?: boolean, remote?: boolean, maxWidth?: number, maxHeight?: number,
-     *          fps?: number, quality?: number}} [options]
-     *        local 默认 true；maxWidth/maxHeight 默认 640×640，
-     *        fps 默认 30（上限 30），quality 默认 75
-     * @returns {Promise<{local: boolean, remote: boolean, maxWidth: number, maxHeight: number,
-     *                    fps: number, quality: number, call: Object|null}>}
+     *
+     * @param {{remote: (HTMLVideoElement|Object), local?: (HTMLVideoElement|Object),
+     *          maxWidth?: number, maxHeight?: number, fps?: number, quality?: number,
+     *          onStats?: function}} options
+     * @returns {Promise<{remote: Object, local?: Object, call: Object|null}>}
      */
     subscribeVideo(options) {
       options = options || {};
-      const params = {
-        // 远端画面恒订阅（软电话强制，见下），本地画面可选、默认订阅
-        local: options.local !== undefined ? !!options.local : true,
-        remote: true
-      };
-      if (options.maxWidth) { params.maxWidth = options.maxWidth; }
-      if (options.maxHeight) { params.maxHeight = options.maxHeight; }
-      if (options.fps) { params.fps = options.fps; }
-      if (options.quality) { params.quality = options.quality; }
-      return this._request('video.subscribe', params);
+      const remote = pickChannel(options.remote);
+      if (!remote) {
+        return Promise.reject(new Error('subscribeVideo 需要 remote 视频元素'));
+      }
+      const local = pickChannel(options.local);
+      const params = { remote: channelParams(remote, options) };
+      if (local) {
+        params.local = channelParams(local, options);
+      }
+
+      return this._request('video.subscribe', params).then((res) => {
+        this._ensureVideoRouting();
+        this._bindVideoChannel('remote', remote, options);
+        if (local) {
+          this._bindVideoChannel('local', local, options);
+        }
+        return res;
+      });
     }
 
     /**
-     * 取消本连接的视频订阅（软电话恢复显示视频窗口）。
-     * @returns {Promise<{local: boolean, remote: boolean}>}
+     * 取消本连接的视频订阅（软电话恢复显示视频窗口），画面清成黑底。
+     * @returns {Promise<{remote: Object, local?: Object}>}
      */
     unsubscribeVideo() {
-      return this._request('video.unsubscribe', {});
+      return this._request('video.unsubscribe', {}).then((res) => {
+        this.clearVideo();
+        return res;
+      });
     }
 
     /**
-     * 创建视频渲染器：把 video.frame 的 JPEG 帧画进 canvas，再以
-     * canvas.captureStream() 作为 MediaStream 喂给页面上的 h5 <video>。
-     *
-     *   const renderer = sdk.createVideoRenderer(document.getElementById('remoteVideo'));
-     *   sdk.on('video.frame', (f) => { if (f.channel === 'remote') renderer.render(f.blob); });
-     *
-     * @param {HTMLVideoElement} videoEl 目标 <video>（自动设置 srcObject 并播放）
-     * @param {{fps?: number, onStats?: Function}} [options]
-     *        fps 画布流的目标帧率（默认 30）；onStats 每秒回调 {fps, kbps, width, height}
-     * @returns {VideoRenderer}
+     * 清空已订阅的画面（黑底）。关闭视频、挂断、退订时 SDK 会自动调用，
+     * 页面一般不用自己调。
      */
-    createVideoRenderer(videoEl, options) {
-      return new VideoRenderer(videoEl, options);
+    clearVideo() {
+      Object.keys(this._renderers).forEach((ch) => {
+        this._renderers[ch].clear();
+      });
     }
 
     /** 内部：发送请求并等待响应 */
@@ -419,6 +436,39 @@
       this._emit('*', { event: 'video.frame', data: data });
     }
 
+    /** 内部：帧路由 + 生命周期清理只装一次 */
+    _ensureVideoRouting() {
+      if (this._videoRouted) {
+        return;
+      }
+      this._videoRouted = true;
+      // 订阅的通道自动渲染（video.frame 事件仍会派发，供需要自定义显示的页面用）
+      this.on('video.frame', (f) => {
+        const r = this._renderers[f.channel];
+        if (r) { r.render(f.blob); }
+      });
+      // 关闭视频 / 挂断 / 呼叫失败：画面清成黑底，别定格在最后一帧
+      this.on('call.video', (data) => {
+        const v = data && data.call && data.call.video;
+        if (v && !v.enabled) { this.clearVideo(); }
+      });
+      this.on('call.terminated', () => this.clearVideo());
+      this.on('call.failed', () => this.clearVideo());
+    }
+
+    /** 内部：把一条通道绑定到 <video> 元素（含 onStats 回调） */
+    _bindVideoChannel(channel, co, top) {
+      const onStats = co.onStats || top.onStats || null;
+      const old = this._renderers[channel];
+      if (old && old.el !== co.el) {
+        old.destroy();
+      }
+      this._renderers[channel] = new VideoRenderer(co.el, {
+        fps: co.fps || top.fps,
+        onStats: onStats ? (stats) => onStats(channel, stats) : null
+      });
+    }
+
     /** 内部：启动心跳（每 25 秒发一条空消息，重置服务端读超时） */
     _startHeartbeat() {
       this._stopHeartbeat();
@@ -457,7 +507,44 @@
   }
 
   /**
-   * VideoRenderer 视频渲染器：把 JPEG 帧画进 canvas，再由 canvas.captureStream()
+   * pickChannel 归一化一条视频通道：允许直接传 <video> 元素，或传
+   * { el, maxWidth, maxHeight, fps, quality, onStats }。无效时返回 null。
+   */
+  function pickChannel(ch) {
+    if (!ch) {
+      return null;
+    }
+    if (ch.nodeType) {
+      return { el: ch }; // 直接给了 <video> 元素
+    }
+    if (typeof ch === 'object' && ch.el && ch.el.nodeType) {
+      return ch;
+    }
+    return null;
+  }
+
+  /**
+   * channelParams 算出某条通道要发给软电话的参数：
+   * 通道自己的值 → 顶层默认值 → <video> 元素当前显示尺寸。
+   * 都没有的字段就不传，由软电话取默认（640×640 / 30fps / 质量 75）。
+   */
+  function channelParams(co, top) {
+    const num = function (v) { return (typeof v === 'number' && v > 0) ? v : 0; };
+    const el = co.el || {};
+    const p = {};
+    const w = num(co.maxWidth) || num(top.maxWidth) || num(el.clientWidth) || num(el.getAttribute && el.getAttribute('width'));
+    const h = num(co.maxHeight) || num(top.maxHeight) || num(el.clientHeight) || num(el.getAttribute && el.getAttribute('height'));
+    if (w) { p.maxWidth = w; }
+    if (h) { p.maxHeight = h; }
+    const fps = num(co.fps) || num(top.fps);
+    if (fps) { p.fps = fps; }
+    const q = num(co.quality) || num(top.quality);
+    if (q) { p.quality = q; }
+    return p;
+  }
+
+  /**
+   * VideoRenderer 视频渲染器（SDK 内部使用）：把 JPEG 帧画进 canvas，再由 canvas.captureStream()
    * 产出 MediaStream 喂给 h5 <video>。
    *
    * 为什么不用 blob URL + <img>/MSE：需求要求用 h5 video 显示；而 MediaSource

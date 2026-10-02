@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"sync"
@@ -84,6 +85,19 @@ func (p videoParams) clamp() videoParams {
 	return p
 }
 
+// videoParamReq video.subscribe 里**单条通道**的画面参数（字段缺省 = 取默认值）。
+type videoParamReq struct {
+	MaxWidth  int `json:"maxWidth"`
+	MaxHeight int `json:"maxHeight"`
+	FPS       int `json:"fps"`
+	Quality   int `json:"quality"`
+}
+
+// params 转成内部参数（零值交由 clamp 补默认）。
+func (r *videoParamReq) params() videoParams {
+	return videoParams{MaxW: r.MaxWidth, MaxH: r.MaxHeight, FPS: r.FPS, Quality: r.Quality}
+}
+
 // clampInt v 为 0（未指定）时取默认值，否则钳制到 [lo, hi]。
 func clampInt(v, lo, hi, def int) int {
 	if v <= 0 {
@@ -106,11 +120,12 @@ type streamKey struct {
 
 // videoSub 一个连接的视频订阅（字段只在订阅登记时写入，之后由编码 goroutine 只读）。
 type videoSub struct {
-	c          *wsConn
-	wantLocal  bool
-	wantRemote bool
-	params     videoParams
-	seq        uint32 // 逐帧自增（只由编码 goroutine 修改）
+	c            *wsConn
+	wantLocal    bool
+	localParams  videoParams
+	wantRemote   bool
+	remoteParams videoParams
+	seq          uint32 // 逐帧自增（只由编码 goroutine 修改）
 }
 
 // frameMsg 待编码的一帧。
@@ -181,23 +196,28 @@ func (h *videoHub) hasSubscriber(local bool) bool {
 	return false
 }
 
-// Subscribe 登记（或更新）一个连接的视频订阅，返回生效参数。
+// Subscribe 登记（或更新）一个连接的视频订阅，返回两条通道的生效参数。
 //
 // **订阅必定包含远端画面**（用户明确要求）：远端恒为订阅，`local` 只表示
 // 要不要本地画面。否则会出现"只订阅本地 → 桌面窗口被隐藏、远端画面却没人看"
-// 的糊涂状态。
-func (h *videoHub) Subscribe(c *wsConn, local bool, p videoParams) videoParams {
-	p = p.clamp()
+// 的糊涂状态。两条通道各自带参数（本地回显通常要小一号）。
+func (h *videoHub) Subscribe(c *wsConn, local bool, localP, remoteP videoParams) (videoParams, videoParams) {
+	remoteP = remoteP.clamp()
+	localP = localP.clamp()
 	h.mu.Lock()
-	h.subs[c.id] = &videoSub{c: c, wantLocal: local, wantRemote: true, params: p}
+	h.subs[c.id] = &videoSub{
+		c: c, wantLocal: local, localParams: localP,
+		wantRemote: true, remoteParams: remoteP,
+	}
 	h.mu.Unlock()
 
 	// 通知核心层：网页在看画面 → 软电话隐藏视频窗口（REQ-VIDEO-009）
 	h.app.SetWebVideoViewer(c.id, local, true)
 	h.startOnce.Do(func() { go h.loop() })
 	logx.Logger().Info("网页订阅视频", "id", c.id, "local", local,
-		"maxWidth", p.MaxW, "maxHeight", p.MaxH, "fps", p.FPS, "quality", p.Quality)
-	return p
+		"remote", fmt.Sprintf("%dx%d@%dfps q%d", remoteP.MaxW, remoteP.MaxH, remoteP.FPS, remoteP.Quality),
+		"localParams", fmt.Sprintf("%dx%d@%dfps q%d", localP.MaxW, localP.MaxH, localP.FPS, localP.Quality))
+	return localP, remoteP
 }
 
 // Unsubscribe 取消该连接的全部视频订阅。
@@ -227,10 +247,19 @@ func (h *videoHub) sendFrame(m frameMsg) {
 	h.mu.RLock()
 	groups := make(map[videoParams][]*videoSub, 2)
 	for _, s := range h.subs {
-		if (m.local && !s.wantLocal) || (!m.local && !s.wantRemote) {
-			continue
+		var p videoParams
+		if m.local {
+			if !s.wantLocal {
+				continue
+			}
+			p = s.localParams // 本地回显与远端画面各用各自的参数
+		} else {
+			if !s.wantRemote {
+				continue
+			}
+			p = s.remoteParams
 		}
-		groups[s.params] = append(groups[s.params], s)
+		groups[p] = append(groups[p], s)
 	}
 	h.mu.RUnlock()
 	if len(groups) == 0 {
@@ -238,7 +267,7 @@ func (h *videoHub) sendFrame(m frameMsg) {
 	}
 
 	for p, subs := range groups {
-		key := streamKey{local: m.local, params: p}
+		key := streamKey{local: m.local, params: p} // 同参数只编码一次
 		if last, ok := h.lastSent[key]; ok && now.Sub(last) < time.Second/time.Duration(p.FPS) {
 			continue // 限流：本组还没到下一帧时间
 		}

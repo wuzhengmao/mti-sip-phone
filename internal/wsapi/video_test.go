@@ -47,6 +47,14 @@ func subscribeVideo(t *testing.T, conn *websocket.Conn, params string) (Message,
 	return resp, ev
 }
 
+// channelParams 取响应里某条通道的生效参数（不存在时返回 nil）。
+func channelParams(t *testing.T, resp Message, channel string) map[string]any {
+	t.Helper()
+	data, _ := resp.Data.(map[string]any)
+	p, _ := data[channel].(map[string]any)
+	return p
+}
+
 // TestVideoSubscribeFrames 订阅 → 帧以二进制推送（通道/序号/JPEG、按参数缩放）
 // → 退订后不再推帧。
 func TestVideoSubscribeFrames(t *testing.T) {
@@ -54,12 +62,16 @@ func TestVideoSubscribeFrames(t *testing.T) {
 	conn := dialWS(t, ts.URL)
 	waitEvent(t, conn, "system.state")
 
-	// 订阅必含远端：即使请求里 remote=false（或干脆没写），生效值也是 true
-	resp, ev := subscribeVideo(t, conn, `{"remote":false,"maxWidth":100,"maxHeight":100,"fps":30,"quality":80}`)
+	// 订阅必含远端：即使请求里不写 remote，远端照样用默认参数订阅
+	resp, ev := subscribeVideo(t, conn, `{"remote":{"maxWidth":100,"maxHeight":100,"fps":30,"quality":80}}`)
 	// 生效参数回显
-	data, _ := resp.Data.(map[string]any)
-	if data["maxWidth"] != float64(100) || data["maxHeight"] != float64(100) || data["remote"] != true {
-		t.Fatalf("订阅响应参数不符: %+v", data)
+	if p := channelParams(t, resp, "remote"); p == nil ||
+		p["maxWidth"] != float64(100) || p["maxHeight"] != float64(100) ||
+		p["fps"] != float64(30) || p["quality"] != float64(80) {
+		t.Fatalf("订阅响应参数不符: %+v", resp.Data)
+	}
+	if p := channelParams(t, resp, "local"); p != nil {
+		t.Fatalf("未传 local 时不该订阅本地画面: %+v", p)
 	}
 	// video.web 事件：有网页在看画面（界面据此隐藏视频窗口）
 	webData, _ := ev.Data.(map[string]any)
@@ -102,27 +114,49 @@ func TestVideoSubscribeFrames(t *testing.T) {
 	}
 }
 
-// TestVideoSubscribeClampAndLocal 参数钳制、本地通道、空参数也能订阅。
+// TestVideoSubscribeClampAndLocal 参数钳制、本地通道、两通道分开设置、空参数。
 func TestVideoSubscribeClampAndLocal(t *testing.T) {
 	ts, app := newTestServer(t)
 	conn := dialWS(t, ts.URL)
 	waitEvent(t, conn, "system.state")
 
-	// 越界参数：maxWidth 10 → 64，fps 999 → 30，quality 1 → 30
-	resp, _ := subscribeVideo(t, conn, `{"local":true,"maxWidth":10,"maxHeight":99999,"fps":999,"quality":1}`)
-	data, _ := resp.Data.(map[string]any)
-	if data["maxWidth"] != float64(64) || data["maxHeight"] != float64(1920) ||
-		data["fps"] != float64(30) || data["quality"] != float64(30) {
-		t.Fatalf("参数钳制不符: %+v", data)
+	// 越界参数：maxWidth 10 → 64，maxHeight 99999 → 1920，fps 999 → 30，quality 1 → 30
+	resp, _ := subscribeVideo(t, conn,
+		`{"remote":{"maxWidth":10,"maxHeight":99999,"fps":999,"quality":1}}`)
+	if p := channelParams(t, resp, "remote"); p == nil ||
+		p["maxWidth"] != float64(64) || p["maxHeight"] != float64(1920) ||
+		p["fps"] != float64(30) || p["quality"] != float64(30) {
+		t.Fatalf("参数钳制不符: %+v", resp.Data)
 	}
 
-	// 本地通道的帧：通道字节应为 2
-	app.VideoFrameSink().OnVideoFrame("call-1", true, image.NewRGBA(image.Rect(0, 0, 64, 48)))
-	if frame := readBinary(t, conn); frame[0] != frameChannelLocal {
+	// 两通道各带各的参数（本地回显小一号）
+	resp, _ = subscribeVideo(t, conn,
+		`{"remote":{"maxWidth":640,"maxHeight":480,"fps":30},"local":{"maxWidth":160,"maxHeight":120,"fps":10}}`)
+	remote := channelParams(t, resp, "remote")
+	local := channelParams(t, resp, "local")
+	if remote["maxWidth"] != float64(640) || remote["fps"] != float64(30) {
+		t.Fatalf("远端参数不符: %+v", remote)
+	}
+	if local == nil || local["maxWidth"] != float64(160) || local["maxHeight"] != float64(120) ||
+		local["fps"] != float64(10) {
+		t.Fatalf("本地参数不符: %+v", local)
+	}
+
+	// 本地通道的帧：通道字节应为 2，且按本地参数（160×120）缩放
+	app.VideoFrameSink().OnVideoFrame("call-1", true, image.NewRGBA(image.Rect(0, 0, 640, 480)))
+	frame := readBinary(t, conn)
+	if frame[0] != frameChannelLocal {
 		t.Fatalf("通道字节 = %d，期望本地 %d", frame[0], frameChannelLocal)
 	}
+	img, err := jpeg.Decode(bytes.NewReader(frame[5:]))
+	if err != nil {
+		t.Fatalf("JPEG 解码失败: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != 160 || b.Dy() != 120 {
+		t.Fatalf("本地画面应按本地参数缩放到 160×120，实际 %d×%d", b.Dx(), b.Dy())
+	}
 
-	// 空参数：等价于「只看远端」，订阅成功且 remote 生效值为 true
+	// 空参数：等价于「只看远端」，用默认参数
 	sendRequest(t, conn, Message{
 		ID:     json.RawMessage("3"),
 		Method: MethodVideoSubscribe,
@@ -132,9 +166,11 @@ func TestVideoSubscribeClampAndLocal(t *testing.T) {
 	if resp.OK == nil || !*resp.OK {
 		t.Fatalf("空参数订阅应成功（默认只看远端），实际: %+v", resp)
 	}
-	data, _ = resp.Data.(map[string]any)
-	if data["remote"] != true || data["local"] != false {
-		t.Fatalf("空参数订阅应只订阅远端: %+v", data)
+	if p := channelParams(t, resp, "remote"); p == nil || p["maxWidth"] != float64(640) {
+		t.Fatalf("空参数应用默认值: %+v", resp.Data)
+	}
+	if p := channelParams(t, resp, "local"); p != nil {
+		t.Fatalf("空参数不该订阅本地画面: %+v", p)
 	}
 }
 
@@ -144,7 +180,7 @@ func TestVideoWebEventOnDisconnect(t *testing.T) {
 	conn := dialWS(t, ts.URL)
 	waitEvent(t, conn, "system.state")
 
-	subscribeVideo(t, conn, `{"remote":true}`)
+	subscribeVideo(t, conn, `{"remote":{}}`)
 	// 另开一条连接观察广播事件
 	observer := dialWS(t, ts.URL)
 	waitEvent(t, observer, "system.state")

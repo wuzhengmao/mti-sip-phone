@@ -191,29 +191,35 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		resp = okMessage(msg.ID, map[string]any{"callId": p.CallID})
 
 	case MethodVideoSubscribe:
+		// 按通道给参数：{"remote":{...}} 必订（缺省用默认参数），
+		// {"local":{...}} 可选——不传 local 就是不订阅本地回显。
+		// 两条通道可以各要各的分辨率/帧率/质量（本地回显通常小一号）。
 		var p struct {
-			Local     bool `json:"local"`  // 是否同时订阅本地画面（可选）
-			Remote    bool `json:"remote"` // 保留字段：**恒为 true**（订阅必含远端画面）
-			MaxWidth  int  `json:"maxWidth"`
-			MaxHeight int  `json:"maxHeight"`
-			FPS       int  `json:"fps"`
-			Quality   int  `json:"quality"`
+			Remote *videoParamReq `json:"remote"`
+			Local  *videoParamReq `json:"local"`
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil {
 			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("参数格式错误"))
 			break
 		}
+		var localP, remoteP videoParams
+		if p.Local != nil {
+			localP = p.Local.params()
+		}
+		if p.Remote != nil {
+			remoteP = p.Remote.params()
+		}
 		// 越界参数不报错，钳制到合法范围（返回生效值）
-		eff := s.video.Subscribe(c, p.Local, videoParams{
-			MaxW: p.MaxWidth, MaxH: p.MaxHeight, FPS: p.FPS, Quality: p.Quality,
-		})
-		resp = okMessage(msg.ID, map[string]any{
-			"local": p.Local, "remote": true,
-			"maxWidth": eff.MaxW, "maxHeight": eff.MaxH,
-			"fps": eff.FPS, "quality": eff.Quality,
+		effLocal, effRemote := s.video.Subscribe(c, p.Local != nil, localP, remoteP)
+		data := map[string]any{
+			"remote": effRemote,
 			// 当前通话快照：网页可立刻显示视频状态，无需等 call.video 事件
 			"call": activeCall(s.app),
-		})
+		}
+		if p.Local != nil {
+			data["local"] = effLocal
+		}
+		resp = okMessage(msg.ID, data)
 
 	case MethodVideoUnsubscribe:
 		s.video.Unsubscribe(c)
