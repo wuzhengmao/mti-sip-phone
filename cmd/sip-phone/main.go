@@ -181,6 +181,8 @@ func main() {
 	if cfg.Audio.RingSpeakerID != "" {
 		audioMgr.SetRingSpeaker(cfg.Audio.RingSpeakerID)
 	}
+	// 视频配置（REQ-VIDEO-002/005）：摄像头选择与采集参数在通话建立时生效
+	phone.SetVideoConfig(cfg.Video)
 	app.SetTel(tel)
 	app.Start(ctx)
 	defer func() { _ = tel.Close() }()

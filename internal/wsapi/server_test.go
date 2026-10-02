@@ -56,6 +56,22 @@ func (s *stubTel) AudioDevices() ([]core.AudioDevice, []core.AudioDevice) {
 }
 func (s *stubTel) Close() error { return nil }
 
+// ---- 视频（本桩按「未启用视频的构建」行为实现）----
+
+func (s *stubTel) VideoSupported() bool { return false }
+func (s *stubTel) DialVideo(ctx context.Context, target string) (string, error) {
+	return "", core.ErrVideoUnsupported
+}
+func (s *stubTel) AnswerVideo(callID string) error        { return core.ErrVideoUnsupported }
+func (s *stubTel) IncomingHasVideo(callID string) bool    { return false }
+func (s *stubTel) VideoActive(callID string) bool         { return false }
+func (s *stubTel) SetVideoEnabled(callID string, on bool) error {
+	return core.ErrVideoUnsupported
+}
+func (s *stubTel) SetVideoPreview(callID string, on bool) error { return core.ErrVideoUnsupported }
+func (s *stubTel) SetCamera(deviceID string) error            { return core.ErrVideoUnsupported }
+func (s *stubTel) VideoDevices() []core.VideoDevice           { return nil }
+
 // newTestServer 构造测试用服务：stub 电话层 + 真实更新器 + httptest 服务。
 // 更新器指向临时目录下的假 exe 路径（只做参数校验与状态机，不触发下载）。
 func newTestServer(t *testing.T) (*httptest.Server, *core.App) {

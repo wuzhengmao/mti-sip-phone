@@ -52,6 +52,26 @@ type AudioConfig struct {
 	RingSpeakerID string `json:"ringSpeakerId"` // 振铃音专用扬声器 ID，空 = 系统默认
 }
 
+// 摄像头禁用标志：CameraID 取该值时表示不使用摄像头。
+// 语义（REQ-VIDEO-005）：发起视频呼叫不发送本地视频，来电也不提供「视频接听」，
+// 但**仍可接听/接收对方的视频**（SDP 方向为 recvonly）。
+const CameraDisabled = "disabled"
+
+// VideoConfig 视频配置。
+type VideoConfig struct {
+	// CameraID 摄像头设备 ID；空 = 系统默认设备；CameraDisabled = 禁用。
+	// Windows 侧驱动 ID 每次启动都可能变化，同时保存 CameraName 做兜底匹配。
+	CameraID   string `json:"cameraId"`
+	CameraName string `json:"cameraName"`
+	Width      int    `json:"width"`       // 采集宽，默认 640
+	Height     int    `json:"height"`      // 采集高，默认 480
+	FPS        int    `json:"fps"`         // 帧率，默认 25
+	BitrateKbps int   `json:"bitrateKbps"` // 码率（kbps），默认 512
+}
+
+// CameraUsable 摄像头是否可用（未被禁用）。
+func (v VideoConfig) CameraUsable() bool { return v.CameraID != CameraDisabled }
+
 // UIConfig 界面配置。
 type UIConfig struct {
 	IncomingAlwaysOnTop bool `json:"incomingAlwaysOnTop"` // 来电窗口置顶
@@ -65,6 +85,7 @@ type Config struct {
 	WS         WSConfig    `json:"ws"`
 	Log        LogConfig   `json:"log"`
 	Audio      AudioConfig `json:"audio"`
+	Video      VideoConfig `json:"video"`
 	UI         UIConfig    `json:"ui"`
 	AutoStart  bool        `json:"autoStart"`  // 开机自动启动，默认 true
 	RecentDial []string    `json:"recentDial"` // 最近呼叫号码（去重，最多 5 个，供拨号下拉）
@@ -89,6 +110,13 @@ func Default() *Config {
 		Log: LogConfig{
 			Level: "info",
 			File:  true,
+		},
+		Video: VideoConfig{
+			Width:   640,
+			Height:  480,
+			FPS:     25,
+			// 640×480@25 下 512kbps 偏紧，观感发糊；默认给 1Mbps
+			BitrateKbps: 1024,
 		},
 		UI: UIConfig{
 			IncomingAlwaysOnTop: true,
@@ -156,6 +184,21 @@ func Load(path string) (*Config, error) {
 	// 旧配置兼容：file 与 console 均未设置时按默认（写文件）
 	if !cfg.Log.File && !cfg.Log.Console {
 		cfg.Log.File = true
+	}
+	// 视频默认值（1.0.3 之前没有 video 段）
+	if cfg.Video.Width <= 0 {
+		cfg.Video.Width = 640
+	}
+	if cfg.Video.Height <= 0 {
+		cfg.Video.Height = 480
+	}
+	if cfg.Video.FPS <= 0 {
+		cfg.Video.FPS = 25
+	}
+	// 视频码率：<=0 补默认；恰好等于旧默认值 512 的也一并升级到 1Mbps
+	//（此前没有界面可设置码率，配置里出现 512 只可能是旧默认值）
+	if cfg.Video.BitrateKbps <= 0 || cfg.Video.BitrateKbps == 512 {
+		cfg.Video.BitrateKbps = 1024
 	}
 	return cfg, nil
 }

@@ -23,10 +23,16 @@ type testSink struct {
 	calls  []string
 }
 
-func (s *testSink) OnIncoming(callID, remote, remoteName string) {
+func (s *testSink) OnIncoming(callID, remote, remoteName string, hasVideo bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, "incoming:"+callID)
+}
+
+func (s *testSink) OnVideoState(callID string, st core.VideoState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, "video:"+callID)
 }
 func (s *testSink) OnRinging(callID string) {
 	s.mu.Lock()

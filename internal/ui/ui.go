@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -109,6 +110,7 @@ type App struct {
 	activeCall   *core.Call
 	uiState      int // uiIdle / uiDialing / uiRinging / uiInCall
 	savedNumber  string
+	ringHasVideo bool // 本次来电是否含视频（决定是否显示「视频接听」，REQ-VIDEO-004）
 	callStartAt  time.Time
 	timerStop    chan struct{}
 	regState     string
@@ -146,6 +148,30 @@ type App struct {
 	updatePopupPending bool              // 提示窗被通话/通话中收到通知挂起：稍后补弹
 	updShown           bool              // 提示窗当前是否显示（Fyne 无 Visible 查询）
 
+	// ---- 视频（REQ-VIDEO-*）----
+	videoCallBtn   *compactButton // 主窗体「视频呼叫」按钮（需求 3）
+	videoAnswerBtn *compactButton // 来电弹窗「视频接听」按钮（需求 4）
+	videoBtn       *compactButton // 通话面板「关闭视频」开关（需求 8）
+	camSelect      *widget.Select // 设置页摄像头选择（需求 2）
+	camIDs         map[string]string
+
+	videoW          fyne.Window   // 视频窗口（懒创建）
+	videoSurface    *videoSurface // 视频画面 + 本地回显叠加
+	videoOn         bool          // 需求 8 的视频总开关（会话内记忆）
+	previewOn       bool          // 需求 7 的本地回显开关（只影响本地显示，不影响推送）
+	callHasVideo    bool          // 本次通话视频已协商成功（决定面板是否显示视频开关）
+	callSending     bool          // 本次通话要推送本地视频（决定回显区是否显示）
+	remoteHasVideo  bool          // 已收到过对端画面（决定视频窗口是否显示）
+	localVideoEver  bool          // 已收到过本地帧（仅用于日志）
+	videoSized      bool          // 窗口尺寸是否已按对端比例初始化
+	videoFullscreen bool
+
+	// 帧投递：媒体层 goroutine 写、主线程读（合并刷新，见 ui_video.go）
+	remoteFrame   atomic.Pointer[frameRef]
+	localFrame    atomic.Pointer[frameRef]
+	remotePending atomic.Bool
+	localPending  atomic.Bool
+
 	// loadingForm 表单回填标志：回填期间屏蔽 OnChanged 自动保存，避免
 	// 初始化把旧值覆盖进配置
 	loadingForm bool
@@ -173,10 +199,16 @@ func New(c *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath strin
 		regState:  "unregistered",
 		speakerOn: true, // 扬声器默认开（REQ-UI-023）
 		micOn:     true, // 麦克风默认开（REQ-UI-023）
+		// 视频：默认开（会话内记忆，不持久化）
+		videoOn:   true,
+		previewOn: true,
 	}
 	if desk, ok := ui.fyne.(desktop.App); ok {
 		ui.desk = desk
 	}
+	// 注册视频帧出口（REQ-VIDEO-006/007）：帧走这条直连通道，
+	// **不走事件总线**——总线容量 64、满即丢，视频帧会把它打满。
+	c.SetVideoSink(ui)
 	return ui
 }
 
@@ -343,13 +375,24 @@ func (a *App) buildDialPage() {
 	// Success 按钮文字为白色、看不清），黑色文字与黑色图标一致
 	//（REQ-UI-024 修订）
 	a.callBtn = newCompactTextButton("呼叫", IconPlayBlack, colorSuccessGreen, colorIconBlack, a.onCallButton)
+	// REQ-VIDEO-003：呼叫按钮缩小，右侧加一个无文字的视频呼叫按钮
+	a.callBtn.SetMinSize(0, dialCallButtonHeight)
+	a.videoCallBtn = newCompactButton(IconVideoCall, colorSuccessGreen, dialCallButtonHeight, a.onVideoCallButton)
 
 	// 呼叫按钮上方一行：版本更新提示（REQ-UPD-003，默认隐藏）
 	a.buildUpdateBar()
 
+	// 呼叫按钮占满剩余宽度，视频按钮固定宽停在右侧
+	callRow := container.NewBorder(nil, nil, nil, a.videoCallBtn, a.callBtn)
+	if !a.core.VideoSupported() {
+		// 未启用视频的构建：隐藏视频入口，呼叫按钮恢复占满
+		a.videoCallBtn.Hide()
+		callRow = container.NewBorder(nil, nil, nil, nil, a.callBtn)
+	}
+
 	a.dialPage = container.NewBorder(
 		topBar,
-		container.NewVBox(a.updateBar, a.callBtn),
+		container.NewVBox(a.updateBar, callRow),
 		nil, nil,
 		container.NewVBox(
 			inputRow,
@@ -443,6 +486,21 @@ func (a *App) buildSettingsPage() {
 		refreshDevicesBtn,
 	)
 
+	// ---- 视频设备（REQ-VIDEO-002/005）----
+	a.camSelect = widget.NewSelect([]string{}, nil)
+	a.camIDs = make(map[string]string)
+	refreshCamBtn := widget.NewButtonWithIcon("刷新设备", theme.ViewRefreshIcon(), a.refreshDevices)
+	// 说明文字必须开自动折行：主窗体是固定宽度，标签的 MinSize 按整行文字宽度
+	// 计算会把窗口撑宽（与「网页接入」的 wsHint 同样处理）。
+	camHint := widget.NewLabel("选择「禁用」后：发起视频呼叫不发送本地视频，来电也不显示「视频接听」按钮，但仍可查看对方的视频")
+	camHint.Wrapping = fyne.TextWrapWord
+	videoCard := container.NewVBox(
+		widget.NewLabelWithStyle("视频设备", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		formItem("摄像头", a.camSelect),
+		camHint,
+		refreshCamBtn,
+	)
+
 	// ---- 日志配置（REQ-LOG-006）----
 	a.logFileCheck = widget.NewCheck("记录日志到文件", nil)
 	a.sipTraceCheck = widget.NewCheck("记录 SIP 信令", a.saveSIPTrace)
@@ -490,6 +548,7 @@ func (a *App) buildSettingsPage() {
 		generalCard, widget.NewSeparator(),
 		accCard, widget.NewSeparator(),
 		audioCard, widget.NewSeparator(),
+		videoCard, widget.NewSeparator(),
 		logCard, widget.NewSeparator(),
 		wsCard,
 	)
@@ -517,6 +576,7 @@ func (a *App) buildSettingsPage() {
 	a.loadAccountIntoForm()
 	a.loadLogConfigIntoForm()
 	a.refreshDevices()
+	a.refreshCameras()
 }
 
 // newFormEntry 表单输入框：关闭自身滚动（滚轮事件传递给外层 VScroll）。
@@ -646,6 +706,46 @@ func (a *App) onCallButton() {
 	a.refreshRecentDials()
 }
 
+// onVideoCallButton 视频呼叫按钮（REQ-VIDEO-003）：无通话时发起视频呼叫，
+// 呼叫/通话中与呼叫按钮一致地挂断。
+func (a *App) onVideoCallButton() {
+	if a.activeCallID != "" {
+		_ = a.core.Hangup(a.activeCallID)
+		return
+	}
+	target := strings.TrimSpace(a.dialSelect.Text)
+	if target == "" {
+		a.showInfo("提示", "请输入号码")
+		return
+	}
+	callID, err := a.core.DialVideo(context.Background(), target)
+	if err != nil {
+		a.showError(err)
+		return
+	}
+	a.activeCallID = callID
+	a.activeCall = &core.Call{
+		ID:        callID,
+		Direction: "outgoing",
+		Remote:    target,
+		State:     core.CallRinging,
+		HasVideo:  true,
+	}
+	a.savedNumber = target
+	a.videoOn = true
+	a.previewOn = true
+	a.setCallUI(uiDialing, target)
+	a.refreshRecentDials()
+}
+
+// cameraUsable 摄像头当前是否可用于发送本地视频（REQ-VIDEO-005）。
+func (a *App) cameraUsable() bool {
+	if !a.core.VideoSupported() {
+		return false
+	}
+	return a.cfg.Video.CameraUsable()
+}
+
 // setCallUI 通话状态机（用户重新设计，REQ-UI-008 修订）：
 //   - uiIdle：通话面板隐藏；主窗口仅当通话前可见时恢复显示（通话前
 //     已隐藏到托盘则保持隐藏——按用户反馈修订）
@@ -677,6 +777,9 @@ func (a *App) setCallUI(state int, remote string) {
 		}
 		a.setKeypadEnabled(true)
 		a.updateCallButton()
+		// 视频界面状态一并复位（视频窗口隐藏、帧缓冲清空、按钮复位）
+		a.ringHasVideo = false
+		a.resetVideoUI()
 		// 通话结束后不主动显示主窗体：仅当主窗体是被本次通话自动
 		// 隐藏（通话前可见）时恢复显示
 		if a.mainWasVisible {
@@ -912,10 +1015,46 @@ func (a *App) onEvent(ev core.Event) {
 			a.activeCallID = callID
 			a.activeCall = call
 			a.savedNumber = call.Remote
+			// REQ-VIDEO-004/005：对端带视频且摄像头可用时才显示「视频接听」
+			a.ringHasVideo = call.HasVideo
+			a.videoOn = true
+			a.previewOn = true
+			a.callHasVideo = false // 等 call.video 事件确认协商结果
+			a.callSending = false
+			a.remoteHasVideo = false
+			a.localVideoEver = false
+			a.videoSized = false
 			a.setCallUI(uiRinging, callRemoteName(call))
 			if a.audioMgr != nil {
 				a.audioMgr.PlayRing()
 			}
+		}
+
+	case "call.video":
+		// 视频状态变化（协商成功 / 开关切换 / 拿到对端分辨率）
+		if callID, call := callData(ev.Data); call != nil && callID == a.activeCallID {
+			a.activeCall = call
+			a.videoOn = call.Video.Enabled
+			a.previewOn = call.Video.PreviewOn
+			a.callHasVideo = call.Video.Negotiated
+			a.callSending = call.Video.Sending
+			a.applyVideoButton()
+			a.applyLocalVideoVisibility()
+			if a.callHasVideo {
+				// 协商成功就把窗口**对象**建好（但**不 Show**）：帧要先有落点才能
+				// 触发 remoteHasVideo，否则永远等不到"有内容"的那一刻——摄像头
+				// 禁用时 callSending=false，窗口又只能靠 remoteHasVideo 触发，
+				// 会形成死锁（表现为"远端画面收到了却没有视频窗口"）。
+				a.ensureVideoWindow()
+			}
+			// 窗口显隐由「有没有内容可显示」决定，见 wantVideoWindow：
+			// 只有音频（普通接听 / 对端无视频）时不留空窗口；
+			// 本端要推流且回显开着时即使摄像头打不开也显示黑底回显区。
+			a.syncVideoWindow()
+			// 不在这里重建面板行：call.video 可能早于 call.established 到达
+			//（呼出路径），此刻按"通话中"重建会显示错的按钮组。
+			// 视频开关的显隐由 call.established 时的 rebuildCallRows 按
+			// callHasVideo 决定，顺序上 call.video 一定先被处理。
 		}
 
 	case "call.dialing":
@@ -944,6 +1083,8 @@ func (a *App) onEvent(ev core.Event) {
 			a.applySessionAudioState()
 		}
 
+	case "call.video-established":
+		// 占位分支：视频窗口的显示由首帧到达驱动（renderVideoFrame）
 	case "call.established":
 		if callID, call := callData(ev.Data); call != nil {
 			a.activeCallID = callID
@@ -1265,6 +1406,9 @@ func openInFileManager(path string) error {
 // 枚举可能耗时（ALSA 会逐个探测设备），放到后台 goroutine 执行、结果
 // 回到主线程应用；音频后端尚未就绪时先显示占位，就绪后由 OnReady 再刷。
 func (a *App) refreshDevices() {
+	// 摄像头与音频设备共用两个「刷新设备」按钮，一并刷新
+	//（放在最前面，避免下面音频分支提前 return 时漏刷）
+	a.refreshCameras()
 	if a.audioMgr == nil {
 		a.applyDeviceLists(nil, nil, "音频后端不可用")
 		return
@@ -1373,6 +1517,106 @@ func (a *App) applyDeviceLists(mics, speakers []core.AudioDevice, placeholder st
 			a.ringSpeakerSelect.SetSelected(name)
 		}
 	}
+}
+
+// refreshCameras 后台枚举摄像头并回填下拉框（REQ-VIDEO-002）。
+// 与 refreshDevices 同样的模式：枚举可能耗时（V4L2 逐个探测 /
+// DirectShow 枚举），必须放到后台 goroutine，回主线程再更新控件。
+func (a *App) refreshCameras() {
+	if a.camSelect == nil {
+		return
+	}
+	if !a.core.VideoSupported() {
+		a.camSelect.Disable()
+		a.applyCameraList(nil, "此构建未启用视频")
+		return
+	}
+	go func() {
+		cams := a.core.VideoDevices()
+		fyne.Do(func() { a.applyCameraList(cams, "未检测到摄像头") })
+	}()
+}
+
+// applyCameraList 回填摄像头下拉框：列表首项为「系统默认」，末项为「禁用」。
+func (a *App) applyCameraList(cams []core.VideoDevice, placeholder string) {
+	names := []string{cameraDefaultLabel}
+	ids := map[string]string{cameraDefaultLabel: ""}
+	for _, c := range cams {
+		names = append(names, c.Name)
+		ids[c.Name] = c.ID
+	}
+	names = append(names, cameraDisabledLabel)
+	if len(cams) == 0 && placeholder != "" {
+		names = append(names, placeholder)
+	}
+	a.camSelect.Options = names
+	a.camIDs = ids
+	a.camSelect.OnChanged = func(name string) {
+		if a.loadingForm {
+			return
+		}
+		switch name {
+		case cameraDisabledLabel:
+			a.cfg.Video.CameraID = config.CameraDisabled
+			a.cfg.Video.CameraName = ""
+		case cameraDefaultLabel:
+			a.cfg.Video.CameraID = ""
+			a.cfg.Video.CameraName = ""
+		default:
+			id, ok := ids[name]
+			if !ok {
+				return
+			}
+			a.cfg.Video.CameraID = id
+			a.cfg.Video.CameraName = name
+		}
+		_ = a.core.SetCamera(a.cfg.Video.CameraID)
+		a.persistConfig()
+	}
+
+	// 回选：优先按名称（Windows 驱动 ID 每次启动都会变，名称才稳定）
+	a.loadingForm = true
+	defer func() { a.loadingForm = false }()
+	sel := cameraDefaultLabel
+	switch a.cfg.Video.CameraID {
+	case config.CameraDisabled:
+		sel = cameraDisabledLabel
+	case "":
+		sel = cameraDefaultLabel
+	default:
+		if a.cfg.Video.CameraName != "" {
+			for _, n := range names {
+				if n == a.cfg.Video.CameraName {
+					sel = n
+					break
+				}
+			}
+		}
+	}
+	a.camSelect.SetSelected(sel)
+}
+
+// cameraDefaultLabel / cameraDisabledLabel 摄像头下拉里的两个特殊项。
+const (
+	cameraDefaultLabel  = "系统默认"
+	cameraDisabledLabel = "禁用（不发送本地视频）"
+)
+
+// newBorderlessWindow 创建一个无边框窗口。
+//
+// 走 Fyne 的 splash 窗口（`desktop.Driver.CreateSplashWindow`）：它由 GLFW
+// 在**创建时**就按无边框建立（Win32 下是 WS_POPUP、frameRect 归零），GLFW 的
+// 几何计算始终自洽。**不要**改用"先建普通窗口再 Win32 改样式"——那会让 GLFW
+// 的边框缓存失准，Fyne 认为画布比真实客户区高出整条标题栏，内容被顶掉第一行。
+//
+// 非桌面驱动（如测试驱动）退化为普通窗口，功能不受影响。
+func (a *App) newBorderlessWindow(title string) fyne.Window {
+	if dd, ok := a.fyne.Driver().(desktop.Driver); ok {
+		w := dd.CreateSplashWindow()
+		w.SetTitle(title)
+		return w
+	}
+	return a.fyne.NewWindow(title)
 }
 
 // persistConfig 保存当前配置到磁盘。

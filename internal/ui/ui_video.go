@@ -1,0 +1,532 @@
+package ui
+
+import (
+	"fmt"
+	"image"
+	"sync/atomic"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/widget"
+
+	"mti-sip-phone/internal/logx"
+)
+
+// 视频窗口（REQ-VIDEO-006/007/008）。
+//
+// 渲染路径：媒体层解码出 *image.RGBA → core.VideoSink → 本文件 → 写入
+// canvas.Image.Image 并 Refresh()。走 canvas.Image（GL 纹理上传）而不是
+// canvas.Raster（逐像素生成函数），后者在大尺寸下每帧重算会明显掉帧。
+//
+// ⚠️ OnVideoFrame 在**媒体层 goroutine** 上调用，绝不能阻塞：这里只做
+// 「存最新帧 + 合并刷新」，真正的渲染经 fyne.Do 排到主线程；同一路流
+// 至多有一个刷新在途（CAS 合帧），避免把 Fyne 的事件队列打满。
+
+// frameRef 一帧的引用（含来源通话 ID，用于丢弃过期通话的帧）。
+type frameRef struct {
+	callID string
+	img    *image.RGBA
+}
+
+// previewScale 本地回显占视频窗口的比例（需求 7：1/3 宽高）。
+const previewScale = 3
+
+// previewLayout 本地回显叠加布局（需求 7）：**右上角**，2px 绿色描边，
+// 开关按钮贴在回显区右上角并留 previewGap 的间隙。回显隐藏时按钮**仍留在
+// 原位**——否则用户就再也打不开了。
+//
+// 回显区尺寸按**本地摄像头的宽高比**算（宽度取窗口 1/previewScale，高度按比例
+// 推），而不是取窗口的 1/3 宽高——后者与摄像头比例无关，画面会被
+// ImageFillContain 补出黑边（用户反馈）。
+//
+// objs[0]=画面 objs[1]=描边矩形 objs[2]=开关按钮（container.New 按序绘制，
+// 序号小的在下层，所以描边能盖在画面边缘上、按钮又盖在最上层）。
+type previewLayout struct{ s *videoSurface }
+
+func (previewLayout) MinSize([]fyne.CanvasObject) fyne.Size { return fyne.NewSize(0, 0) }
+
+// previewGap 回显区距窗口右上的留白。
+const previewGap = 2
+
+// previewBtnGap 回显开关按钮距窗口右上的留白（用户指定 4px）。
+const previewBtnGap = 4
+
+func (l previewLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	if len(objs) == 0 {
+		return
+	}
+	w := size.Width / previewScale
+	h := size.Height / previewScale
+	if l.s != nil && l.s.localW > 0 && l.s.localH > 0 {
+		h = w * float32(l.s.localH) / float32(l.s.localW)
+	}
+	x := size.Width - w - previewGap
+	y := float32(previewGap)
+	rect := fyne.NewPos(x, y)
+	sz := fyne.NewSize(w, h)
+	for i := 0; i < 2 && i < len(objs); i++ {
+		if objs[i] == nil || !objs[i].Visible() {
+			continue
+		}
+		objs[i].Move(rect)
+		objs[i].Resize(sz)
+	}
+	if len(objs) > 2 && objs[2] != nil {
+		btn := objs[2]
+		bs := btn.MinSize()
+		btn.Resize(bs)
+		btn.Move(fyne.NewPos(size.Width-bs.Width-previewBtnGap, previewBtnGap))
+	}
+}
+
+// previewBorderWidth 本地回显的绿色描边宽度（用户指定 2px）。
+const previewBorderWidth = 2
+
+// videoSurface 视频画面（远端）+ 本地回显叠加层 + 双击全屏。
+type videoSurface struct {
+	widget.BaseWidget
+	remote      *canvas.Image
+	local       *canvas.Image
+	border      *canvas.Rectangle
+	toggleBtn   *compactButton
+	onDoubleTap func()
+
+	// localW/localH 本地摄像头帧的尺寸，供 previewLayout 按宽高比排回显区
+	localW, localH int
+}
+
+func newVideoSurface(onDoubleTap func()) *videoSurface {
+	s := &videoSurface{onDoubleTap: onDoubleTap}
+	s.remote = canvas.NewImageFromImage(nil)
+	s.remote.FillMode = canvas.ImageFillContain
+	// 用平滑（双线性）而不是最近邻：视频窗口通常比源分辨率大，
+	// ImageScaleFastest 的最近邻放大观感就是"糊/有块"，是"清晰度不够"的直接来源。
+	// GL 路径下这只是个纹理过滤开关，开销可忽略。
+	s.remote.ScaleMode = canvas.ImageScaleSmooth
+	// 关键：把最小尺寸压到 1×1，否则 canvas.Image 会按图片尺寸撑大窗口，
+	// 用户拖动改变窗口大小也会被"内容最小尺寸"顶回去（与通话面板同样的坑）。
+	s.remote.SetMinSize(fyne.NewSize(1, 1))
+	s.remote.Hide()
+
+	s.local = canvas.NewImageFromImage(nil)
+	s.local.FillMode = canvas.ImageFillContain
+	s.local.ScaleMode = canvas.ImageScaleFastest
+	s.local.SetMinSize(fyne.NewSize(1, 1))
+	s.local.Hide()
+
+	// 回显区描边：透明填充 + 绿色描边，画在画面之上只露边框
+	s.border = canvas.NewRectangle(nil)
+	s.border.FillColor = nil
+	s.border.StrokeColor = colorPreviewBorder
+	s.border.StrokeWidth = previewBorderWidth
+	s.border.Hide()
+
+	s.toggleBtn = newCompactButton(IconVideoOff, colorHoldBlue, videoToggleButtonSize, nil)
+	s.ExtendBaseWidget(s)
+	return s
+}
+
+// colorPreviewBorder 本地回显描边色（绿色，与接听/成功色一致以保证观感统一）。
+var colorPreviewBorder = colorSuccessGreen
+
+func (s *videoSurface) CreateRenderer() fyne.WidgetRenderer {
+	overlay := container.New(previewLayout{s: s}, s.local, s.border, s.toggleBtn)
+	return widget.NewSimpleRenderer(container.NewStack(s.remote, overlay))
+}
+
+func (s *videoSurface) Tapped(*fyne.PointEvent) {}
+
+// DoubleTapped 双击切换全屏（需求 6）。
+func (s *videoSurface) DoubleTapped(*fyne.PointEvent) {
+	if s.onDoubleTap != nil {
+		s.onDoubleTap()
+	}
+}
+
+// Cursor 视频画面区域用普通箭头——整块画面是个大控件，显示手型会误导
+// 用户以为整块可点。只有本地回显开关按钮（compactButton）才用手型光标。
+func (s *videoSurface) Cursor() desktop.Cursor { return desktop.DefaultCursor }
+
+// videoToggleButtonSize 回显开关按钮尺寸（比面板按钮略小，不压画面）。
+const videoToggleButtonSize = 28
+
+// --- App 侧 ---
+
+// ensureVideoWindow 懒创建视频窗口。
+func (a *App) ensureVideoWindow() {
+	if a.videoW != nil {
+		return
+	}
+	w := a.fyne.NewWindow(videoWindowTitle(""))
+	w.SetIcon(IconVideoGreen) // 摄像头图标（不继承应用的红色话机图标）
+	a.videoW = w
+	a.videoSurface = newVideoSurface(a.toggleVideoFullscreen)
+	a.videoSurface.toggleBtn.onTap = a.toggleLocalPreview
+	w.SetContent(a.videoSurface)
+	w.SetPadded(false)
+	// 默认尺寸同样按「优先原始尺寸、超屏则缩到 1/4」的规则算（首帧到达后
+	// applyVideoSize 会按对端分辨率重算）。
+	maxW, maxH := videoSizeLimits(w.Canvas().Scale())
+	dw, dh := videoFitSize(videoDefaultW, videoDefaultH, maxW, maxH)
+	w.Resize(fyne.NewSize(dw, dh))
+	// 关闭窗口 = 需求 8 的「关闭视频」（纯本地，不发 SIP 信令）
+	w.SetCloseIntercept(func() { a.setVideoEnabled(false) })
+	// 刻意**不置顶**（用户要求）：视频窗口要能和别的窗口正常叠放，
+	// 且它摆在通话面板上方不与之重叠，不需要靠置顶保证可见。
+}
+
+// videoDefaultW/H 视频窗口默认尺寸（拿到对端分辨率后按比例调整）。
+const (
+	videoDefaultW = 480
+	videoDefaultH = 360
+)
+
+// wantVideoWindow 是否**有内容可显示**，据此决定视频窗口显隐。
+//
+// 规则（用户要求）：
+//   - 有远端画面 → 显示；
+//   - 本端要推流且回显开着 → 显示（此时即使摄像头打不开也是黑底回显区，
+//     而不是"窗口不出现"，用户要的是这个）；
+//   - 只有音频（普通接听、对端没视频）→ **不显示**，不留一个空窗口。
+func (a *App) wantVideoWindow() bool {
+	if !a.videoOn || a.activeCallID == "" || !a.callHasVideo {
+		return false
+	}
+	return a.remoteHasVideo || (a.callSending && a.previewOn)
+}
+
+// showVideoWindow 显示视频窗口（需求 6）。
+func (a *App) showVideoWindow() {
+	if !a.wantVideoWindow() {
+		return
+	}
+	a.ensureVideoWindow()
+	name := a.activeCallID
+	if a.activeCall != nil {
+		name = callRemoteName(a.activeCall)
+	}
+	a.videoW.SetTitle(videoWindowTitle(name))
+	a.videoW.Show()
+	// 摆在通话面板正上方、右边缘对齐（保留标题栏，可拖动）。
+	// 只移动不改尺寸；首帧到达后 applyVideoSize 会带尺寸再摆一次。
+	placeVideoWindow(a.videoW)
+}
+
+// syncVideoWindow 按「当前有没有内容」决定窗口显隐（各处状态变化后统一调用）。
+func (a *App) syncVideoWindow() {
+	if a.wantVideoWindow() {
+		a.showVideoWindow()
+	} else {
+		a.hideVideoWindow()
+	}
+}
+
+// hideVideoWindow 隐藏视频窗口（挂断、需求 8 关闭视频、无内容可显示时调用）。
+func (a *App) hideVideoWindow() {
+	if a.videoW == nil {
+		return
+	}
+	if a.videoFullscreen {
+		a.setVideoFullscreen(false)
+	}
+	a.videoW.Hide()
+	a.videoSurface.remote.Hide()
+	a.videoSurface.local.Hide()
+	a.videoSurface.border.Hide()
+	a.videoSurface.remote.Refresh()
+	a.videoSurface.local.Refresh()
+	a.videoSurface.border.Refresh()
+	a.videoSized = false // 下一通电话重新按对端分辨率定尺寸
+}
+
+// setVideoEnabled 需求 8：关闭/恢复视频。
+func (a *App) setVideoEnabled(on bool) {
+	if a.activeCallID == "" {
+		return
+	}
+	if err := a.core.SetVideoEnabled(a.activeCallID, on); err != nil {
+		logx.Logger().Warn("切换视频开关失败", "err", err)
+		return
+	}
+	a.videoOn = on
+	a.applyVideoButton()
+	a.applyLocalVideoVisibility()
+	a.syncVideoWindow()
+}
+
+// toggleLocalPreview 需求 7：本地回显开关。
+//
+// **只关本地显示，不影响推送到远端**（用户明确要求）：摄像头继续采集编码发送，
+// 对端始终能看到本端画面。
+func (a *App) toggleLocalPreview() {
+	if a.activeCallID == "" {
+		return
+	}
+	on := !a.previewOn
+	if err := a.core.SetVideoPreview(a.activeCallID, on); err != nil {
+		logx.Logger().Warn("切换本地回显失败", "err", err)
+		return
+	}
+	a.previewOn = on
+	a.applyLocalVideoVisibility()
+	a.syncVideoWindow()
+}
+
+// applyLocalVideoVisibility 回显层（含绿色描边）与开关按钮的可见性。
+//
+// 规则（需求 7，用户明确）：
+//   - 可见性由**意图**决定，不等首帧：本端要推流且回显开着就把回显区显示出来，
+//     摄像头打不开时该区域是黑的（用户要求"打开失败也要显示回显区"）；
+//   - 关掉回显后隐藏回显区，但**按钮保留**——否则无法再次打开；
+//   - 本次通话根本不推本地视频（普通接听 / 摄像头禁用）时按钮也不显示，
+//     免得出现一个点了没反应的按钮。
+func (a *App) applyLocalVideoVisibility() {
+	if a.videoSurface == nil {
+		return
+	}
+	showPreview := a.videoOn && a.callSending && a.previewOn
+	if showPreview {
+		a.videoSurface.local.Show()
+		a.videoSurface.border.Show()
+	} else {
+		a.videoSurface.local.Hide()
+		a.videoSurface.border.Hide()
+	}
+	if a.videoOn && a.callSending {
+		a.videoSurface.toggleBtn.Show()
+	} else {
+		a.videoSurface.toggleBtn.Hide()
+	}
+	a.videoSurface.toggleBtn.SetIcon(iconForLocalVideo(a.previewOn))
+	a.videoSurface.local.Refresh()
+	a.videoSurface.border.Refresh()
+	a.videoSurface.toggleBtn.Refresh()
+}
+
+func iconForLocalVideo(on bool) fyne.Resource {
+	if on {
+		return IconVideoOn
+	}
+	return IconVideoOff
+}
+
+// toggleVideoFullscreen 双击切换全屏（需求 6）。
+func (a *App) toggleVideoFullscreen() {
+	a.setVideoFullscreen(!a.videoFullscreen)
+}
+
+func (a *App) setVideoFullscreen(on bool) {
+	if a.videoW == nil {
+		return
+	}
+	a.videoW.SetFullScreen(on)
+	a.videoFullscreen = on
+	logx.Logger().Info("视频窗口全屏切换", "fullscreen", on)
+}
+
+// videoMaxScreenDiv 视频窗口相对屏幕（工作区）的最大占比分母：宽、高都不得超过 1/4。
+const videoMaxScreenDiv = 4
+
+// 窗口客户区的可用性下限（DIP）：帧过小时不留一个没法看的窗口。
+const (
+	videoMinW = 160
+	videoMinH = 120
+)
+
+// videoSizeLimits 当前屏幕（工作区）允许的视频窗口最大客户区尺寸（DIP）。
+// screenWorkArea 给的是物理像素，而 Resize 用 Fyne 的 DIP，故按缩放比换算。
+func videoSizeLimits(scale float32) (maxW, maxH float32) {
+	sw, sh := screenWorkArea()
+	if scale <= 0 {
+		scale = 1
+	}
+	return sw / scale / videoMaxScreenDiv, sh / scale / videoMaxScreenDiv
+}
+
+// videoFitSize 把「视频原始宽高」换算成窗口客户区尺寸（用户指定规则）：
+//   - 优先按原视频的宽高等比（1:1）显示；
+//   - 只有当宽或高超过 maxW/maxH 时才按比例缩小，缩小后宽、高都在范围内。
+//
+// 帧过小时先等比补到下限（videoMinW/H，不变形），再做上限收缩——极端宽高比下
+// 两者会撞车（例如 900×100 补下限成 1080×120，再被收缩回 480×53），此时
+// **上限优先**，保证用户的「宽高都在屏幕 1/4 内」始终成立。
+func videoFitSize(fw, fh int, maxW, maxH float32) (float32, float32) {
+	w, h := float32(fw), float32(fh)
+	if w < videoMinW {
+		h *= videoMinW / w
+		w = videoMinW
+	}
+	if h < videoMinH {
+		w *= videoMinH / h
+		h = videoMinH
+	}
+	if w > maxW || h > maxH {
+		k := maxW / w
+		if kh := maxH / h; kh < k {
+			k = kh
+		}
+		w, h = w*k, h*k
+	}
+	return w, h
+}
+
+// applyVideoSize 按对端视频分辨率初始化窗口尺寸（需求 6）。
+func (a *App) applyVideoSize(fw, fh int) {
+	if a.videoSized || a.videoW == nil || fw <= 0 || fh <= 0 {
+		return
+	}
+	maxW, maxH := videoSizeLimits(a.videoW.Canvas().Scale())
+	w, h := videoFitSize(fw, fh, maxW, maxH)
+	// 尺寸交给 Fyne（GLFW 设的是客户区，宽高比才与对端画面一致，不会出黑边）；
+	// 位置由 placeVideoWindow 负责，内部带延迟校正以跟上异步生效的尺寸。
+	a.videoW.Resize(fyne.NewSize(w, h))
+	placeVideoWindow(a.videoW)
+	a.videoSized = true
+	logx.Logger().Info("视频窗口尺寸已按原视频设置",
+		"remote", fw, "x", fh, "window", int(w), "x", int(h),
+		"max", int(maxW), "x", int(maxH))
+}
+
+// --- core.VideoSink 实现 ---
+
+// OnVideoFrame 视频帧回调（core.VideoSink）。
+// 合并刷新：媒体层每帧都调它，但主线程刷新最多一个在途，中间帧直接被
+// 覆盖（视频允许丢帧，绝不反过来拖住解码循环）。
+// **在媒体层 goroutine 上同步调用**，只做存帧与排队，绝不阻塞。
+func (a *App) OnVideoFrame(callID string, local bool, img *image.RGBA) {
+	if img == nil {
+		return
+	}
+	ref := &frameRef{callID: callID, img: img}
+	var pending *atomic.Bool
+	var slot *atomic.Pointer[frameRef]
+	if local {
+		slot, pending = &a.localFrame, &a.localPending
+	} else {
+		slot, pending = &a.remoteFrame, &a.remotePending
+	}
+	slot.Store(ref)
+	if !pending.CompareAndSwap(false, true) {
+		return // 已有刷新在途，本帧覆盖即可
+	}
+	fyne.Do(func() {
+		pending.Store(false)
+		a.renderVideoFrame(local)
+	})
+}
+
+// renderVideoFrame 在主线程把最新帧写入画布（合并刷新的落地处）。
+func (a *App) renderVideoFrame(local bool) {
+	// 视频窗口是懒创建的，而 wantVideoWindow 又要求"先有内容才显示"——
+	// 若这里直接因 surface 为空返回，就会形成死锁：帧被丢 → remoteHasVideo
+	// 永远为 false → 窗口永远不建（摄像头禁用、callSending=false 时必然踩中，
+	// 表现为"远端的画面能收到却没有视频窗口"）。所以首帧到达时就地补建窗口，
+	// 但**仍然不 Show**——显示与否交给 syncVideoWindow 判断。
+	if a.videoSurface == nil || a.videoW == nil {
+		a.ensureVideoWindow()
+		if a.videoSurface == nil || a.videoW == nil {
+			return
+		}
+	}
+	var ref *frameRef
+	if local {
+		ref = a.localFrame.Load()
+	} else {
+		ref = a.remoteFrame.Load()
+	}
+	if ref == nil || ref.callID != a.activeCallID {
+		return // 过期通话的帧，丢弃
+	}
+
+	if local {
+		if !a.localVideoEver {
+			a.localVideoEver = true
+			logx.Logger().Info("本地视频首帧已到达界面", "callId", callIDOf(ref),
+				"size", imgSize(ref))
+		}
+		// 回显关着时**不能 Show**——否则每来一帧都会把用户刚关掉的回显又显示回来
+		if a.videoOn && a.callSending && a.previewOn {
+			// 本地帧尺寸变化时让整个叠加层重排一次（回显区按摄像头宽高比算，
+			// 只 Refresh 画面本身不会触发父容器重新布局）
+			if w, h := ref.img.Rect.Dx(), ref.img.Rect.Dy(); w != a.videoSurface.localW || h != a.videoSurface.localH {
+				a.videoSurface.localW, a.videoSurface.localH = w, h
+				defer a.videoSurface.Refresh()
+			}
+			a.videoSurface.local.Image = ref.img
+			a.videoSurface.local.Show()
+			a.videoSurface.border.Show()
+			a.videoSurface.local.Refresh()
+			a.videoSurface.border.Refresh()
+		}
+		return
+	}
+
+	if !a.videoOn {
+		return
+	}
+	a.videoSurface.remote.Image = ref.img
+	a.videoSurface.remote.Show()
+	a.videoSurface.remote.Refresh()
+
+	if !a.remoteHasVideo {
+		a.remoteHasVideo = true
+		logx.Logger().Info("远端视频首帧已到达界面", "callId", callIDOf(ref),
+			"size", imgSize(ref))
+		// 首次收到对端画面：按比例定窗口大小再显示窗口。
+		//
+		// ⚠️ 这几个调用只能放在"首次"分支里：showVideoWindow 会 SetTitle +
+		// Show + moveVideoWindowAboveCallPanel（内部 EnumWindows 找窗口 + SetWindowPos），
+		// 每帧来一遍会直接把 UI 拖垮。状态变化时另有 call.video / 开关回调触发。
+		a.applyVideoSize(ref.img.Rect.Dx(), ref.img.Rect.Dy())
+		a.applyLocalVideoVisibility()
+		a.syncVideoWindow()
+	}
+}
+
+// callIDOf / imgSize 诊断日志用的小工具。
+func callIDOf(f *frameRef) string {
+	if f == nil {
+		return ""
+	}
+	return f.callID
+}
+
+func imgSize(f *frameRef) string {
+	if f == nil || f.img == nil {
+		return ""
+	}
+	return fmt.Sprintf("%dx%d", f.img.Rect.Dx(), f.img.Rect.Dy())
+}
+
+// resetVideoUI 通话状态重置时清掉视频相关的界面状态。
+func (a *App) resetVideoUI() {
+	a.videoOn = false
+	a.previewOn = true
+	a.callHasVideo = false
+	a.callSending = false
+	a.remoteHasVideo = false
+	a.localVideoEver = false
+	a.videoSized = false
+	a.videoFullscreen = false
+	a.remoteFrame.Store(nil)
+	a.localFrame.Store(nil)
+	a.hideVideoWindow()
+	a.applyVideoButton()
+}
+
+// applyVideoButton 刷新通话面板「关闭视频」按钮的图标与底色（需求 8）。
+func (a *App) applyVideoButton() {
+	if a.videoBtn == nil {
+		return
+	}
+	if a.videoOn {
+		a.videoBtn.SetIcon(IconVideoOn)
+		a.videoBtn.SetBg(colorHoldBlue)
+	} else {
+		a.videoBtn.SetIcon(IconVideoOff)
+		a.videoBtn.SetBg(colorSwitchGray)
+	}
+	a.videoBtn.Refresh()
+}

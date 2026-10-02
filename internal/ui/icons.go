@@ -38,7 +38,30 @@ func speakerIconSVG(color string, off bool) string {
 </svg>`
 }
 
+// videoIconSVG 摄像头图标（Material Design videocam / videocam_off path），
+// 视频呼叫按钮与通话面板视频开关用（REQ-VIDEO-003/008）。
+func videoIconSVG(color string, off bool) string {
+	path := `M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z`
+	if off {
+		path = `M21 6.5l-4 4V7c0-.55-.45-1-1-1H9.82L21 17.18V6.5zM3.27 2L2 3.27 4.73 6H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.21 0 .39-.08.54-.18L19.73 21 21 19.73 3.27 2z`
+	}
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<path fill="` + color + `" d="` + path + `"/>
+</svg>`
+}
+
 var (
+	// IconVideoOn 摄像头开：白色前景（配蓝色底）。
+	IconVideoOn = fyne.NewStaticResource("video-on.svg", []byte(videoIconSVG("#ffffff", false)))
+	// IconVideoOff 摄像头关：红色斜线（浅灰底上清晰可见）。
+	IconVideoOff = fyne.NewStaticResource("video-off.svg", []byte(videoIconSVG("#e53935", true)))
+	// IconVideoCall 主窗体视频呼叫按钮（绿底黑图标，与呼叫按钮同色系）。
+	IconVideoCall = fyne.NewStaticResource("video-call.svg", []byte(videoIconSVG("#1a1a1a", false)))
+	// IconVideoGreen 视频窗口图标（绿色摄像头；不继承应用的红色话机图标）。
+	IconVideoGreen = fyne.NewStaticResource("video-green.svg", []byte(videoIconSVG("#43a047", false)))
+	// IconVideoAnswer 来电「视频接听」按钮（绿底白图标）。
+	IconVideoAnswer = fyne.NewStaticResource("video-answer.svg", []byte(videoIconSVG("#ffffff", false)))
+
 	// IconPhoneRed 未注册状态托盘图标（红色话机）。
 	IconPhoneRed = fyne.NewStaticResource("phone-red.svg", []byte(phoneIconSVG("#e53935")))
 	// IconPhoneGreen 已注册状态托盘图标（绿色话机）。

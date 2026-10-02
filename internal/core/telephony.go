@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"image"
 
 	"mti-sip-phone/internal/config"
 )
@@ -41,6 +42,29 @@ type Telephony interface {
 	AudioDevices() (mics []AudioDevice, speakers []AudioDevice)
 	// Close 释放资源。
 	Close() error
+
+	// ---- 视频（REQ-VIDEO-*）----
+	// 未启用视频的构建里这些方法仍然存在，但会返回 ErrVideoUnsupported。
+
+	// VideoSupported 当前构建是否具备视频能力（界面据此隐藏视频入口）。
+	VideoSupported() bool
+	// DialVideo 发起视频呼叫（offer 同时含 m=audio 与 m=video）。
+	DialVideo(ctx context.Context, target string) (string, error)
+	// AnswerVideo 视频接听（打开摄像头，双向视频）。
+	AnswerVideo(callID string) error
+	// IncomingHasVideo 该来电的 offer 是否含可用视频段（决定是否显示「视频接听」）。
+	IncomingHasVideo(callID string) bool
+	// VideoActive 该通话的视频是否已协商成功且处于开启状态。
+	VideoActive(callID string) bool
+	// SetVideoEnabled 需求 8：关闭/恢复视频（不显示远端、不推本地、关闭视频窗口）。
+	// 纯本地动作，不发 SIP 信令。
+	SetVideoEnabled(callID string, on bool) error
+	// SetVideoPreview 需求 7：本地视频回显与推送开关。
+	SetVideoPreview(callID string, on bool) error
+	// SetCamera 选择摄像头（空 = 系统默认，config.CameraDisabled = 禁用）。
+	SetCamera(deviceID string) error
+	// VideoDevices 枚举摄像头（可能耗时，调用方放后台 goroutine）。
+	VideoDevices() []VideoDevice
 }
 
 // AudioDevice 音频设备。
@@ -49,10 +73,40 @@ type AudioDevice struct {
 	Name string `json:"name"` // 展示名称
 }
 
+// VideoDevice 摄像头设备。
+// 注意 ID 在 Windows 侧每次启动都可能变化，展示名称才是稳定的持久化标识。
+type VideoDevice struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// VideoState 一路通话的视频状态快照（低频，随事件推送）。
+type VideoState struct {
+	Negotiated bool `json:"negotiated"` // 视频已协商成功
+	Enabled    bool `json:"enabled"`    // 需求 8 的总开关
+	PreviewOn    bool `json:"previewOn"`    // 需求 7 的本地回显开关
+	Sending    bool `json:"sending"`    // 正在推送本地视频
+	Width      int  `json:"width"`      // 对端视频分辨率（未收到帧时为 0）
+	Height     int  `json:"height"`
+}
+
+// VideoSink 视频帧出口，由界面层实现并注册。
+//
+// **不走事件总线**：总线是容量 64 的 channel、满了直接丢事件，
+// 一帧 640×480 RGBA 就有 1.2MB，走总线会瞬间打满并把控制事件挤掉。
+//
+// ⚠️ 回调**在媒体层 goroutine 上同步调用**，实现必须立即返回：
+// 禁止 fyne.DoAndWait 之类的阻塞调用，否则解码循环会卡住、UDP 接收缓冲
+// 溢出，之后持续花屏（用 fyne.Do 入队即可）。
+type VideoSink interface {
+	OnVideoFrame(callID string, local bool, img *image.RGBA)
+}
+
 // EventSink 电话层向核心层上报事件的回调接口，由 App 实现。
 type EventSink interface {
 	// OnIncoming 呼入（收到 INVITE），进入振铃状态。
-	OnIncoming(callID, remote, remoteName string)
+	// hasVideo 表示对端 offer 里含可用的视频段（决定是否显示「视频接听」按钮）。
+	OnIncoming(callID, remote, remoteName string, hasVideo bool)
 	// OnRinging 呼出已振铃（收到 180/183）。
 	OnRinging(callID string)
 	// OnEstablished 通话建立。
@@ -63,4 +117,7 @@ type EventSink interface {
 	OnFailed(callID, reason string)
 	// OnRegisterState 注册状态变化。
 	OnRegisterState(state RegisterState, reason string)
+	// OnVideoState 视频状态变化（协商成功、开关切换、拿到对端分辨率）。
+	// 低频事件，走事件总线没问题；**视频帧不走这里**（见 VideoSink）。
+	OnVideoState(callID string, st VideoState)
 }

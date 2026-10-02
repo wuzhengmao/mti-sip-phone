@@ -54,7 +54,7 @@
 
 | 方法 | 参数 | 成功返回 | 说明 |
 | --- | --- | --- | --- |
-| `call.dial` | `{ "target": "1001" }` | `{ "callId": "..." }` | 拨号；target 为号码或 SIP URI |
+| `call.dial` | `{ "target": "1001", "video": false }` | `{ "callId": "..." }` | 拨号；target 为号码或 SIP URI；`video: true` 发起视频呼叫（REQ-VIDEO-001） |
 | `call.answer` | `{ "callId": "..." }` | `{ "callId": "..." }` | 接听 |
 | `call.hangup` | `{ "callId": "..." }` | `{ "callId": "..." }` | 挂断 |
 | `call.reject` | `{ "callId": "...", "code": 486 }` | `{ "callId": "..." }` | 拒接；code 为 SIP 状态码，默认 486 |
@@ -105,14 +105,29 @@
 | 事件 | 负载 | 说明 |
 | --- | --- | --- |
 | `system.state` | 与 getState 返回相同 | 连接建立时推送状态快照 |
-| `call.incoming` | `{ "callId", "call" }` | 来电振铃 |
+| `call.dialing` | `{ "callId", "call" }` | 呼出已发起（本地拨号按钮与 WS 拨号共用） |
+| `call.incoming` | `{ "callId", "call" }` | 来电振铃；`call.hasVideo` 为 true 表示对端带视频 |
 | `call.ringing` | `{ "callId", "call" }` | 呼出已振铃（180/183） |
 | `call.established` | `{ "callId", "call" }` | 通话建立 |
 | `call.terminated` | `{ "callId", "call", "reason" }` | 通话结束；reason：`local_hangup` / `remote_hangup` / `rejected` |
 | `call.failed` | `{ "callId", "call", "reason" }` | 呼叫失败；reason：`busy` / `no_answer` / `not_found` 等 |
 | `call.muted` | `{ "callId", "muted" }` | 静音状态变化 |
+| `call.video` | `{ "callId", "call" }` | 视频状态变化（协商成功/开关切换/拿到对端分辨率）；状态见 `call.video` |
 | `register.state` | `{ "state", "account", "reason" }` | 注册状态变化 |
 | `system.update` | 更新状态对象，见下 | 自动更新状态变化（受理/下载进度/就绪/失败） |
+
+`call` 对象中的视频相关字段（REQ-VIDEO-*）：
+
+| 字段 | 说明 |
+| --- | --- |
+| `hasVideo` | 本次通话涉及视频（呼入时对端 offer 含视频段；呼出时本端发起了视频呼叫） |
+| `video.negotiated` | 视频已协商成功 |
+| `video.enabled` | 视频总开关（对应通话面板的「关闭视频」） |
+| `video.previewOn` | 本地回显开关（**只影响本地显示，不影响推送到远端**） |
+| `video.sending` | 本次通话要推送本地视频（意图，不随回显开关变化） |
+| `video.width` / `video.height` | 对端视频分辨率（未收到帧时为 0） |
+
+> 视频**画面**不经 WS 推送（本阶段）；需求 9 的网页订阅留到下一阶段实现。
 
 更新状态对象字段：
 

@@ -49,6 +49,16 @@ static int sp_display_available(void) {
 
 // 工作区（EWMH _NET_WORKAREA 的第一个桌面）：取到返回 1；
 // 属性缺失（非 EWMH WM）时回退整屏尺寸并返回 0。
+static void sp_move_resize(Display *d, Window w, int x, int y, int cw, int ch) {
+	XMoveResizeWindow(d, w, x, y, (unsigned int)cw, (unsigned int)ch);
+	XFlush(d);
+}
+
+static void sp_screen(Display *d, int *w, int *h) {
+	*w = DisplayWidth(d, DefaultScreen(d));
+	*h = DisplayHeight(d, DefaultScreen(d));
+}
+
 static int sp_workarea(Display *d, int *x, int *y, int *w, int *h) {
 	Atom prop = XInternAtom(d, "_NET_WORKAREA", True);
 	if (prop != None) {
@@ -175,7 +185,7 @@ static void sp_move(Display *d, Window win, int x, int y) {
 
 // 锁定窗口尺寸：把 WM_NORMAL_HINTS 的 min/max 都设为目标值并立即拉到
 // 该尺寸，阻止 fyne 按内容最小尺寸把窗口撑大（X11 侧等价于 Windows
-// 的 setCallWindowClamp）。WM 会拒绝其它尺寸的 ConfigureRequest，
+// 的 sp_lock_size）。WM 会拒绝其它尺寸的 ConfigureRequest，
 // 因此不会与 fyne 反复拉锯。
 static void sp_lock_size(Display *d, Window win, int w, int h) {
 	XSizeHints hints;
@@ -215,7 +225,7 @@ import (
 // 一起改，否则两平台观感会分叉。
 const (
 	callPanelWidth      = 260
-	callPanelHeight     = 126
+	callPanelHeight     = 140
 	callPanelButtonSize = 36
 )
 
@@ -233,6 +243,58 @@ const callPanelMargin = 16
 // 去装饰后边框几何变化，再延后校正两次（节奏同 Windows 实现）。
 func moveCallWindowToCorner(w fyne.Window) {
 	moveWindowToCorner(w, callPanelWidth, callPanelHeight, "通话面板")
+}
+
+// placeVideoWindow 把视频窗口摆到通话面板正上方、右边缘对齐（**只移动**）。
+// 尺寸归 Fyne 的 Window.Resize——SetWindowPos/XMoveResizeWindow 按窗口矩形设尺寸
+// 会把带标题栏的客户区压小一圈，宽高比变化后在左右补出黑边。
+func placeVideoWindow(w fyne.Window) {
+	if w == nil {
+		return
+	}
+	scale := w.Canvas().Scale()
+	go func() {
+		var handle uintptr
+		for i := 0; i < 20; i++ {
+			if handle = callPanelHandle(w); handle != 0 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if handle == 0 {
+			logx.Logger().Debug("未取得视频窗口 X11 句柄，跳过定位")
+			return
+		}
+		d := C.sp_open_display()
+		if d == nil {
+			return
+		}
+		defer C.sp_close_display(d)
+		win := C.Window(handle)
+
+		move := func() {
+			var vw, vh C.int
+			if C.sp_geometry(d, win, &vw, &vh) == 0 || vw <= 0 || vh <= 0 {
+				return
+			}
+			var wx, wy, ww, wh C.int
+			C.sp_workarea(d, &wx, &wy, &ww, &wh)
+			panelH := C.int(float32(callPanelHeight) * scale)
+			margin := C.int(float32(callPanelMargin) * scale)
+			gap := C.int(8 * scale)
+			x := wx + ww - vw - margin
+			y := wy + wh - panelH - margin - gap - vh
+			if y < wy {
+				y = wy
+			}
+			C.sp_move(d, win, x, y)
+		}
+		move()
+		for _, delay := range []time.Duration{150 * time.Millisecond, 350 * time.Millisecond, 800 * time.Millisecond} {
+			time.Sleep(delay)
+			move()
+		}
+	}()
 }
 
 // moveUpdateWindowToCorner 把更新提示窗吸附到工作区右下角（同通话面板：
@@ -268,6 +330,10 @@ func moveWindowToCorner(w fyne.Window, wDip, hDip float32, name string) {
 			return
 		}
 		placeCornerWindow(handle, targetW, targetH, scale, contentMin, name)
+		// 与 Windows 同理：去装饰是绕过 GLFW 改窗口的，GLFW 缓存的边框尺寸会过期，
+		// 导致 Fyne 认为画布比真实客户区高一条标题栏、内容整体下移顶掉第一行。
+		// 重新 Resize 一次触发客户区重算（尺寸与锁定的目标一致，不冲突）。
+		fyne.Do(func() { w.Resize(fyne.NewSize(wDip, hDip)) })
 		for _, delay := range []time.Duration{150 * time.Millisecond, 350 * time.Millisecond} {
 			time.Sleep(delay)
 			placeCornerWindow(handle, targetW, targetH, scale, contentMin, name)
@@ -344,6 +410,15 @@ func placeCornerWindow(handle uintptr, targetW, targetH int, scale float32, cont
 		"contentMin", fmt.Sprintf("%.0fx%.0f", contentMin.Width, contentMin.Height))
 }
 
+// videoWindowTitle 视频窗口标题（Windows 侧靠前缀区分窗口，这里保持一致）。
+func videoWindowTitle(account string) string {
+	title := "视频通话"
+	if account != "" {
+		title += " - " + account
+	}
+	return title
+}
+
 // callWindowTitle 通话面板标题：Linux 用 ASCII——面板已不进任务栏，
 // 万一被 WM 忽略 skip-taskbar 而显示出来，也不会出现中文乱码
 // （部分任务栏按 WM_NAME 单字节读取）。
@@ -360,6 +435,26 @@ func callWindowTitle(account string) string {
 // addMissingQuitForMenu）。仅 Linux 打标记，Windows 托盘保持现状。
 func markTrayQuit(item *fyne.MenuItem) {
 	item.IsQuit = true
+}
+
+// screenWorkArea 屏幕工作区尺寸（**物理像素**）——需求 6 用它把视频窗口
+// 限制在屏幕的 1/2 以内；调用方按 Canvas().Scale() 换算成 DIP。
+// 取不到 _NET_WORKAREA 时回退整屏，最终回退一个保守默认值。
+func screenWorkArea() (float32, float32) {
+	d := C.sp_open_display()
+	if d == nil {
+		return 1280, 800
+	}
+	defer C.XCloseDisplay(d)
+	var wx, wy, ww, wh C.int
+	C.sp_workarea(d, &wx, &wy, &ww, &wh)
+	if ww <= 0 || wh <= 0 {
+		C.sp_screen(d, &ww, &wh)
+	}
+	if ww <= 0 || wh <= 0 {
+		return 1280, 800
+	}
+	return float32(ww), float32(wh)
 }
 
 // 以下函数在 X11 下无对应实现，保持空实现以对齐 Windows 侧的调用点。

@@ -207,7 +207,8 @@ func (a *App) buildUpdatePanelIfNeeded() {
 	if a.updW != nil {
 		return
 	}
-	w := a.fyne.NewWindow(updateWindowTitle())
+	// 同通话面板：用 splash 窗口做无边框，不走 Win32 硬改样式（见 newBorderlessWindow）
+	w := a.newBorderlessWindow(updateWindowTitle())
 	a.updW = w
 	// 关闭（Alt+F4 等）：非下载态＝稍后（隐藏窗口，主窗体提示行保留）；
 	// 下载中＝取消下载（不做"后台下载"——窗口关闭后进度不可见，

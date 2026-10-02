@@ -58,6 +58,8 @@ const (
 	EvCallTerminated  = "call.terminated"  // 通话结束
 	EvCallFailed      = "call.failed"      // 呼叫失败
 	EvCallMuted       = "call.muted"       // 静音状态变化
+	EvCallDialing     = "call.dialing"     // 呼出已发起（本地与 WS 拨号共用）
+	EvCallVideo       = "call.video"       // 视频状态变化（协商/开关/对端分辨率，REQ-VIDEO-001）
 	EvRegisterState   = "register.state"   // 注册状态变化
 	EvSystemUpdate    = "system.update"    // 自动更新状态变化（phase/进度/失败原因）
 )

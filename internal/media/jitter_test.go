@@ -2,18 +2,18 @@ package media
 
 import "testing"
 
-// TestPlayRingBasic 环形缓冲基本读写：写多少读多少，跨环形边界连续。
+// TestPlayRingBasic 环形缓冲基本读写：目标深度内写多少读多少，跨环形边界连续。
 func TestPlayRingBasic(t *testing.T) {
 	r := newPlayRing(1)
-	samples := make([]int16, 8000)
+	samples := make([]int16, playTargetDepth)
 	for i := range samples {
 		samples[i] = int16(i)
 	}
-	r.Write(samples) // 恰好写满 1 秒容量
+	r.Write(samples)
 
-	buf := make([]int16, 8000)
-	if n := r.Read(buf); n != 8000 {
-		t.Fatalf("应读到 8000 样本，实际 %d", n)
+	buf := make([]int16, playTargetDepth)
+	if n := r.Read(buf); n != playTargetDepth {
+		t.Fatalf("应读到 %d 样本，实际 %d", playTargetDepth, n)
 	}
 	for i := range buf {
 		if buf[i] != int16(i) {
@@ -22,27 +22,64 @@ func TestPlayRingBasic(t *testing.T) {
 	}
 }
 
-// TestPlayRingOverflow 缓冲满后写新数据：最旧数据被丢弃，读到的总是最新。
+// TestPlayRingDepthBounded 缓冲深度必须封顶——这是"声音延迟几秒"的根治点。
+//
+// 读侧（音频回调）恒为实时速率，写侧会被丢包补静音、对端突发一次性垫高；
+// 早先容量 8 秒，垫高后再也回不去，表现为"通话越久延迟越大"。
+// 现在超过 playMaxDepth 就丢最旧数据回到 playTargetDepth。
+func TestPlayRingDepthBounded(t *testing.T) {
+	r := newPlayRing(8) // 容量仍是 8 秒
+	// 一次性灌入 2 秒（对端突发/大量丢包补静音的极端情形）
+	burst := make([]int16, 16000)
+	for i := range burst {
+		burst[i] = 7
+	}
+	if dropped := r.Write(burst); dropped == 0 {
+		t.Fatal("超深写入应被截断，否则延迟会一直累积")
+	}
+	if d := r.Depth(); d != playTargetDepth {
+		t.Fatalf("截断后深度应为 %d（%dms），实际 %d", playTargetDepth, playTargetDepth*1000/8000, d)
+	}
+	if r.Trimmed() == 0 {
+		t.Fatal("应记录累计丢弃量（诊断用）")
+	}
+
+	// 稳态：逐帧写入不超过上限时不应被截断
+	r.Reset()
+	frame := make([]int16, 160)
+	for i := 0; i < 20; i++ { // 20 帧 = 400ms < 500ms 上限
+		if dropped := r.Write(frame); dropped != 0 {
+			t.Fatalf("第 %d 帧不应被截断（深度仍在安全范围内）", i)
+		}
+	}
+}
+
+// TestPlayRingOverflow 缓冲超过上限后写新数据：最旧数据被丢弃，读到的总是最新。
 func TestPlayRingOverflow(t *testing.T) {
-	r := newPlayRing(1) // 容量 8000 样本
-	first := make([]int16, 8000)
+	r := newPlayRing(1)
+	first := make([]int16, playMaxDepth)
 	for i := range first {
 		first[i] = 1
 	}
-	r.Write(first)
-	r.Write([]int16{2, 3, 4, 5}) // 溢出 4 个：丢弃最旧 4 个样本
+	r.Write(first) // 恰好到硬上限，尚不触发截断
+	tail := []int16{2, 3, 4, 5}
+	if dropped := r.Write(tail); dropped == 0 {
+		t.Fatal("超过硬上限应触发截断，否则延迟会一直累积")
+	}
+	if d := r.Depth(); d != playTargetDepth {
+		t.Fatalf("截断后应为目标深度 %d，实际 %d", playTargetDepth, d)
+	}
 
-	buf := make([]int16, 8000)
-	if n := r.Read(buf); n != 8000 {
-		t.Fatalf("应读到 8000 样本，实际 %d", n)
+	buf := make([]int16, playTargetDepth)
+	if n := r.Read(buf); n != playTargetDepth {
+		t.Fatalf("应读到 %d 样本，实际 %d", playTargetDepth, n)
 	}
-	// 前 7996 个应为 1，末尾应为 2,3,4,5
-	if buf[0] != 1 || buf[7995] != 1 {
-		t.Fatal("溢出后保留的数据应是最新的旧数据")
+	if buf[0] != 1 {
+		t.Fatalf("截断保留的应是最新的旧数据，实际首样本 %d", buf[0])
 	}
-	for i, v := range buf[7996:] {
-		if v != int16(i+2) {
-			t.Fatalf("尾部新数据 %d 应为 %d，实际 %d", i, i+2, v)
+	for i, v := range buf[playTargetDepth-len(tail):] {
+		if v != tail[i] {
+			t.Fatalf("尾部新数据 %d 应为 %d，实际 %d", i, tail[i], v)
 		}
 	}
 }
@@ -50,7 +87,7 @@ func TestPlayRingOverflow(t *testing.T) {
 // TestPlayRingReadLessThanAvailable 分次读取：数据不丢不重。
 func TestPlayRingReadLessThanAvailable(t *testing.T) {
 	r := newPlayRing(1)
-	samples := make([]int16, 1000)
+	samples := make([]int16, 1000) // 1000 < playTargetDepth，不会被截断
 	for i := range samples {
 		samples[i] = int16(i)
 	}

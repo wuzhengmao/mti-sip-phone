@@ -39,6 +39,10 @@ type Call struct {
 	RemoteName string    `json:"remoteName"` // 对方显示名
 	State      CallState `json:"state"`
 	Muted      bool      `json:"muted"`
+	// HasVideo 本次通话涉及视频（呼入时对端 offer 含视频段；呼出时本端发起了视频呼叫）。
+	HasVideo bool `json:"hasVideo"`
+	// Video 视频状态快照（未协商成功时为零值）。
+	Video VideoState `json:"video"`
 }
 
 // RegisterInfo 注册状态快照。
@@ -76,7 +80,8 @@ type App struct {
 	mu        sync.RWMutex
 	reg       RegisterInfo
 	calls     map[string]*Call
-	callOrder []string // 保持创建顺序
+	callOrder []string   // 保持创建顺序
+	videoSink VideoSink  // 视频帧出口（界面层注册；nil = 无人接收，直接丢帧）
 }
 
 // New 创建 App。tel 为 nil 时表示电话能力未接入（调用会返回 ErrTelephonyNotReady）。
@@ -385,20 +390,159 @@ func (a *App) MuteSpeaker(callID string, muted bool) error {
 }
 
 // ---------------------------------------------------------------------------
+// 视频（REQ-VIDEO-*）
+// ---------------------------------------------------------------------------
+
+// ErrVideoUnsupported 当前构建不支持视频。
+var ErrVideoUnsupported = errors.New("当前构建未启用视频支持")
+
+// SetVideoSink 注册视频帧出口（界面层启动时调用一次）。
+func (a *App) SetVideoSink(s VideoSink) {
+	a.mu.Lock()
+	a.videoSink = s
+	a.mu.Unlock()
+}
+
+// VideoFrameSink 电话层用来投递视频帧的出口（未注册时返回 nil）。
+// sip 层在建立/接听时取一次并接到视频引擎上。
+func (a *App) VideoFrameSink() VideoSink {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.videoSink
+}
+
+// VideoSupported 当前构建是否具备视频能力。
+func (a *App) VideoSupported() bool {
+	return a.tel != nil && a.tel.VideoSupported()
+}
+
+// DialVideo 发起视频呼叫。
+func (a *App) DialVideo(ctx context.Context, target string) (string, error) {
+	if a.tel == nil {
+		return "", ErrTelephonyNotReady
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", errors.New("呼叫目标不能为空")
+	}
+	if a.HasActiveCall() {
+		return "", errors.New("已有进行中的通话")
+	}
+	callID, err := a.tel.DialVideo(ctx, target)
+	if err != nil {
+		return "", err
+	}
+	a.upsertCall(&Call{
+		ID:        callID,
+		Direction: "outgoing",
+		Remote:    target,
+		State:     CallRinging,
+		HasVideo:  true,
+	})
+	a.addRecentDial(target)
+	a.publishCall("call.dialing", callID)
+	return callID, nil
+}
+
+// AnswerVideo 视频接听（打开摄像头，双向视频）。
+func (a *App) AnswerVideo(callID string) error {
+	if a.getCall(callID) == nil {
+		return ErrCallNotFound
+	}
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	return a.tel.AnswerVideo(callID)
+}
+
+// IncomingHasVideo 该来电的 offer 是否含可用视频段。
+func (a *App) IncomingHasVideo(callID string) bool {
+	if a.tel == nil {
+		return false
+	}
+	return a.tel.IncomingHasVideo(callID)
+}
+
+// VideoActive 该通话的视频是否已协商成功且处于开启状态。
+func (a *App) VideoActive(callID string) bool {
+	if a.tel == nil {
+		return false
+	}
+	return a.tel.VideoActive(callID)
+}
+
+// SetVideoEnabled 需求 8：关闭/恢复视频（不显示远端、不推本地、关闭视频窗口）。
+func (a *App) SetVideoEnabled(callID string, on bool) error {
+	if a.getCall(callID) == nil {
+		return ErrCallNotFound
+	}
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	if err := a.tel.SetVideoEnabled(callID, on); err != nil {
+		return err
+	}
+	logx.Logger().Info("视频开关", "callId", callID, "on", on)
+	return nil
+}
+
+// SetVideoPreview 需求 7：本地视频回显/推送开关。
+func (a *App) SetVideoPreview(callID string, on bool) error {
+	if a.getCall(callID) == nil {
+		return ErrCallNotFound
+	}
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	if err := a.tel.SetVideoPreview(callID, on); err != nil {
+		return err
+	}
+	logx.Logger().Info("本地视频开关", "callId", callID, "on", on)
+	return nil
+}
+
+// SetCamera 选择摄像头（空 = 系统默认，config.CameraDisabled = 禁用）。
+func (a *App) SetCamera(deviceID string) error {
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	return a.tel.SetCamera(deviceID)
+}
+
+// VideoDevices 枚举摄像头（可能耗时，调用方放后台 goroutine）。
+func (a *App) VideoDevices() []VideoDevice {
+	if a.tel == nil {
+		return nil
+	}
+	return a.tel.VideoDevices()
+}
+
+// ---------------------------------------------------------------------------
 // 下行：电话层（Telephony 实现）通过 EventSink 回调
 // ---------------------------------------------------------------------------
 
 // OnIncoming 呼入。创建呼入通话并进入振铃状态。
-func (a *App) OnIncoming(callID, remote, remoteName string) {
+func (a *App) OnIncoming(callID, remote, remoteName string, hasVideo bool) {
 	a.upsertCall(&Call{
 		ID:         callID,
 		Direction:  "incoming",
 		Remote:     remote,
 		RemoteName: remoteName,
 		State:      CallRinging,
+		HasVideo:   hasVideo,
 	})
-	logx.Logger().Info("收到来电", "callId", callID, "remote", remote)
+	logx.Logger().Info("收到来电", "callId", callID, "remote", remote, "hasVideo", hasVideo)
 	a.publishCall("call.incoming", callID)
+}
+
+// OnVideoState 视频状态变化（协商成功、开关切换、拿到对端分辨率）。
+func (a *App) OnVideoState(callID string, st VideoState) {
+	if a.updateCall(callID, func(c *Call) {
+		c.Video = st
+		c.HasVideo = c.HasVideo || st.Negotiated
+	}) {
+		a.publishCall("call.video", callID)
+	}
 }
 
 // OnRinging 呼出振铃。

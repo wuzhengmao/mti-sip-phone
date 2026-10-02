@@ -118,12 +118,21 @@ func (s *Server) dispatch(ctx context.Context, conn *websocket.Conn, wmu *sync.M
 	case MethodDial:
 		var p struct {
 			Target string `json:"target"`
+			Video  bool   `json:"video"` // 可选：true 发起视频呼叫（REQ-VIDEO-001）
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil || p.Target == "" {
 			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 target"))
 			break
 		}
-		callID, err := s.app.Dial(ctx, p.Target)
+		var (
+			callID string
+			err    error
+		)
+		if p.Video {
+			callID, err = s.app.DialVideo(ctx, p.Target)
+		} else {
+			callID, err = s.app.Dial(ctx, p.Target)
+		}
 		if err != nil {
 			resp = errMessage(msg.ID, codeOf(err), err)
 			break

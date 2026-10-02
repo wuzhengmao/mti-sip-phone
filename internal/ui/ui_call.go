@@ -12,7 +12,6 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -38,7 +37,16 @@ func (a *App) buildCallPanelIfNeeded() {
 	if a.callW != nil {
 		return
 	}
-	w := a.fyne.NewWindow("通话")
+	// 通话面板用 Fyne 的 **splash 窗口**（无边框），而不是先建普通窗口再
+	// 用 Win32 `stripWindowChrome` 硬抹样式。
+	//
+	// 后者是**绕过 GLFW** 改窗口的：GLFW 内部缓存的边框尺寸因此永久失准，
+	// 它仍按"有标题栏"换算客户区，Fyne 于是认为画布比真实客户区高出一整条
+	// 标题栏（"幽灵标题栏"），内容整体下移、**第一行被顶出可视区**——且现象
+	// 时有时无（来电振铃时 `ringFlashRect` 每 75ms 重绘会掩盖，一点接听就露馅）。
+	// splash 窗口由 GLFW 在**创建时**就按无边框处理（WS_POPUP，frameRect 归零），
+	// 缓存始终自洽，画布 == 客户区。
+	w := a.newBorderlessWindow("通话")
 	a.callW = w
 	w.SetIcon(IconPhoneGreen) // 任务栏绿色话机（不继承应用红色图标）
 	// 无标题栏、无关闭按钮，仅显示窗体内容（REQ-UI-024 修订）：
@@ -91,6 +99,21 @@ func (a *App) buildCallPanelIfNeeded() {
 	// 麦克风开关（REQ-UI-023）
 	a.micBtn = newCompactButton(IconMicOn, colorHoldBlue, callPanelButtonSize, a.toggleMic)
 
+	// 视频接听（REQ-VIDEO-004）：来电含视频时显示在「接听」左侧
+	a.videoAnswerBtn = newCompactButton(IconVideoAnswer, colorSuccessGreen, callPanelButtonSize, func() {
+		if a.activeCallID == "" {
+			return
+		}
+		if err := a.core.AnswerVideo(a.activeCallID); err != nil {
+			logx.Logger().Warn("视频接听失败", "err", err)
+		}
+	})
+
+	// 关闭视频开关（REQ-VIDEO-008）：位于扬声器左侧
+	a.videoBtn = newCompactButton(IconVideoOn, colorHoldBlue, callPanelButtonSize, func() {
+		a.setVideoEnabled(!a.videoOn)
+	})
+
 	// 三行内容容器：内容在每次进入状态时由 rebuildCallRows 重建。
 	// 用 Stack：振铃底色闪烁矩形与内容层平铺为兄弟、撑满整个窗口
 	//（REQ-UI-025 修订）；内容层为 Border（窗口
@@ -103,7 +126,11 @@ func (a *App) buildCallPanelIfNeeded() {
 	// 尺寸取平台常量（Windows 见 topmost_windows.go，Linux 见
 	// topmost_linux.go）；Windows 下窗口尺寸再由 positionCallWindow
 	// 通过窗口过程钳制精确固定
+	// 尺寸固定（用户要求："把宽度和高度固定之后就不要让它变化了"）：
+	// 保留标题栏 + Fyne 的 SetFixedSize，不再用 Win32 去装饰 + 尺寸钳制那套
+	// （那套绕过 GLFW 改样式，会让 GLFW 的边框缓存失准、内容被顶掉第一行）。
 	w.Resize(fyne.NewSize(callPanelWidth, callPanelHeight))
+	w.SetFixedSize(true)
 
 	// 通话面板始终置顶
 	if dw, ok := w.(desktop.Window); ok {
@@ -199,18 +226,29 @@ func (a *App) rebuildCallRows(mode int) {
 	}
 	a.callRows.Objects = nil
 
-	row1 := container.NewHBox(centerBox(a.callNameLabel), layout.NewSpacer())
-	row2 := container.NewHBox(centerBox(a.callStateLabel), layout.NewSpacer(), centerBox(a.hangupBtn))
-	// 行3：时长 + 扬声器/麦克风开关（三态都显示，REQ-UI-023 修订）
-	row3 := container.NewHBox(centerBox(a.callTimerLabel), layout.NewSpacer(),
-		centerBox(a.speakerBtn), centerBox(a.micBtn))
+	row1 := container.New(panelRowLayout{}, a.callNameLabel)
+	row2 := container.New(panelRowLayout{}, a.callStateLabel, a.hangupBtn)
+	// 视频开关**只在本次通话确实协商了视频时**才出现（纯音频通话放一个点了
+	// 没反应的按钮没有意义）。
+	row3 := container.New(panelRowLayout{}, a.callTimerLabel)
+	if a.callHasVideo {
+		row3.Add(a.videoBtn)
+	}
+	row3.Add(a.speakerBtn)
+	row3.Add(a.micBtn)
 
 	switch mode {
 	case dialingButtons:
 		a.stopRingShake()
 		a.ringFlashRect = nil
 	case ringingButtons:
-		row1.Add(centerBox(a.answerBtn))
+		// REQ-VIDEO-004/005：来电 offer 含视频就显示「视频接听」——
+		// **摄像头禁用时同样要显示**：那样接听照样能看远端视频，只是不推送
+		// 本地（answer 里视频段为 recvonly）。
+		if a.ringHasVideo {
+			row1.Add(a.videoAnswerBtn)
+		}
+		row1.Add(a.answerBtn)
 		// 无边框窗口的 DWM 着色边框不可见：改为整窗底色灰度闪烁
 		//（REQ-UI-025 修订）
 		grays := a.ringFlashGrays()
@@ -219,23 +257,16 @@ func (a *App) rebuildCallRows(mode int) {
 	case incallButtons:
 		a.stopRingShake()
 		a.ringFlashRect = nil
-		row1.Add(centerBox(a.holdBtn))
+		row1.Add(a.holdBtn)
 		// 通话建立：把会话内记忆的开关状态下发到当前通话引擎
 		//（引擎按通话创建，每次通话建立需重新下发）
 		a.applySessionAudioState()
+		a.applyVideoButton()
 	}
 
-	// 布局（REQ-UI-025 修订）：左右 8px 留白、行间 2px 空隙、上下
-	// 0px——三行由 GridWithRows 三等分撑满窗口（fyne/GLFW 附加的
-	// "幽灵标题栏高度"吸收进行高），行内容垂直居中余量 ≈7px，
-	// 加上下 1px 行距垫 = 8px，与左右留白视觉一致。
-	row1P := vPad(row1, 1)
-	row2P := vPad(row2, 1)
-	row3P := vPad(row3, 1)
-	grid := container.NewGridWithRows(3, row1P, row2P, row3P)
-
-	// 内容层：四周 4px 留白的 Border，中心为三行网格
-	border := container.NewBorder(padRect(4), padRect(4), padRect(4), padRect(4), grid)
+	// 三行纵向排列（行距 panelRowGap）、整体在窗口内纵向居中；四周 4px 窗口留白
+	rows := container.New(panelRowsLayout{}, row1, row2, row3)
+	border := container.NewBorder(padRect(4), padRect(4), padRect(4), padRect(4), rows)
 
 	// 振铃态：底色闪烁矩形与内容层平铺为兄弟（矩形撑满整个窗口，
 	// 必须放在内容层**下方**——在上方会盖住文字与按钮）
@@ -247,17 +278,151 @@ func (a *App) rebuildCallRows(mode int) {
 	a.callRows.Refresh()
 }
 
-// vPad 给对象上下加指定透明留白（两行各 1px 拼出 2px 行距）。
-func vPad(obj fyne.CanvasObject, s float32) fyne.CanvasObject {
-	return container.NewBorder(padRect(s), padRect(s), nil, nil, obj)
+// panelRowGap 通话面板的行距（用户指定 2px）。
+const panelRowGap = 2
+
+// panelColGap 通话面板同一行内元素之间的间距（4px，与 Fyne 主题 theme.Padding 一致）。
+const panelColGap = 4
+
+// panelRowLayout 一行内容：首元素靠左，其余元素靠右、两两间隔 panelColGap，
+// 全部纵向居中。**替代 container.NewHBox**——后者的子项间距固定取
+// theme.Padding（本项目主题为 4），无法改成 2。
+type panelRowLayout struct{}
+
+func (panelRowLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	var sz fyne.Size
+	first := true
+	for _, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		m := o.MinSize()
+		if !first {
+			sz.Width += panelColGap
+		}
+		sz.Width += m.Width
+		sz.Height = fyne.Max(sz.Height, m.Height)
+		first = false
+	}
+	return sz
 }
 
-// centerBox 内容保持自然尺寸并在行内垂直居中——Grid 撑高行时
-// HBox 会把子组件纵向拉伸到行高，包一层 Center 避免按钮被拉长
-// （REQ-UI-025 修订）。
-func centerBox(obj fyne.CanvasObject) fyne.CanvasObject {
-	return container.NewCenter(obj)
+func (panelRowLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	if len(objs) == 0 {
+		return
+	}
+	// 其余元素从右往左摆
+	x := size.Width
+	for i := len(objs) - 1; i >= 1; i-- {
+		o := objs[i]
+		if !o.Visible() {
+			continue
+		}
+		m := o.MinSize()
+		x -= m.Width
+		o.Resize(m)
+		o.Move(fyne.NewPos(x, (size.Height-m.Height)/2))
+		x -= panelColGap
+	}
+	// 首元素靠左
+	if o := objs[0]; o.Visible() {
+		m := o.MinSize()
+		o.Resize(m)
+		o.Move(fyne.NewPos(0, (size.Height-m.Height)/2))
+	}
 }
+
+// panelRowsLayout 纵向排列若干行：行距 panelRowGap、横向拉满、整体纵向居中。
+//
+// **替代 GridWithRows**：后者会把格子拉伸填满可用高度，格子高出内容的部分
+// 变成行间富余（实测行距 12px 而列距 4px，用户反馈行距偏大且不均匀），
+// 且其内部间距同样固定取 theme.Padding。
+type panelRowsLayout struct{}
+
+func (panelRowsLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	var sz fyne.Size
+	first := true
+	for _, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		m := o.MinSize()
+		if !first {
+			sz.Height += panelRowGap
+		}
+		sz.Height += m.Height
+		sz.Width = fyne.Max(sz.Width, m.Width)
+		first = false
+	}
+	return sz
+}
+
+func (panelRowsLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	total := float32(0)
+	first := true
+	for _, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		if !first {
+			total += panelRowGap
+		}
+		total += o.MinSize().Height
+		first = false
+	}
+	y := (size.Height - total) / 2
+	if y < 0 {
+		y = 0
+	}
+	for _, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		h := o.MinSize().Height
+		o.Resize(fyne.NewSize(size.Width, h))
+		o.Move(fyne.NewPos(0, y))
+		y += h + panelRowGap
+	}
+}
+
+
+
+
+
+type vPadLayout struct{ pad float32 }
+
+func (l vPadLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	var sz fyne.Size
+	for _, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		m := o.MinSize()
+		sz.Width = fyne.Max(sz.Width, m.Width)
+		sz.Height = fyne.Max(sz.Height, m.Height)
+	}
+	sz.Height += 2 * l.pad
+	return sz
+}
+
+func (l vPadLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	for _, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		h := size.Height - 2*l.pad
+		if h < 0 {
+			h = 0
+		}
+		o.Move(fyne.NewPos(0, l.pad))
+		o.Resize(fyne.NewSize(size.Width, h))
+	}
+}
+
+
+// dialCallButtonHeight 主窗体「呼叫 / 视频呼叫」按钮高度（DIP）。
+// REQ-VIDEO-003：为给视频按钮腾位置，呼叫按钮比原 36 略矮。
+const dialCallButtonHeight = 32
 
 // 通话面板按钮配色（与主界面主题色观感一致）。
 var (
@@ -364,6 +529,12 @@ func (b *compactButton) SetLabelColor(c color.NRGBA) {
 func (b *compactButton) SetBg(c color.NRGBA) {
 	b.bg.FillColor = c
 	b.bg.Refresh()
+}
+
+// SetMinSize 覆盖按钮最小尺寸（主窗体呼叫按钮需要更扁的样式，REQ-VIDEO-003）。
+func (b *compactButton) SetMinSize(w, h float32) {
+	b.bg.SetMinSize(fyne.NewSize(w, h))
+	b.Refresh()
 }
 
 func (b *compactButton) Tapped(*fyne.PointEvent) {

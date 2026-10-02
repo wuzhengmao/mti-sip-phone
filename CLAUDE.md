@@ -141,6 +141,48 @@ main（组装）
   - 2xx 已收但本地已挂断：补 ACK+BYE。
 - **保持 re-INVITE**：TransactionRequest + 手动读响应 + 手动 ACK。**ACK 必须复用 re-INVITE 请求自身的 From/CallID/CSeq 头**（用初始 INVITE 的头会导致对端校验失败——呼入保持无法取消的历史 bug）；OnRetransmission 补发 ACK；事务保留 5 秒后 Terminate。
 
+## 视频呼叫
+
+**编解码分工**（`internal/video`，cgo）：解码全部走 FFmpeg 原生解码器（h264/h263/vp8/vp9，
+无需外部库）；编码 H264 用 OpenH264、VP8/VP9 用 libvpx、H263 用 FFmpeg；
+色彩转换与缩放用 swscale。
+
+**静态库不由仓库携带**，由 `scripts/build-video-libs.sh`（Linux 宿主，支持 mingw/aarch64 交叉）
+或 `scripts/build-video-libs.bat`（Windows，走 git-bash + WinLibs）一次性生成到
+`third_party/video/<target>/{include,lib}`（已 gitignore）。`build.bat` / `build.sh` 探测到该目录
+就加 `-tags video` 并传 `CGO_CFLAGS`/`CGO_LDFLAGS`；**缺失则自动降级为无视频构建**（音频完全不受
+影响，UI 隐藏视频入口）。视频给最终二进制加约 10MB（链接器按需拉取，静态库本身 48MB）。
+
+FFmpeg 的 configure **刻意不启用 libvpx/libopenh264**（只解码），因此不需要 pkg-config
+——WinLibs 工具链里没有 pkg-config，这是方案能落地的前提；编码直接由 cgo 链接那两个库。
+
+**四个目标的可行性**（都是交叉编译，宿主机位数无关）：
+
+| 目标 | FFmpeg | libvpx | OpenH264 | 摄像头 |
+| --- | --- | --- | --- | --- |
+| windows-amd64 | ✓ | ✓ | ✓ | ✓ |
+| windows-386 | ✓ | ✓ | ✓ | **不可用**（见下） |
+| linux-amd64 / arm64 | ✓ | ✓ | ✓ | ✓（V4L2） |
+
+Windows 386 的摄像头**编不过**，是上游限制：mediadevices 的 `camera_windows.hpp`
+回调 `HRESULT SampleCB(...)` 漏了 `STDMETHODCALLTYPE`，而 mingw 的 `qedit.h` 里
+`ISampleGrabberCB::SampleCB` 带 `__stdcall`。x86_64 上 `__stdcall` 被忽略所以能编，
+**i686 上是真实的调用约定冲突**。用 `-D__stdcall=` 强行编会让整份 COM 调用变 cdecl，
+运行期必崩，不要试。所以 386 走 `camera_other.go`：编解码可用、摄像头不可用。
+
+Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `build.bat` 的位置探测：
+`C:\msys64\mingw32\bin` 与 `%USERPROFILE%\tools\winlibs-i686\mingw32\bin`。
+
+**关键设计**：
+
+- 视频是**与音频平级的独立 RTP/RTCP 端口对**（`media.VideoEngine`），SDP 里两个 m= 行。
+- **视频帧不走事件总线**（总线是容量 64 的 channel、满即丢）：走 `core.VideoSink` 直连 UI，
+  媒体层每帧同步回调，UI 侧用「存最新帧 + CAS 合并刷新」保证主线程刷新最多一个在途。
+- **需求 7/8 的视频开关是纯本地动作**（停采集/停发送/停渲染），不发 SIP 信令——与麦克风/
+  扬声器开关同语义，规避 re-INVITE 的 ACK/CSeq 竞态。
+- 摄像头由 `cameraSupervisor` 单协程串行启停（Windows DirectShow 同一设备不能并发打开），
+  且**必须先 `StartCamera` 给出采集参数再放开开关**，否则会先用空 ID 抢开默认摄像头。
+
 ## 重要约定
 
 - **交流、文档、注释、提交信息、界面文案一律中文**。
@@ -174,4 +216,142 @@ main（组装）
   - **关闭 libdecor**（`glfw.InitHint(glfw.WaylandLibdecor, glfw.WaylandDisableLibdecor)`）：GLFW 在 Wayland 下默认优先用它画装饰，而 libdecor 释放 frame 时先销毁 xdg_toplevel、后销毁 decoration，违反 xdg-decoration 协议，wlroots 0.17+ 的合成器（labwc/sway）会判定协议错误并**断开该客户端的 Wayland 连接**。连锁反应极具迷惑性：连接已死 → 新建窗口的 EGL 建面必然失败（报错文案是假失败的 `EGL: Failed to create window surface: Success`）→ 而 go-gl 绑定的 `acceptError` 会把 PlatformError **吞成 nil error**，Fyne 因此留下没有 viewport 的僵尸窗口（通话面板显示不出来、之后主窗体也拉不起来），同时主循环卡死在 `glfwPollEvents`，托盘退出与 SIGTERM 全失效（只能 kill -9），但 SIP/WS goroutine 照常工作。
   - **Wayland 会话 + X 显示真的可连接时，把后端固定为 X11**（`os.Setenv("FYNE_PLATFORM","x11")`，探测用 `x11DisplayAvailable()`）：Wayland 协议不允许客户端自定位窗口、去装饰、自行置顶，通话面板只能居中带标题栏；且新映射窗口拿不到指针焦点（合成器防抢焦点，`RequestFocus` 被拒），空窗期里 fyne 的指针位置停在旧值上，**点任何位置都会按旧坐标命中控件**（实测表现为刚弹出时点「接听」却挂断）。走 X11（Xwayland）后这些按 X11 语义正常工作。用户已设 `FYNE_PLATFORM` 时不覆盖；无 `DISPLAY` 或连不上（Xwayland 未运行）时回落原生 Wayland。
   **排查用 `FYNE_PLATFORM=x11|wayland` 强制后端**（Fyne 自带开关，会转成 GLFW 平台提示）；`env -u WAYLAND_DISPLAY` **无效**——GLFW 平台探测失败后会回落到 libwayland 的默认 `wayland-0`，仍旧走 Wayland。
+- **视频：answer 必须复用对端的 PT 号**。原来 `negotiateSDP` 返回本地 PT 直接拿去生成 answer，
+  音频因为 PCMA/PCMU 是静态 8/0 侥幸无事；视频全是动态 PT（96–99），按本地号回会协商串味。
+  现在 `Engine.activePT` 记录「线上实际使用的号」（offerer=本端号，answerer=对端号）。
+- **视频：answer 的 m= 行数量与顺序必须与 offer 一致**（RFC 3264），不接受视频时输出
+  `m=video 0 RTP/AVP ...` 拒绝段而不是省略该行，否则 FreeSWITCH 部分版本回 488。
+- **视频：方向必须按媒体类型取**（`SDPDirectionFor(body, "audio")`）。原来只读
+  `MediaDescriptions[0]`，对端若把 video 排在前面、或只改视频段方向，音频方向会被误判。
+- **视频：关键帧判定必须在完整访问单元上做**，不能用第一个分片——H264 首个负载是
+  STAP-A(SPS,PPS)，里面没有 IDR，按分片判会把真正的关键帧误判成帧间帧，等关键帧状态下
+  永远等不到、画面一直黑屏。
+- **视频：`codecs.H264Packet` 有状态**（内部 `fuaBuffer` 累积 FU-A 分片），换流/重协商/
+  关闭视频后再开都必须换新实例（`dep.Reset()`）。
+- **视频：SDP 的 rtpmap 编码名不要用 `Codec.RTPMap()`**——它返回 `"PCMA/8000"`，而
+  `buildSDP` 会自己拼 `/<ClockRate>`，用它会输出非法的 `a=rtpmap:8 PCMA/8000/8000`。
+- **视频：`pion/rtp/codecs` 的 VP9Payloader 会用 VP9 帧头解析器判断是否关键帧**，
+  喂合成数据会直接返回 0 个包——VP9 的往返测试必须用真实编码数据（见
+  `internal/media/video_cgo_test.go`，需 `-tags video`）。
+- **OpenH264 的 C 接口是「vtable 指针的指针」**（`typedef const ISVCEncoderVtbl* ISVCEncoder`），
+  调用形式是 `(*svc)->Method(svc, ...)`；C++ 下没有这层间接，照抄 Pion 的 bridge.cpp 会编不过。
+  profile/level 在**空间层**上（`sSpatialLayers[0].uiProfileIdc`），不在 SEncParamExt 顶层。
+- **视频静态库：四个目标共用一份源码树，切目标前必须清干净生成物**。
+  `scripts/build-video-libs.sh` 的 `purge_objects` 会删 `*.o` / `*.a` / `*.d` /
+  `*_rtcd.h`，**不要图省事去掉**。踩过两次，症状都极具迷惑性（configure 显示
+  target 正确、编译零报错，只在链接时炸）：
+  1. 上一目标残留的 `.o` 时间戳比源码新 → make 直接跳过重编 → **32 位库里装进
+     64 位目标文件**，链接报一堆 undefined reference；
+  2. libvpx 的 `vpx_dsp_rtcd.h` 等由 `rtcd.pl` 按架构生成，沿用 64 位的表会引用
+     只存在于 `fwd_txfm_ssse3_x86_64.asm` 的符号 → 32 位链接报 `_ssse3` 未定义。
+- **视频静态库：32 位 Windows 目标需要 `-lstdc++`**。OpenH264 是 C++ 实现
+  （用到 `operator delete(void*, unsigned int)` 这类 C++14 定长释放）。amd64 上
+  因为 mediadevices 的摄像头是 C++，Go 会自动用 `g++` 链接所以没事；386 上摄像头
+  被排除、Go 改用 `gcc` 链接，不带 libstdc++ 就报未定义。已在 `internal/video/ffmpeg.go`
+  的 `#cgo windows LDFLAGS` 里显式加上。
+- **无边框窗口一律用 Fyne 的 splash 窗口（`desktop.Driver.CreateSplashWindow`），
+  不要在 Win32 侧 `stripWindowChrome` 硬抹样式**。硬抹是**绕过 GLFW** 改窗口的：
+  GLFW 缓存的边框尺寸因此永久失准，它仍按"有标题栏"换算客户区，Fyne 于是认为
+  画布比真实客户区高出一整条标题栏（"幽灵标题栏"，实测 36 DIP），内容整体下移、
+  **排在前面的行被顶出可视区**。现象极具迷惑性：**来电振铃时三行正常**
+  （`ringFlashRect` 每 75ms 重绘、视图不断重新同步），**一点接听停止重绘就只剩
+  下面两行**（用户实测）。splash 窗口由 GLFW 在创建时就按无边框建立
+  （Win32 下 `WS_POPUP`、frameRect 归零），缓存始终自洽。
+  通话面板与更新提示窗都已改走这条路，配套删掉了 `stripWindowChrome` /
+  `setCallWindowClamp` / `setUpdateWindowClamp` / `clampWndProc` / `subclassWindow` /
+  `hideFromTaskbar` / `deleteTaskbarTab` 一整串 Win32 hack；`positionCornerWindow`
+  现在**只移动、不改尺寸**（尺寸归 Fyne）。
+  注意 `CreateSplashWindow` 是**延迟到 `Show()` 里才建 GLFW 窗口**的（Fyne 的
+  `window.create()` 在 `Show` 中调用），所以任何"创建时生效"的 GLFW 窗口提示
+  都必须包在 `Show()` 外层，包在 `NewWindow()` 外层是无效的。
+- **通话面板自带两个布局，不要换回 Fyne 的 HBox / GridWithRows**：这两个的内部
+  间距固定取 `theme.Padding()`（本项目主题为 4），改不了；而 GridWithRows 还会把
+  格子拉伸填满可用高度，格子高出内容的部分变成行间富余（实测行距 12px 而列距
+  4px，用户反馈"行距偏大且不均匀"）。现在用 `panelRowLayout`（首元素靠左、其余
+  靠右，间距 `panelColGap`）与 `panelRowsLayout`（行距 `panelRowGap`、整体纵向
+  居中）：**行距 2px、列距 4px**，与窗口高度解耦。
+  ⚠️ 别用 `container.NewCenter` 包网格——它连宽度也只给最小宽度，整行会被挤到中间。
+- **视频窗口"有内容才显示"与"懒创建"之间有个死锁，别再拆开**：`wantVideoWindow`
+  要求先有内容才 Show，而窗口是懒创建的——若 `renderVideoFrame` 在 surface 为空时
+  直接返回，帧被丢 → `remoteHasVideo` 永远为 false → 窗口永远不建。摄像头禁用时
+  `callSending=false`，窗口只能靠 `remoteHasVideo` 触发，必然踩中（现象：远端画面
+  已解码却"没有视频窗口"）。现在协商成功即 `ensureVideoWindow()` 建好窗口对象
+  （**不 Show**），且 `renderVideoFrame` 首帧到达时也会就地补建。
+- **`callPanelHeight` 用 140 而不是 126**：126 时 3 行 × 36 按钮把行距压成 0，
+  按钮上下相连（用户实测"第一行和第二行之间的按钮是连着的"）。140 = 上下留白 8
+  + 三行各 36 + 行间 2×8（Fyne 网格自带 4px 行距 + 按钮上下各余 ~2px）。
+- **`vPad` 不能用 `container.NewBorder` 拼留白**：Fyne 的 `borderLayout.MinSize` 会
+  **额外**加 `theme.Padding()`（本项目主题 4，上下就多 8），每行最小高会变成 46 而不是
+  设计注释里的 38，整个面板内容最小高 162 而窗口只有 126——内容比窗口高 36px，全靠
+  fyne/GLFW 的"幽灵标题栏高度"侥幸兜着。**那个余量一旦变化（例如开了视频窗口），
+  排在前面的行就被挤出可视区**（用户实测的"通话面板第一行不见了"）。现在 `vPad` 用
+  自定义 `vPadLayout` 精确控制留白，内容最小高 124 ≤ 126。
+  另注：`layout.NewGridLayoutWithRows(n)` 内部是 `{Cols: n}`，行数由
+  `ceil(可见对象数 / n)` 现算——所以"少一个可见对象"会直接改变行数，排查时先数对象。
+- **视频窗口的尺寸与位置必须一次 `SetWindowPos` 原子完成**，不能"先 Resize
+  再定位"。`Window.Resize` 的生效时机不受控（fyne/GLFW 会在随后的帧里再应用
+  一次；`moveWindowToCorner` 里那三次延迟校正就是为这个加的），若定位时量到的
+  还是旧尺寸，窗口随后按"保持左上角"长高，底边就越过通话面板上沿把面板盖住
+  ——用户实测的"通话面板第一行不见了"。见 `placeVideoWindow`：带尺寸时用
+  `targetRight + insetR - W` 直接算窗口矩形，并在 150/350/800ms 后只做位置校正。
+- **视频：回显开关（`previewOn`）与推送完全解耦**。用户明确要求"关闭回显只是
+  关闭本地的回显，并不影响到本地视频推送到远端"。所以 `SetVideoPreview` 既不调
+  `syncCamera`（不启停采集）也不改 `sendEnabled`，只门控"本地帧是否投递给界面"；
+  采集的启停条件是 `camConfigured && enabled && sendEnabled`（与回显无关）。
+- **视频：回显区可见性看"意图"不看"首帧"**。摄像头打开失败时回显区仍要显示（黑底），
+  所以可见性由 `enabled && callSending && previewOn` 决定，不能等收到本地帧才显示。
+- **视频窗口"有内容才显示"**：`wantVideoWindow() = videoOn && callHasVideo &&
+  (remoteHasVideo || (callSending && previewOn))`。纯音频通话（普通接听、对端无视频）
+  不留空窗口；通话面板的视频开关也只在 `callHasVideo` 时加进行3。
+- **视频窗口摆放要直接读通话面板的可见矩形**（`visibleRect` + DWM 扩展框架边界），
+  不要自己按工作区+边距算：面板定位用的是**未缩放**的 `callPanelMargin`(16 物理像素)，
+  视频窗口若按 `16×缩放` 算，DPI 非 100%（如 125%）时就差 4px。
+- **音频：播放环形缓冲必须封顶深度**（`playMaxDepth` 500ms → 截到 `playTargetDepth`
+  200ms）。读侧（音频回调）恒为实时速率，而写侧会被丢包补静音、对端/网关突发
+  一次性垫高；垫高后深度**只增不减**（读多少写多少），表现为"通话越久延迟越大、
+  有几秒"。早先容量给到 8 秒，等于允许累积 8 秒延迟。截断时会打
+  `播放缓冲超深已截断` 的 Warn（限频 10s），这是排查延迟的第一线索。
+- **视频：丢包时必须 `dep.Reset()` 并置 `waitKey`**，不能只清访问单元。
+  H264 的 FU-A 重组缓冲里留着丢包前的分片，不重置会让丢包后的分片续接上去，
+  拼出一个"缝合怪" NAL——解码器照单全收，画面就是花屏。同时发 PLI 催对端出 IDR，
+  通常只黑几十毫秒。
+- **视频：Windows 摄像头必须按 NV12 → YUY2 逐个格式试**。DirectShow 侧用
+  `ISampleGrabber::SetMediaType` 固定格式，摄像头不支持就**整条采集链路失败**。
+  很多 USB 摄像头只给 YUY2，固定 NV12 会一台都打不开——症状是「本地回显和发送
+  都没有，但远端视频正常」（接收链路与摄像头无关）。
+- **视频窗口不置顶**（用户要求）；位置用 `moveVideoWindowAboveCallPanel`：
+  **靠 `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` 的可见矩形做相对修正**，
+  不能直接用 `GetWindowRect`——它含不可见的调整边框，比无边框的通话面板在右边
+  多出约 8px，表现为"右边缘对不齐"。
+- **视频渲染用 `canvas.ImageScaleSmooth`**，不是 `ImageScaleFastest`：后者是最近邻，
+  视频窗口通常比源分辨率大，放大后观感发糊/有块（"清晰度不够"的直接来源）。
+  GL 路径下平滑只是个纹理过滤开关，开销可忽略。
+- **视频窗口的标题前缀不能与通话面板相同**。Windows 侧靠
+  `strings.HasPrefix(title, "通话面板")` 找窗口（`findWindowByTitlePrefix`），
+  视频窗口若沿用 `callWindowTitle() + " 视频"` 就会被当成通话面板——
+  `moveCallWindowToCorner` 会对它去标题栏、`setCallWindowClamp` 把它钳到
+  260×126、并拉到右下角压在面板上。用户实测现象是「视频窗口没有标题栏、
+  不能拖动、挡在通话面板上、画面一片黑」（260×126 里回显只有 87×42）。
+  现在用独立前缀 `视频通话`，并改用 `moveVideoWindowAboveCallPanel` 摆放
+  （保留装饰、不锁尺寸、只改位置）。
+- **视频：帧出口必须经 `core.App.VideoFrameSink()` 取，不能把 `p.sink` 断言成
+  `core.VideoSink`**。`sip.Phone.sink` 是 `core.App`（只实现 `EventSink`），真正实现
+  `VideoSink` 的是界面层。断言恒失败 → 出口恒为 nil → 编译运行都不报错，只是
+  **本地和远端画面全黑**，排查时极易误判成编解码问题。
+- **视频：编码器必须按「实际帧尺寸」建，不是请求尺寸**。摄像头驱动不保证按请求
+  分辨率出图（Windows DirectShow 会挑最接近的一档）。若编码器按 640×480 建、
+  帧按 352×288 喂，OpenH264/libvpx 会按 640×480 去读一块更小的缓冲——
+  **越界读，进程直接崩溃**（"视频接听后有时崩溃"的根因）。`captureLoop` 每帧比对
+  尺寸不一致就重建编码器；C 侧 `sp_enc_encode` 还有一道 `inW < e->w` 的硬校验兜底。
+- **视频：answer 的视频段必须用对端 PT 号，且不能拿它去查本端编码表**。
+  本端表里是 96–99，对端 offer 可能是 100/101…；用 `videoCodecByPT(peerPT)` 查
+  必然落空 → 段为 nil → 上层输出 `m=video 0`（等于拒绝视频）→ 两边都看不到画面。
+  协商结果已存在 `VideoEngine.codec/peerPT` 里，用 `answerSection()` 直接取。
+- **视频：采集 goroutine 不计入 `VideoEngine.wg`**。`Close()` 会 `wg.Wait()`，
+  若采集侧并发 `wg.Add(1)` 会触发 Go 运行时的
+  `sync: WaitGroup misuse: Add called concurrently with Wait` panic。
+  启停由 `cameraSupervisor` 串行管理并自行等待（`stopCapture`）。
+- **构建脚本：cmd 的 `set` 里 `\t`/`\v` 会被 Python 等工具写成真正的控制字符**，
+  表现为 `third_party\video` 变成 `third_party<VT>ideo`，且 `if not exist` 静默判假。
+  改 `build.bat` 后务必 `grep | cat -A` 确认。
 - **rtp_rx.wav**：根目录与 internal/sip/ 下的抓包调试产物，已被 .gitignore 忽略，勿误提交。

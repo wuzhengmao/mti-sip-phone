@@ -45,6 +45,9 @@ type Phone struct {
 	calls map[string]*callSession
 
 	autoAnswer atomic.Bool // 自动接听开关
+
+	videoMu  sync.RWMutex
+	videoCfg config.VideoConfig // 摄像头与视频参数（REQ-VIDEO-002/005）
 }
 
 // callSession 一次通话的运行时状态。
@@ -61,6 +64,13 @@ type callSession struct {
 	established bool
 	holdMu      sync.Mutex // 保持 re-INVITE 串行化（CSeq 必须严格递增）
 	mediaStarted bool      // 媒体引擎已启动（183 早期媒体可能提前启动）
+
+	// ---- 视频 ----
+	video      *media.VideoEngine // nil = 本次通话没有视频
+	offer      *media.Offer       // 呼入：对端 INVITE 的解析结果（接听时组合 answer 用）
+	videoSend  bool               // 本端是否推送本地视频（视频接听/视频呼出且有摄像头）
+	videoReady bool               // 视频引擎已 Start（防重复启动，对应 mediaStarted）
+	videoMu    sync.Mutex         // 视频引擎创建/启动串行化
 }
 
 // UserAgentName 软电话标识（REQ-ACC-014）：格式 "mti-sip-phone v1.0.3"。
@@ -225,8 +235,18 @@ func (p *Phone) Unregister(ctx context.Context) error {
 	return nil
 }
 
-// Dial 呼出。
+// Dial 呼出（纯音频）。
 func (p *Phone) Dial(ctx context.Context, target string) (string, error) {
+	return p.dial(ctx, target, false)
+}
+
+// DialVideo 发起视频呼叫：offer 同时含 m=audio 与 m=video。
+// 摄像头被禁用时视频段方向为 recvonly（只收不发，REQ-VIDEO-005）。
+func (p *Phone) DialVideo(ctx context.Context, target string) (string, error) {
+	return p.dial(ctx, target, true)
+}
+
+func (p *Phone) dial(ctx context.Context, target string, withVideo bool) (string, error) {
 	p.mu.Lock()
 	acc := p.acc
 	p.mu.Unlock()
@@ -258,17 +278,41 @@ func (p *Phone) Dial(ctx context.Context, target string) (string, error) {
 		ctx:    callCtx,
 		cancel: cancel,
 	}
+
+	// 视频：仅当本构建有视频能力且本次是视频呼叫时创建视频引擎
+	if withVideo {
+		if !p.VideoSupported() {
+			cancel()
+			engine.Close()
+			return "", core.ErrVideoUnsupported
+		}
+		v, err := media.NewVideoEngine(p.localIP())
+		if err != nil {
+			cancel()
+			engine.Close()
+			return "", err
+		}
+		v.SetSDPIP(p.localHost())
+		v.SetFrameSink(p.videoSinkFor(callID))
+		v.SetSendEnabled(p.cameraUsable())
+		cs.video = v
+		cs.videoSend = p.cameraUsable()
+	}
+
 	p.mu.Lock()
 	p.calls[callID] = cs
 	p.mu.Unlock()
 
-	// 发起 INVITE
-	dlg, err := p.dccInvite(recipient, engine.SDPOffer(), acc)
+	offer := media.SDPOfferFor(engine, cs.video, "sendrecv", p.videoOfferDirection(cs.video))
+	dlg, err := p.dccInvite(recipient, offer, acc)
 	if err != nil {
 		cancel()
 		p.mu.Lock()
 		delete(p.calls, callID)
 		p.mu.Unlock()
+		if cs.video != nil {
+			cs.video.Close()
+		}
 		engine.Close()
 		return "", err
 	}
@@ -278,36 +322,24 @@ func (p *Phone) Dial(ctx context.Context, target string) (string, error) {
 	return callID, nil
 }
 
-// Answer 接听呼入。
-// 注意：sipgo 的 RespondSDP 发送 200 后按 RFC 6026 阻塞等待对端 ACK
-//（最长 64*T1=32 秒），必须放在后台 goroutine 执行，否则阻塞 UI 线程
-// 导致界面一直停留在振铃状态。
-func (p *Phone) Answer(callID string) error {
-	cs := p.getCall(callID)
-	if cs == nil || cs.dialogS == nil {
-		return core.ErrCallNotFound
+// videoOfferDirection 本端 offer 里视频段的方向：
+// 能推本地视频 → sendrecv；只收不发 → recvonly（摄像头禁用/不可用）。
+func (p *Phone) videoOfferDirection(v *media.VideoEngine) string {
+	if v == nil {
+		return ""
 	}
-	go func() {
-		answer := cs.engine.SDPNegotiatedAnswer()
-		if err := cs.dialogS.RespondSDP([]byte(answer)); err != nil {
-			logx.Logger().Error("发送 200 OK 失败", "callId", callID, "err", err)
-			p.cleanupCall(cs.id, "failed")
-			return
-		}
-		// RespondSDP 阻塞等待 ACK 期间，通话可能已被对端 BYE / 本地挂断
-		// 清理（cleanupCall 会取消 cs.ctx）。此时不能继续接通流程，
-		// 否则界面会重新进入"通话中"且音频引擎空转（竞态 bug 修复）。
-		if cs.ctx.Err() != nil {
-			logx.Logger().Info("接听完成前通话已结束，跳过接通流程", "callId", callID)
-			return
-		}
-		cs.established = true
-		p.attachAudio(cs.engine)
-		cs.engine.Start()
-		p.sink.OnEstablished(cs.id)
-	}()
-	logx.Logger().Info("已接听来电（后台发送 200 OK）", "callId", callID)
-	return nil
+	if p.cameraUsable() {
+		return "sendrecv"
+	}
+	return "recvonly"
+}
+
+// Answer 接听呼入（普通接听）。
+// 需求 4：只点普通接听时**不打开摄像头**，只接收对方的视频（视频段方向 recvonly）。
+//
+// 实现见 phone_video.go 的 answerIncoming（后台发送 200 OK 的原因见那里）。
+func (p *Phone) Answer(callID string) error {
+	return p.answerIncoming(callID, false)
 }
 
 // attachAudio 接通后把媒体引擎对接音频设备（audio 为 nil 时跳过）。
@@ -413,6 +445,12 @@ func (p *Phone) Mute(callID string, muted bool) error {
 		return fmt.Errorf("通话未接通，无法保持")
 	}
 	cs.engine.SetMuted(muted)
+	// 保持期间同时停发本地视频（远端画面保留）。
+	// **不重协商视频 m= 行**：视频段方向保持原样，避免与既有 re-INVITE 的
+	// ACK/CSeq 逻辑纠缠（保持本身只改音频方向）。
+	if cs.video != nil {
+		cs.video.SetRemoteHold(muted)
+	}
 	go p.sendHoldReInvite(cs, muted)
 	return nil
 }
@@ -452,7 +490,16 @@ func (p *Phone) sendHoldReInvite(cs *callSession, muted bool) {
 	if muted {
 		dir = "sendonly"
 	}
-	offer := cs.engine.SDPOfferWithDirection(dir)
+	// 视频段方向跟随音频：保持时也置 sendonly，恢复时按本端能否推送决定。
+	videoDir := ""
+	if cs.video != nil {
+		if muted || !cs.videoSend || !p.cameraUsable() {
+			videoDir = "sendonly"
+		} else {
+			videoDir = "sendrecv"
+		}
+	}
+	offer := media.SDPOfferFor(cs.engine, cs.video, dir, videoDir)
 
 	// 远程目标：dialog 的远端地址（呼出取 2xx 的 Contact，呼入取 INVITE 的 Contact）
 	var (
@@ -657,6 +704,7 @@ func (p *Phone) Close() error {
 	p.calls = make(map[string]*callSession)
 	p.mu.Unlock()
 	for _, cs := range calls {
+		p.closeVideo(cs) // 视频引擎也必须回收（停采集、关端口）
 		cs.engine.Close()
 		if cs.cancel != nil {
 			cs.cancel()
@@ -965,6 +1013,8 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 				_ = cs.dialogC.Bye(context.Background())
 				return
 			}
+			// 视频：对端可能只接受音频（answer 里 m=video 端口为 0）
+			p.applyVideoAnswer(cs, body)
 		}
 	}
 
@@ -994,7 +1044,33 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 	}
 	cs.engine.SetKeepalive(false) // 关闭保活，恢复真实音频发送
 	cs.engine.SetMuted(false)
+	p.startVideo(cs, cs.videoSend)
 	p.sink.OnEstablished(cs.id)
+}
+
+// applyVideoAnswer 处理对端 2xx 里的视频段：协商成功则保留引擎（启动在
+// 接通流程里做），被拒绝（m=video 端口为 0 或无该段）则关闭视频引擎，
+// 本次通话退化为纯音频。
+func (p *Phone) applyVideoAnswer(cs *callSession, body []byte) {
+	if cs.video == nil {
+		return
+	}
+	offer, err := media.ParseSDP(body)
+	if err != nil {
+		logx.Logger().Debug("视频 answer 解析失败，按纯音频处理", "err", err)
+		p.closeVideo(cs)
+		return
+	}
+	info, err := offer.Media("video")
+	if err != nil || info.Rejected {
+		logx.Logger().Info("对端未接受视频，本次通话为纯音频", "callId", cs.id)
+		p.closeVideo(cs)
+		return
+	}
+	if !cs.video.ApplyAnswer(info) {
+		logx.Logger().Warn("视频协商失败，本次通话为纯音频", "callId", cs.id)
+		p.closeVideo(cs)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,8 +1141,32 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 		}
 	}
 
+	// 视频（REQ-VIDEO-004）：解析对端 offer 的视频段并准备好视频引擎，
+	// 但**先不启动**——接听时才根据用户点的按钮决定视频段方向。
+	hasVideo := false
+	if body := req.Body(); len(body) > 0 && p.VideoSupported() {
+		if offer, err := media.ParseSDP(body); err == nil {
+			cs.offer = offer
+			if info, mErr := offer.Media("video"); mErr == nil && !info.Rejected {
+				if v, vErr := media.NewVideoEngine(p.localIP()); vErr == nil {
+					v.SetSDPIP(p.localHost())
+					if v.ApplyOffer(info) {
+						cs.video = v
+						hasVideo = true
+					} else {
+						v.Close()
+					}
+				} else {
+					logx.Logger().Warn("创建视频引擎失败，按纯音频接听", "err", vErr)
+				}
+			}
+		} else {
+			logx.Logger().Debug("呼入 SDP 二次解析失败", "err", err)
+		}
+	}
+
 	// 上报来电事件（核心层会弹窗/推送 WS 事件）
-	p.sink.OnIncoming(callID, remote, remoteName)
+	p.sink.OnIncoming(callID, remote, remoteName, hasVideo)
 
 	// 自动接听决策：
 	//   1) INVITE 携带 Call-Info: <...>;answer-after=x（REQ-CALL-015）：
@@ -1083,7 +1183,8 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 			case <-time.After(time.Duration(answerAfter) * time.Second):
 				logx.Logger().Info("延迟时间到，执行自动接听", "callId", callID)
 				if !cs.established {
-					p.answerIncoming(cs, dlg)
+					// 自动接听按隐私优先：不打开摄像头（视频方向 recvonly）
+					_ = p.answerIncoming(cs.id, false)
 				}
 			case <-ctx.Done():
 			}
@@ -1091,7 +1192,8 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 	} else if answerAfter == 0 || p.autoAnswer.Load() {
 		// 立即自动接听
 		logx.Logger().Info("自动接听来电", "callId", callID, "answerAfter", answerAfter)
-		p.answerIncoming(cs, dlg)
+		// 自动接听按隐私优先：不打开摄像头（视频方向 recvonly）
+		_ = p.answerIncoming(cs.id, false)
 	} else {
 		p.respondRinging(dlg)
 	}
@@ -1120,20 +1222,6 @@ func (p *Phone) respondRinging(dlg *sipgo.DialogServerSession) {
 	if err := dlg.Respond(sip.StatusRinging, "Ringing", nil); err != nil {
 		logx.Logger().Debug("发送 180 失败", "err", err)
 	}
-}
-
-// answerIncoming 接听呼入：200 OK + SDP，对接音频。
-func (p *Phone) answerIncoming(cs *callSession, dlg *sipgo.DialogServerSession) {
-	answer := cs.engine.SDPNegotiatedAnswer()
-	if err := dlg.RespondSDP([]byte(answer)); err != nil {
-		logx.Logger().Error("自动接听发送 200 OK 失败", "err", err)
-		p.cleanupCall(cs.id, "failed")
-		return
-	}
-	cs.established = true
-	p.attachAudio(cs.engine)
-	cs.engine.Start()
-	p.sink.OnEstablished(cs.id)
 }
 
 // parseAnswerAfter 解析 INVITE 的 Call-Info 头中的 answer-after 参数。
@@ -1176,12 +1264,30 @@ func (p *Phone) handleReInvite(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
-	remoteDir := media.SDPDirection(req.Body())
+	// 方向必须**按媒体类型分别取**：对端可能只改视频段的方向，
+	// 用「第一段」的旧写法会把视频方向误当成音频方向（多 m= 行引入的坑）。
+	remoteDir := media.SDPDirectionFor(req.Body(), "audio")
+	// 视频段方向单独镜像；对端 re-INVITE 里 m=video 端口为 0 表示拒收视频。
+	videoDir := ""
+	if cs.video != nil {
+		if vinfo, vErr := media.ParseMedia(req.Body(), "video"); vErr == nil && !vinfo.Rejected {
+			cs.video.SetRemoteHold(vinfo.Dir == "sendonly" || vinfo.Dir == "inactive")
+			if vinfo.Dir != "inactive" {
+				videoDir = media.MirrorDirection(vinfo.Dir)
+			}
+		}
+	}
 	answer, err := cs.engine.SDPAnswerWithDirection(req.Body(), media.MirrorDirection(remoteDir))
 	if err != nil {
 		logx.Logger().Warn("re-INVITE SDP 协商失败", "callId", cs.id, "err", err)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 500, "Server Internal Error", nil))
 		return
+	}
+	// 含视频时按 offer 的媒体顺序重组 answer
+	if videoDir != "" && cs.video != nil {
+		if offer, oErr := media.ParseSDP(req.Body()); oErr == nil {
+			answer = media.SDPAnswerFor(cs.engine, cs.video, offer, cs.engine.PayloadType(), videoDir)
+		}
 	}
 
 	// 回 200 在后台执行：2xx 的重传与 ACK 等待不能阻塞事务回调
@@ -1275,6 +1381,13 @@ func (p *Phone) endCallImmediate(callID, reason string) *callSession {
 	if p.audio != nil {
 		p.audio.DetachEngine()
 	}
+	// 视频引擎先关（停采集/停解码），再关音频端口。闭环幂等，
+	// 与 cleanupCall / Phone.Close 并发调用无副作用。
+	if v := cs.video; v != nil {
+		vrx, vtx, vlost := v.Stats()
+		logx.Logger().Info("视频媒体统计", "callId", cs.id, "rx", vrx, "lost", vlost, "tx", vtx)
+	}
+	p.closeVideo(cs)
 	if cs.engine != nil {
 		// 收包统计（Info 级）：回铃音等早期媒体排查用——rx=0 说明
 		// 对端 RTP 未到达（网络/地址问题），rx>0 说明到达但播放链路问题
