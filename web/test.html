@@ -17,9 +17,13 @@
   }
   h1 { font-size: 20px; margin-bottom: 4px; }
   .sub { color: var(--gray); font-size: 13px; margin-bottom: 20px; }
-  /* minmax(0,1fr) 允许列收缩：防止日志长行把右列最小宽度撑大、挤压左列 */
-  .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; max-width: 1000px; }
-  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  /* 三栏：左=控制，中=视频，右=事件日志。minmax(0,1fr) 允许列收缩，
+     防止日志长行把列的最小宽度撑大、挤压其他列 */
+  .grid {
+    display: grid; gap: 16px; max-width: 1420px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr);
+  }
+  @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
   .card {
     background: var(--card); border: 1px solid var(--border); border-radius: 10px;
     padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.04);
@@ -48,7 +52,17 @@
   button.green { background: var(--green); }
   button.red { background: var(--red); }
   button.gray { background: #6b7280; }
+  button.yellow { background: var(--warn); }
   button.ghost { background: #fff; color: var(--text); border: 1px solid var(--border); }
+  /* 图标按钮：与软电话通话面板一致的观感——开=蓝底白图标，关=浅灰底红图标 */
+  .icon-btn {
+    width: 38px; height: 38px; padding: 0; border-radius: 8px; border: none;
+    display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+    background: var(--primary); color: #fff;
+  }
+  .icon-btn.off { background: #e5e7eb; }
+  .icon-btn:hover { filter: brightness(0.95); }
+  .icon-btn svg { display: block; }
   #callArea {
     background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px;
     padding: 14px; margin-bottom: 12px;
@@ -57,7 +71,7 @@
   #callArea .hint { font-size: 12px; color: var(--gray); margin-bottom: 10px; }
   #timer { font-variant-numeric: tabular-nums; color: var(--gray); font-size: 13px; }
   #log {
-    height: 560px; overflow-y: auto; background: #0f172a; color: #cbd5e1;
+    height: 360px; overflow-y: auto; background: #0f172a; color: #cbd5e1;
     border-radius: 8px; padding: 10px; font-family: Consolas, Monaco, monospace;
     font-size: 12px; line-height: 1.7;
     /* 长行（如状态快照 JSON）强制换行，防止撑破 grid 列宽 */
@@ -69,11 +83,34 @@
   #log .err { color: #fca5a5; }
   #log .info { color: #cbd5e1; }
   .state-line { font-size: 13px; color: var(--gray); margin-top: 6px; word-break: break-all; }
+  select {
+    padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 13px; background: #fff; outline: none;
+  }
+  label.chk {
+    min-width: auto; display: inline-flex; align-items: center; gap: 4px;
+    color: var(--text); font-size: 13px; cursor: pointer;
+  }
+  .vlabel {
+    font-size: 12px; color: var(--gray); margin-bottom: 4px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .vlabel .badge { padding: 1px 8px; font-variant-numeric: tabular-nums; }
+  /* 远端/本地竖排：单列铺满列宽，画面尽量大 */
+  .video-grid { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 10px; }
+  /* 订阅参数：四格一行，标签在上、控件在下，窄列也不折行 */
+  .filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .filters label { min-width: 0; font-size: 12px; }
+  .filters select { width: 100%; margin-top: 4px; padding: 6px 6px; }
+  .video-grid video {
+    width: 100%; display: block; background: #000; border-radius: 8px;
+    aspect-ratio: 4 / 3; object-fit: contain;
+  }
 </style>
 </head>
 <body>
 <h1>mti-sip-phone 测试页面</h1>
-<p class="sub">通过本地 WebSocket 控制 SIP 软电话：网页拨号、接听、挂断（使用 JS SDK 实现）</p>
+<p class="sub">通过本地 WebSocket 控制 SIP 软电话：网页拨号、接听、挂断、视频呼叫与视频画面订阅（使用 JS SDK 实现）</p>
 
 <div class="grid">
   <!-- 左列：连接、拨号与通话控制 -->
@@ -99,7 +136,8 @@
       <div class="row">
         <label>号码</label>
         <input type="text" id="dialTarget" placeholder="如 1001 或 sip:1001@10.168.4.40">
-        <button id="btnDial">拨号</button>
+        <button id="btnDial">呼叫</button>
+        <button id="btnDialVideo">视频呼叫</button>
       </div>
     </div>
 
@@ -133,10 +171,16 @@
         <div class="hint" id="callHint"></div>
         <div class="row">
           <button id="btnAnswer" class="green">接听</button>
+          <button id="btnAnswerVideo" class="green">视频接听</button>
           <button id="btnReject" class="red">拒接</button>
-          <button id="btnMute" class="ghost">保持</button>
+          <button id="btnMute" class="yellow" style="display:none">保持</button>
           <button id="btnHangup" class="red">挂断</button>
           <span id="timer"></span>
+        </div>
+        <div class="row" id="mediaRow" style="display:none">
+          <button id="btnMic" class="icon-btn" title="麦克风"></button>
+          <button id="btnSpeaker" class="icon-btn" title="扬声器"></button>
+          <button id="btnVideoToggle" class="icon-btn" title="视频" style="display:none"></button>
         </div>
       </div>
       <p id="noCall" class="state-line">当前没有进行中的通话</p>
@@ -161,6 +205,65 @@
         <button id="btnNotifyUpdate" class="ghost">告知新版本</button>
       </div>
       <p class="state-line">模拟业务前端流程：查到更高版本后告知软电话。软电话只会弹窗提示，是否下载/重启由用户在软电话界面上确认。</p>
+    </div>
+  </div>
+
+  <!-- 中列：视频 -->
+  <div>
+    <div class="card">
+      <h2>视频
+        <span id="videoBadge" class="badge">未订阅</span>
+      </h2>
+      <!-- 四个参数一行排开（每格标签在上、选择框在下），窄栏也不折行 -->
+      <div class="filters">
+        <label>最大宽
+          <select id="vidMaxW">
+            <option value="320">320</option>
+            <option value="640" selected>640</option>
+            <option value="960">960</option>
+            <option value="1280">1280</option>
+          </select>
+        </label>
+        <label>最大高
+          <select id="vidMaxH">
+            <option value="240">240</option>
+            <option value="480">480</option>
+            <option value="640" selected>640</option>
+            <option value="720">720</option>
+          </select>
+        </label>
+        <label>帧率
+          <select id="vidFps">
+            <option value="5">5</option>
+            <option value="10">10</option>
+            <option value="15">15</option>
+            <option value="30" selected>30</option>
+          </select>
+        </label>
+        <label>质量
+          <select id="vidQuality">
+            <option value="50">50</option>
+            <option value="75" selected>75</option>
+            <option value="90">90</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="vidLocal" checked> 同时订阅本地画面</label>
+        <button id="btnSubVideo" class="green">订阅视频</button>
+        <button id="btnUnsubVideo" class="ghost">取消订阅</button>
+      </div>
+      <p class="state-line">订阅<b>必定包含远端画面</b>（本地画面可选）。订阅期间<b>软电话自动关闭视频窗口</b>，画面改在本页显示；取消订阅后窗口自动恢复。</p>
+      <div class="video-grid">
+        <div>
+          <div class="vlabel">远端画面 <span id="remoteStat" class="badge">—</span></div>
+          <video id="remoteVideo" playsinline muted></video>
+        </div>
+        <div>
+          <div class="vlabel">本地画面 <span id="localStat" class="badge">—</span></div>
+          <video id="localVideo" playsinline muted></video>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -287,6 +390,36 @@
     addLog('info', data.muted ? '已保持' : '已取消保持');
   });
 
+  // 麦克风/扬声器开关（桌面面板或网页任一侧改动都会推来）
+  sdk.on('call.audio', function (data) {
+    if (!data.call) { return; }
+    if (currentCall && currentCall.id === data.call.id) { currentCall = data.call; }
+    applyMediaButtons(data.call);
+    addLog('info', '音频开关: 麦克风' + (data.call.micMuted ? '静音' : '开') +
+      '，扬声器' + (data.call.speakerMuted ? '静音' : '开'));
+  });
+
+  // 视频状态变化（协商成功 / 开关切换 / 拿到对端分辨率）
+  sdk.on('call.video', function (data) {
+    var v = data.call && data.call.video;
+    if (!v) { return; }
+    if (currentCall && currentCall.id === data.call.id) { currentCall = data.call; }
+    applyMediaButtons(data.call);
+    if (!v.enabled) {
+      clearVideos(); // 视频被关闭：清成黑底，不留定格画面
+    }
+    addLog('ev', '视频状态: 协商=' + v.negotiated + ' 开启=' + v.enabled +
+      ' 回显=' + v.previewOn + ' 发送=' + v.sending +
+      ' 远端=' + (v.width || 0) + '×' + (v.height || 0));
+  });
+
+  // 网页视频订阅状态（本页或其他页面）：订阅后软电话隐藏视频窗口
+  sdk.on('video.web', function (data) {
+    addLog('ev', '网页视频订阅: ' + (data.active
+      ? '有网页在看画面（软电话视频窗口已隐藏，订阅数 ' + data.viewers + '）'
+      : '已无网页订阅（软电话恢复显示视频窗口）'));
+  });
+
   // 自动更新状态推送（受理 / 下载进度 / 就绪 / 失败）
   sdk.on('system.update', function (st) {
     var msg = '更新状态: ' + st.phase;
@@ -348,6 +481,112 @@
     });
   };
 
+  // 视频呼叫（REQ-VIDEO-003 的网页入口）：与桌面「视频呼叫」按钮等价
+  $('btnDialVideo').onclick = function () {
+    var target = $('dialTarget').value.trim();
+    if (!target) { addLog('err', '请输入号码'); return; }
+    addLog('info', '发起视频呼叫: ' + target);
+    sdk.dialVideo(target).then(function (res) {
+      addLog('ok', '视频呼叫已发起（callId: ' + res.callId + '）');
+    }).catch(function (e) {
+      addLog('err', '视频呼叫失败: ' + e.message);
+    });
+  };
+
+  // ---------------- 视频订阅（REQ-VIDEO-009）----------------
+  var firstFrameLogged = false; // 首帧只在日志里提示一次，之后看角标统计
+  var frameCount = { local: 0, remote: 0 };
+
+  function statText(s) {
+    return s.width + '×' + s.height + ' · ' + s.fps + 'fps · ' + s.kbps + 'kbps';
+  }
+  function resetStats() {
+    $('remoteStat').textContent = '—';
+    $('localStat').textContent = '—';
+    frameCount.local = 0;
+    frameCount.remote = 0;
+    firstFrameLogged = false;
+  }
+
+  // 清空两路画面：视频被关闭、通话结束、取消订阅时调用（否则 <video> 定格在最后一帧）
+  function clearVideos() {
+    remoteRenderer.clear();
+    localRenderer.clear();
+    resetStats();
+  }
+
+  var remoteRenderer = sdk.createVideoRenderer($('remoteVideo'), {
+    onStats: function (s) { $('remoteStat').textContent = statText(s); }
+  });
+  var localRenderer = sdk.createVideoRenderer($('localVideo'), {
+    onStats: function (s) { $('localStat').textContent = statText(s); }
+  });
+
+  // 视频帧（JPEG blob）：按通道分别渲染；帧本身不进日志，避免刷屏
+  sdk.on('video.frame', function (f) {
+    if (f.channel === 'local') {
+      localRenderer.render(f.blob);
+      frameCount.local++;
+    } else {
+      remoteRenderer.render(f.blob);
+      frameCount.remote++;
+    }
+    if (!firstFrameLogged) {
+      firstFrameLogged = true;
+      addLog('ok', '视频帧已到达（' + (f.channel === 'local' ? '本地' : '远端') +
+        '，' + f.size + ' 字节/帧）');
+    }
+  });
+
+  $('btnSubVideo').onclick = function () {
+    // 订阅必定包含远端画面（软电话强制），本地画面可选
+    var opts = {
+      local: $('vidLocal').checked,
+      remote: true,
+      maxWidth: parseInt($('vidMaxW').value, 10),
+      maxHeight: parseInt($('vidMaxH').value, 10),
+      fps: parseInt($('vidFps').value, 10),
+      quality: parseInt($('vidQuality').value, 10)
+    };
+    addLog('info', '订阅视频: ' + JSON.stringify(opts));
+    sdk.subscribeVideo(opts).then(function (res) {
+      resetStats();
+      $('videoBadge').textContent = '已订阅';
+      $('videoBadge').className = 'badge ok';
+      addLog('ok', '视频已订阅（生效参数 ' + res.maxWidth + '×' + res.maxHeight +
+        ' / ' + res.fps + 'fps / 质量 ' + res.quality + '）');
+      if (res.call && res.call.video) {
+        var v = res.call.video;
+        addLog('info', '当前通话视频：协商=' + v.negotiated + ' 发送=' + v.sending +
+          ' 远端=' + (v.width || 0) + '×' + (v.height || 0));
+      }
+      if (!res.call) {
+        addLog('info', '当前没有通话：订阅已生效，通话开始后画面会自动推来');
+      }
+    }).catch(function (e) {
+      addLog('err', '订阅失败: ' + e.message);
+    });
+  };
+
+  $('btnUnsubVideo').onclick = function () {
+    sdk.unsubscribeVideo().then(function () {
+      clearVideos();
+      $('videoBadge').textContent = '未订阅';
+      $('videoBadge').className = 'badge';
+      addLog('ok', '已取消订阅（软电话恢复显示视频窗口）');
+    }).catch(function (e) {
+      addLog('err', '取消订阅失败: ' + e.message);
+    });
+  };
+
+  $('btnAnswerVideo').onclick = function () {
+    if (!currentCall) { return; }
+    addLog('info', '视频接听: ' + (currentCall.remote || ''));
+    sdk.answerVideo(currentCall.id).catch(function (e) {
+      addLog('err', '视频接听失败: ' + e.message);
+    });
+  };
+
   // 生成 sip:// 拉起链接：点击后浏览器调用系统协议唤起软电话
   //（软电话未运行时由系统启动；运行中则转发参数并更新注册配置）
   $('btnGenUri').onclick = function () {
@@ -381,8 +620,64 @@
     var muted = $('btnMute').textContent === '保持';
     sdk.mute(currentCall.id, muted).catch(function (e) { addLog('err', '保持切换失败: ' + e.message); });
   };
+  $('btnMic').onclick = function () {
+    if (!currentCall) { return; }
+    sdk.muteMic(currentCall.id, !currentCall.micMuted).catch(function (e) {
+      addLog('err', '麦克风切换失败: ' + e.message);
+    });
+  };
+  $('btnSpeaker').onclick = function () {
+    if (!currentCall) { return; }
+    sdk.muteSpeaker(currentCall.id, !currentCall.speakerMuted).catch(function (e) {
+      addLog('err', '扬声器切换失败: ' + e.message);
+    });
+  };
+  $('btnVideoToggle').onclick = function () {
+    if (!currentCall) { return; }
+    var enabled = !(currentCall.video && currentCall.video.enabled);
+    sdk.setVideo(currentCall.id, enabled).catch(function (e) {
+      addLog('err', '视频开关切换失败: ' + e.message);
+    });
+  };
 
   // ---------------- 界面状态 ----------------
+
+  // 媒体开关图标：与软电话通话面板同一套 Material Design 路径
+  //（internal/ui/icons.go 的 micIconSVG / speakerIconSVG / videoIconSVG）
+  var ICON_PATH = {
+    micOn: 'M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z',
+    micOff: 'M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5a3 3 0 0 0-5.54-1.65L11 4.86V11c0 .06-.01.11-.02.17l3.99 4zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z',
+    speakerOn: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.5 4.5 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06a9 9 0 0 0 0-17.54z',
+    speakerOff: 'M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z',
+    videoOn: 'M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z',
+    videoOff: 'M21 6.5l-4 4V7c0-.55-.45-1-1-1H9.82L21 17.18V6.5zM3.27 2L2 3.27 4.73 6H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.21 0 .39-.08.54-.18L19.73 21 21 19.73 3.27 2z'
+  };
+  var ICON_ON_COLOR = '#ffffff';  // 开：白图标 + 蓝底
+  var ICON_OFF_COLOR = '#e53935'; // 关：红图标 + 浅灰底
+
+  function iconSvg(d, color) {
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="22" height="22">' +
+      '<path fill="' + color + '" d="' + d + '"/></svg>';
+  }
+
+  // 图标按钮状态：开 = 蓝底白图标，关 = 浅灰底红图标（与软电话一致）
+  function setIconButton(btn, on, pathOn, pathOff) {
+    btn.innerHTML = iconSvg(on ? pathOn : pathOff, on ? ICON_ON_COLOR : ICON_OFF_COLOR);
+    if (on) {
+      btn.classList.remove('off');
+    } else {
+      btn.classList.add('off');
+    }
+  }
+
+  // 媒体开关按钮外观：按通话状态刷新（状态来自软电话，网页与桌面面板一致）
+  function applyMediaButtons(call) {
+    if (!call) { return; }
+    setIconButton($('btnMic'), call.micMuted !== true, ICON_PATH.micOn, ICON_PATH.micOff);
+    setIconButton($('btnSpeaker'), call.speakerMuted !== true, ICON_PATH.speakerOn, ICON_PATH.speakerOff);
+    setIconButton($('btnVideoToggle'), !!(call.video && call.video.enabled), ICON_PATH.videoOn, ICON_PATH.videoOff);
+  }
+
   function showCall(call) {
     $('callArea').style.display = 'block';
     $('noCall').style.display = 'none';
@@ -393,9 +688,17 @@
 
     var ringing = call.state === 'ringing';
     var incoming = call.direction === 'incoming';
+    var established = call.state === 'established';
     $('btnAnswer').style.display = (ringing && incoming) ? '' : 'none';
+    // 视频来电才显示「视频接听」（与桌面来电弹窗一致，REQ-VIDEO-004）
+    $('btnAnswerVideo').style.display = (ringing && incoming && call.hasVideo) ? '' : 'none';
     $('btnReject').style.display = (ringing && incoming) ? '' : 'none';
-    $('btnMute').style.display = (call.state === 'established') ? '' : 'none';
+    // 接通后才有一排媒体开关（保持/麦克风/扬声器/视频）
+    $('btnMute').style.display = established ? '' : 'none';
+    $('mediaRow').style.display = established ? '' : 'none';
+    // 纯音频通话不显示视频开关（与桌面通话面板一致，REQ-VIDEO-008）
+    $('btnVideoToggle').style.display = (established && call.hasVideo) ? '' : 'none';
+    applyMediaButtons(call);
     // 来电振铃时隐藏挂断（拒接即挂断）；呼出中/通话中显示挂断
     $('btnHangup').style.display = (ringing && incoming) ? 'none' : '';
 
@@ -409,7 +712,11 @@
     currentCall = null;
     $('callArea').style.display = 'none';
     $('noCall').style.display = '';
+    $('btnMute').style.display = 'none';
     $('btnMute').textContent = '保持';
+    $('mediaRow').style.display = 'none';
+    // 通话结束：画面停了，订阅状态还在（下次通话继续推），画面清成黑底
+    clearVideos();
   }
 
   function startTimer() {

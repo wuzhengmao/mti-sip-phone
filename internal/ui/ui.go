@@ -165,6 +165,7 @@ type App struct {
 	localVideoEver  bool          // 已收到过本地帧（仅用于日志）
 	videoSized      bool          // 窗口尺寸是否已按对端比例初始化
 	videoFullscreen bool
+	webVideoOn      bool // 有网页正在接收视频画面（REQ-VIDEO-009，此时不显示视频窗口）
 
 	// 帧投递：媒体层 goroutine 写、主线程读（合并刷新，见 ui_video.go）
 	remoteFrame   atomic.Pointer[frameRef]
@@ -1040,11 +1041,13 @@ func (a *App) onEvent(ev core.Event) {
 			a.callSending = call.Video.Sending
 			a.applyVideoButton()
 			a.applyLocalVideoVisibility()
-			if a.callHasVideo {
-				// 协商成功就把窗口**对象**建好（但**不 Show**）：帧要先有落点才能
+			if a.callHasVideo || a.callSending {
+				// 把窗口**对象**建好（但**不 Show**）：帧要先有落点才能
 				// 触发 remoteHasVideo，否则永远等不到"有内容"的那一刻——摄像头
 				// 禁用时 callSending=false，窗口又只能靠 remoteHasVideo 触发，
 				// 会形成死锁（表现为"远端画面收到了却没有视频窗口"）。
+				// callSending（视频呼叫拨出/视频接听）同样要先建好窗口，
+				// 本地回显才有地方落。
 				a.ensureVideoWindow()
 			}
 			// 窗口显隐由「有没有内容可显示」决定，见 wantVideoWindow：
@@ -1055,6 +1058,21 @@ func (a *App) onEvent(ev core.Event) {
 			//（呼出路径），此刻按"通话中"重建会显示错的按钮组。
 			// 视频开关的显隐由 call.established 时的 rebuildCallRows 按
 			// callHasVideo 决定，顺序上 call.video 一定先被处理。
+		}
+
+	case "video.web":
+		// 网页端视频订阅状态变化（REQ-VIDEO-009）：有网页在看画面时
+		// 软电话自动关闭视频窗口；网页退订后按当前内容恢复显示。
+		//
+		// ⚠️ 负载是 core.WebVideoState 结构体——总线是进程内的，事件不经
+		// JSON 序列化，**不能**断言成 map[string]any（那样断言恒失败，
+		// 表现为"订阅了但桌面窗口不关"）。只有 WS 客户端收到的是 JSON 对象。
+		st, ok := ev.Data.(core.WebVideoState)
+		if ok && st.Active != a.webVideoOn {
+			a.webVideoOn = st.Active
+			logx.Logger().Info("网页视频订阅状态变化",
+				"active", st.Active, "local", st.Local, "remote", st.Remote, "viewers", st.Viewers)
+			a.syncVideoWindow()
 		}
 
 	case "call.dialing":
@@ -1120,6 +1138,17 @@ func (a *App) onEvent(ev core.Event) {
 			if muted, ok := data["muted"].(bool); ok {
 				a.setHoldButton(muted)
 			}
+		}
+
+	case "call.audio":
+		// 麦克风/扬声器开关变化（REQ-UI-023）：桌面按钮与网页控制共用一份状态，
+		// 网页改了也要同步本机面板的按钮外观与"会话内记忆"。
+		if callID, call := callData(ev.Data); call != nil && callID == a.activeCallID {
+			a.activeCall = call
+			a.micOn = !call.MicMuted
+			a.speakerOn = !call.SpeakerMuted
+			a.applyMicButton()
+			a.applySpeakerButton()
 		}
 	}
 }

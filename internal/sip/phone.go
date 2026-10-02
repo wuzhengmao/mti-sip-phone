@@ -52,18 +52,18 @@ type Phone struct {
 
 // callSession 一次通话的运行时状态。
 type callSession struct {
-	id          string
-	dir         string // incoming / outgoing
-	remote      string
-	remoteName  string
-	engine      *media.Engine
-	dialogC     *sipgo.DialogClientSession // 呼出
-	dialogS     *sipgo.DialogServerSession // 呼入
-	ctx         context.Context            // 会话上下文：挂断/清理时取消，用于竞态判断
-	cancel      context.CancelFunc
-	established bool
-	holdMu      sync.Mutex // 保持 re-INVITE 串行化（CSeq 必须严格递增）
-	mediaStarted bool      // 媒体引擎已启动（183 早期媒体可能提前启动）
+	id           string
+	dir          string // incoming / outgoing
+	remote       string
+	remoteName   string
+	engine       *media.Engine
+	dialogC      *sipgo.DialogClientSession // 呼出
+	dialogS      *sipgo.DialogServerSession // 呼入
+	ctx          context.Context            // 会话上下文：挂断/清理时取消，用于竞态判断
+	cancel       context.CancelFunc
+	established  bool
+	holdMu       sync.Mutex // 保持 re-INVITE 串行化（CSeq 必须严格递增）
+	mediaStarted bool       // 媒体引擎已启动（183 早期媒体可能提前启动）
 
 	// ---- 视频 ----
 	video      *media.VideoEngine // nil = 本次通话没有视频
@@ -318,6 +318,13 @@ func (p *Phone) dial(ctx context.Context, target string, withVideo bool) (string
 	}
 	cs.dialogC = dlg
 
+	// 视频呼叫：**一拨出就打开摄像头与本地回显**（用户要求），不等对端 answer。
+	// 对端 answer 里没有视频时，applyVideoAnswer 会关掉引擎与摄像头，
+	// 并上报全零视频状态让界面收掉视频窗口。
+	if cs.video != nil {
+		p.startVideo(cs, cs.videoSend)
+	}
+
 	go p.outgoingFlow(callCtx, cs, acc)
 	return callID, nil
 }
@@ -503,10 +510,10 @@ func (p *Phone) sendHoldReInvite(cs *callSession, muted bool) {
 
 	// 远程目标：dialog 的远端地址（呼出取 2xx 的 Contact，呼入取 INVITE 的 Contact）
 	var (
-		target    sip.Uri
-		tx        sip.ClientTransaction
-		req       *sip.Request
-		err       error
+		target sip.Uri
+		tx     sip.ClientTransaction
+		req    *sip.Request
+		err    error
 	)
 	switch {
 	case cs.dialogC != nil:
@@ -967,8 +974,8 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 						logx.Logger().Debug("早期媒体 SDP 解析失败", "callId", cs.id, "err", err)
 					} else {
 						cs.mediaStarted = true
-						cs.engine.SetMuted(true)      // 早期媒体阶段静音本端（不发送真实麦克风数据）
-						cs.engine.SetKeepalive(true)  // 持续发送静音保活 NAT 映射
+						cs.engine.SetMuted(true)     // 早期媒体阶段静音本端（不发送真实麦克风数据）
+						cs.engine.SetKeepalive(true) // 持续发送静音保活 NAT 映射
 						p.attachAudio(cs.engine)
 						cs.engine.Start()
 						logx.Logger().Info("早期媒体已建立（回铃音）", "callId", cs.id)
@@ -1015,6 +1022,13 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 			}
 			// 视频：对端可能只接受音频（answer 里 m=video 端口为 0）
 			p.applyVideoAnswer(cs, body)
+		} else if cs.video != nil {
+			// 对端 2xx 没带 SDP（异常对端）：视频无从协商，按"没有视频"处理，
+			// 关掉摄像头并让界面收掉视频窗口（视频呼叫拨出即开摄像头，
+			// 不收回来就会一直空转）。
+			logx.Logger().Info("对端 2xx 未带 SDP，视频按未协商处理", "callId", cs.id)
+			p.closeVideo(cs)
+			p.notifyVideoState(cs)
 		}
 	}
 
@@ -1063,13 +1077,15 @@ func (p *Phone) applyVideoAnswer(cs *callSession, body []byte) {
 	}
 	info, err := offer.Media("video")
 	if err != nil || info.Rejected {
-		logx.Logger().Info("对端未接受视频，本次通话为纯音频", "callId", cs.id)
+		logx.Logger().Info("对端未接受视频，本次通话为纯音频（关闭摄像头与视频窗口）", "callId", cs.id)
 		p.closeVideo(cs)
+		p.notifyVideoState(cs)
 		return
 	}
 	if !cs.video.ApplyAnswer(info) {
-		logx.Logger().Warn("视频协商失败，本次通话为纯音频", "callId", cs.id)
+		logx.Logger().Warn("视频协商失败，本次通话为纯音频（关闭摄像头与视频窗口）", "callId", cs.id)
 		p.closeVideo(cs)
+		p.notifyVideoState(cs)
 	}
 }
 
@@ -1348,7 +1364,7 @@ func (p *Phone) getCall(callID string) *callSession {
 }
 
 // matchByCallID 按 SIP Call-ID 匹配会话：呼入用 dialogS、呼出用 dialogC
-//（此前仅匹配 dialogS，呼出通话的对端 BYE 被忽略——bug 修复）。
+// （此前仅匹配 dialogS，呼出通话的对端 BYE 被忽略——bug 修复）。
 func (p *Phone) matchByCallID(callID string) *callSession {
 	p.mu.Lock()
 	defer p.mu.Unlock()

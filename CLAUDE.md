@@ -93,7 +93,7 @@ internal/
   sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理）
   media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU 编解码、播放环形缓冲、SDP 协商
   audio/      音频设备：malgo 后端（全双工采集/播放、设备枚举/选择、提示音）
-  wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳）
+  wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳、网页视频订阅 video.go）
   updater/    自动更新：前端经 WS 告知新版本 → 用户确认后下载（sha256/
               可执行魔数校验）→ 替换当前可执行文件（.old 备份）→ 重启；
               向总线发布 system.update 事件
@@ -184,6 +184,26 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   扬声器开关同语义，规避 re-INVITE 的 ACK/CSeq 竞态。
 - 摄像头由 `cameraSupervisor` 单协程串行启停（Windows DirectShow 同一设备不能并发打开），
   且**必须先 `StartCamera` 给出采集参数再放开开关**，否则会先用空 ID 抢开默认摄像头。
+
+**网页订阅视频（REQ-VIDEO-009）**：
+
+- `core.App` 的视频出口是**恒定多播对象** `core.videoDemux`（`internal/core/video.go`）：
+  主槽给界面（`SetVideoSink`），附加订阅者走 `AddVideoSink`（wsapi 视频中枢）。
+  sip 层在通话开始时**取一次出口并捕获进闭包**，所以出口对象不能换——
+  早期是单槽、后注册的会把先注册的顶掉（`wsapi.New` 早于 `ui.New`，必踩）。
+  出口**恒不为 nil**（无订阅者时静默丢帧）。
+- `internal/wsapi/video.go` 的 `videoHub`：按「通道 + 参数」分组编码（同一组只编码一次），
+  RGBA → 等比缩放（`x/image/draw`）→ JPEG（stdlib）；**最新帧槽容量 1**，
+  编码跟不上就丢旧帧；推送写锁 `TryLock` 抢不到就丢帧（慢客户端不拖住编码循环）。
+- 订阅是**连接级**的（`video.subscribe` / `video.unsubscribe`），断开自动退订；
+  **远端恒订阅**（`remote` 恒为 true，`local` 才可选）——否则会出现"桌面窗口被隐藏、
+  远端画面却没人看"的糊涂状态；
+  画面经 **WS 二进制消息**推送：`[通道 1B][序号 4B 大端][JPEG]`（通道 1=远端 2=本地）。
+- 订阅期间软电话**不显示视频窗口**：`App.SetWebVideoViewer` 聚合多连接状态 → 发布
+  `video.web` 事件 → UI 置 `webVideoOn`。`wantVideoWindow()` 与 `renderVideoFrame()`
+  **都要拦**——后者里有直接 `Show()` 的分支，只挡前者窗口会被逐帧显示回来。
+- 测试页用 `sdk.createVideoRenderer(videoEl)`：canvas + `captureStream()` 喂 h5 `<video>`
+  （MSE 不支持 MJPEG，逐帧 blob URL 开销大），渲染跟不上直接丢帧。
 
 ## 重要约定
 
@@ -331,15 +351,30 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   还是旧尺寸，窗口随后按"保持左上角"长高，底边就越过通话面板上沿把面板盖住
   ——用户实测的"通话面板第一行不见了"。见 `placeVideoWindow`：带尺寸时用
   `targetRight + insetR - W` 直接算窗口矩形，并在 150/350/800ms 后只做位置校正。
-- **视频：回显开关（`previewOn`）与推送完全解耦**。用户明确要求"关闭回显只是
-  关闭本地的回显，并不影响到本地视频推送到远端"。所以 `SetVideoPreview` 既不调
+- **视频：回显开关（`previewOn`）与推送、网页订阅都解耦**。用户明确要求"关闭回显
+  只是关闭本地的回显，并不影响到本地视频推送到远端"，后来补充"也不该影响网页
+  订阅的本地画面，只要订阅了就该显示，除非禁用视频"。所以本地帧的投递判定是
+  `enabled && (previewOn || 网页订阅本地画面)`（`media.VideoEngine.localFramesWanted`，
+  网页那一侧由 `core.App.LocalVideoWanted` 经 `SetLocalWantedFunc` 注入逐帧求值）——
+  YUV→RGBA 每帧要分配整张图，没人要时就不做这个转换。
+  另外 `SetVideoPreview` 既不调
   `syncCamera`（不启停采集）也不改 `sendEnabled`，只门控"本地帧是否投递给界面"；
   采集的启停条件是 `camConfigured && enabled && sendEnabled`（与回显无关）。
 - **视频：回显区可见性看"意图"不看"首帧"**。摄像头打开失败时回显区仍要显示（黑底），
   所以可见性由 `enabled && callSending && previewOn` 决定，不能等收到本地帧才显示。
-- **视频窗口"有内容才显示"**：`wantVideoWindow() = videoOn && callHasVideo &&
-  (remoteHasVideo || (callSending && previewOn))`。纯音频通话（普通接听、对端无视频）
-  不留空窗口；通话面板的视频开关也只在 `callHasVideo` 时加进行3。
+- **视频窗口"有内容才显示"**：`wantVideoWindow()` = 本端在推流且回显开着
+  （`callSending && previewOn`，**视频呼叫一拨出就成立**，本地回显立刻可见，
+  不等协商/不等对端画面）或对端画面已到（`callHasVideo && remoteHasVideo`）。
+  纯音频通话（普通接听、对端无视频）不留空窗口；通话面板的视频开关也只在
+  `callHasVideo` 时加进行3。
+- **视频呼叫是"拨出即开摄像头"**（用户要求）：`sip.dial` 发完 INVITE 就
+  `startVideo`，`applyVideoAnswer` 在三种"对端没有视频"的情形（answer 无视频段 /
+  m=video 端口为 0 / 2xx 根本没带 SDP）下 `closeVideo` + `notifyVideoState`——
+  后者在引擎已回收时上报**全零状态**，界面据此把窗口和摄像头收回来。
+  注意顺序坑：首个 `Sending=true` 状态会在 core 登记通话**之前**上报
+  （tel.DialVideo 返回后调用方才 upsertCall），`core.App` 用 `pendingVideo`
+  暂存、`upsertCall` 时并入、`DialVideo` 在 `call.dialing` 之后补发一次
+  `call.video`（顺序不能反：界面要先有 activeCallID 才认这条事件）。
 - **视频窗口摆放要直接读通话面板的可见矩形**（`visibleRect` + DWM 扩展框架边界），
   不要自己按工作区+边距算：面板定位用的是**未缩放**的 `callPanelMargin`(16 物理像素)，
   视频窗口若按 `16×缩放` 算，DPI 非 100%（如 125%）时就差 4px。
@@ -348,6 +383,9 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   一次性垫高；垫高后深度**只增不减**（读多少写多少），表现为"通话越久延迟越大、
   有几秒"。早先容量给到 8 秒，等于允许累积 8 秒延迟。截断时会打
   `播放缓冲超深已截断` 的 Warn（限频 10s），这是排查延迟的第一线索。
+- **视频：新流的第一包就要发 PLI 催关键帧**（`handleRTP` 的 `!v.hasSeq` 分支）。
+  解码要等 IDR，而不少对端（实测 MicroSIP）只在被请求或很久之后才发——不催的话
+  表现为"接通后视频窗口迟迟不出画面，开关一下视频（内部会发 PLI）才出来"。
 - **视频：丢包时必须 `dep.Reset()` 并置 `waitKey`**，不能只清访问单元。
   H264 的 FU-A 重组缓冲里留着丢包前的分片，不重置会让丢包后的分片续接上去，
   拼出一个"缝合怪" NAL——解码器照单全收，画面就是花屏。同时发 PLI 催对端出 IDR，

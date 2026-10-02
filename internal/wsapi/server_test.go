@@ -62,15 +62,15 @@ func (s *stubTel) VideoSupported() bool { return false }
 func (s *stubTel) DialVideo(ctx context.Context, target string) (string, error) {
 	return "", core.ErrVideoUnsupported
 }
-func (s *stubTel) AnswerVideo(callID string) error        { return core.ErrVideoUnsupported }
-func (s *stubTel) IncomingHasVideo(callID string) bool    { return false }
-func (s *stubTel) VideoActive(callID string) bool         { return false }
+func (s *stubTel) AnswerVideo(callID string) error     { return core.ErrVideoUnsupported }
+func (s *stubTel) IncomingHasVideo(callID string) bool { return false }
+func (s *stubTel) VideoActive(callID string) bool      { return false }
 func (s *stubTel) SetVideoEnabled(callID string, on bool) error {
 	return core.ErrVideoUnsupported
 }
 func (s *stubTel) SetVideoPreview(callID string, on bool) error { return core.ErrVideoUnsupported }
-func (s *stubTel) SetCamera(deviceID string) error            { return core.ErrVideoUnsupported }
-func (s *stubTel) VideoDevices() []core.VideoDevice           { return nil }
+func (s *stubTel) SetCamera(deviceID string) error              { return core.ErrVideoUnsupported }
+func (s *stubTel) VideoDevices() []core.VideoDevice             { return nil }
 
 // newTestServer 构造测试用服务：stub 电话层 + 真实更新器 + httptest 服务。
 // 更新器指向临时目录下的假 exe 路径（只做参数校验与状态机，不触发下载）。
@@ -307,6 +307,41 @@ func TestDialFlow(t *testing.T) {
 	msg, _ = waitResponseAndEvent(t, conn, "call.terminated")
 	if msg.OK == nil || !*msg.OK {
 		t.Fatalf("挂断应成功，收到: %+v", msg)
+	}
+}
+
+// TestMuteMicSpeakerFlow 麦克风/扬声器开关（REQ-UI-023）：方法生效、
+// 状态记入通话快照，并广播 call.audio 事件（桌面面板与网页据此同步按钮外观）。
+func TestMuteMicSpeakerFlow(t *testing.T) {
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("1"), Method: "call.dial",
+		Params: json.RawMessage(`{"target":"1001"}`)})
+	msg, _ := waitResponseAndEvent(t, conn, "call.dialing")
+	callID := msg.Data.(map[string]any)["callId"].(string)
+	waitEvent(t, conn, "call.established")
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("2"), Method: MethodMuteMic,
+		Params: json.RawMessage(`{"callId":"` + callID + `","muted":true}`)})
+	resp, ev := waitResponseAndEvent(t, conn, EvCallAudio)
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("麦克风静音应成功，收到: %+v", resp)
+	}
+	if call := ev.Data.(map[string]any)["call"].(map[string]any); call["micMuted"] != true {
+		t.Fatalf("call.audio 事件里 micMuted 应为 true: %+v", call)
+	}
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("3"), Method: MethodMuteSpeaker,
+		Params: json.RawMessage(`{"callId":"` + callID + `","muted":true}`)})
+	resp, ev = waitResponseAndEvent(t, conn, EvCallAudio)
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("扬声器静音应成功，收到: %+v", resp)
+	}
+	call := ev.Data.(map[string]any)["call"].(map[string]any)
+	if call["speakerMuted"] != true || call["micMuted"] != true {
+		t.Fatalf("call.audio 事件状态不符: %+v", call)
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 )
 
 // FindFreeWSPort 探测空闲 WS 端口：从 start 开始，被占用则 +1 递增
-//（最多尝试 100 个），返回可用端口。
+// （最多尝试 100 个），返回可用端口。
 func FindFreeWSPort(start int) int {
 	for i := 0; i < 100; i++ {
 		addr := fmt.Sprintf("127.0.0.1:%d", start+i)
@@ -37,12 +37,13 @@ func FindFreeWSPort(start int) int {
 //   - GET /sdk/*         JS SDK 静态文件
 //   - GET /ws            WebSocket 端点
 type Server struct {
-	app *core.App
+	app   *core.App
+	video *videoHub // 网页视频订阅中枢（REQ-VIDEO-009）
 }
 
-// New 创建服务。
+// New 创建服务。视频中枢同时注册为 core.App 的视频帧附加订阅者。
 func New(app *core.App) *Server {
-	return &Server{app: app}
+	return &Server{app: app, video: newVideoHub(app)}
 }
 
 // Handler 返回 HTTP 处理器（供测试与内嵌使用）。

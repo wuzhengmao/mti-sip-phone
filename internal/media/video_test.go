@@ -8,6 +8,39 @@ import (
 	"github.com/pion/rtp/codecs"
 )
 
+// TestLocalFramesWanted 本地帧投递判定（需求 7 修订，REQ-VIDEO-009）：
+// 回显开着要投；回显关着但网页订阅了本地画面**也要投**；禁用视频则都不投。
+func TestLocalFramesWanted(t *testing.T) {
+	v := &VideoEngine{}
+	if v.localFramesWanted() {
+		t.Fatal("视频未开启时不应投递本地帧")
+	}
+
+	v.enabled.Store(true)
+	if v.localFramesWanted() {
+		t.Fatal("回显关闭且无其他消费者时不应投递本地帧")
+	}
+
+	// 网页订阅了本地画面：回显关着也要投
+	v.SetLocalWantedFunc(func() bool { return true })
+	if !v.localFramesWanted() {
+		t.Fatal("网页订阅本地画面时应投递本地帧（与回显开关无关）")
+	}
+
+	// 回显开着：投
+	v.SetLocalWantedFunc(func() bool { return false })
+	v.previewOn.Store(true)
+	if !v.localFramesWanted() {
+		t.Fatal("回显开启时应投递本地帧")
+	}
+
+	// 禁用视频：两边都不投（用户要求）
+	v.enabled.Store(false)
+	if v.localFramesWanted() {
+		t.Fatal("禁用视频后不应投递本地帧")
+	}
+}
+
 // --- SDP：音频行为回归 + 视频扩展 ---
 
 // TestSDPOfferAudioGolden 纯音频 offer 的逐字节回归。
@@ -185,7 +218,7 @@ func TestVideoRTPRoundTrip(t *testing.T) {
 			for i := range big {
 				big[i] = 0x42
 			}
-			au := []byte{0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f} // SPS
+			au := []byte{0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f}    // SPS
 			au = append(au, 0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80) // PPS
 			au = append(au, 0, 0, 0, 1, 0x65)                   // IDR 头
 			return append(au, big...)

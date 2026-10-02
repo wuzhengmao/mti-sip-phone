@@ -50,18 +50,20 @@ type VideoEngine struct {
 	dep videoDepacketizer
 
 	// 发送侧
-	sndMu  sync.Mutex
-	ssrc   uint32
-	seq    uint16
-	ts     uint32
-	lastTS time.Time
+	sndMu    sync.Mutex
+	ssrc     uint32
+	seq      uint16
+	ts       uint32
+	lastTS   time.Time
 	forceKey atomic.Bool // 下一帧强制关键帧（收到 PLI/FIR 时置位）
 
 	// 开关（原子，采集/发送/解码三处读取）
 	enabled     atomic.Bool // 需求 8：关闭视频（不显示远端、不推本地）
 	sendEnabled atomic.Bool // 本次通话是否推送本地视频（普通接听 = false）
-	previewOn     atomic.Bool // 需求 7：本地回显开关（**只管本地显示，不影响推向远端**）
+	previewOn   atomic.Bool // 需求 7：本地回显开关（**只管本地显示，不影响推向远端**）
 	holdTx      atomic.Bool // 对端保持
+	// localWantedFn 界面回显之外的本地帧消费者（网页订阅本地画面，REQ-VIDEO-009）
+	localWantedFn atomic.Pointer[func() bool]
 
 	// 接收侧（recvMu 只护重组状态）
 	recvMu   sync.Mutex
@@ -97,10 +99,10 @@ type VideoEngine struct {
 	camReq        chan struct{} // 通知采集监管协程重新评估启停
 
 	// 输出
-	sinkMu    sync.RWMutex
-	sink      FrameSink
-	stateMu   sync.RWMutex
-	stateCb   func() // 状态变化回调（协商成功/开关切换/分辨率变化），低频
+	sinkMu  sync.RWMutex
+	sink    FrameSink
+	stateMu sync.RWMutex
+	stateCb func() // 状态变化回调（协商成功/开关切换/分辨率变化），低频
 
 	stop      chan struct{}
 	closeOnce sync.Once
@@ -159,6 +161,31 @@ func (v *VideoEngine) SetFrameSink(s FrameSink) {
 	v.sinkMu.Lock()
 	v.sink = s
 	v.sinkMu.Unlock()
+}
+
+// SetLocalWantedFunc 注入「界面回显之外还有人要本地帧吗」的判定，例如
+// 网页订阅了本地画面（REQ-VIDEO-009）。
+//
+// 本地帧的 YUV→RGBA 转换每帧要分配一整张图，所以采集循环只在**确实有人要**
+// 时才做：回显开着（界面要）或本判定为真（网页要）。传 nil 表示没有额外消费者。
+// ⚠️ 判定在采集 goroutine 上逐帧调用，实现必须快（内部只读一个状态位）。
+func (v *VideoEngine) SetLocalWantedFunc(f func() bool) {
+	v.localWantedFn.Store(&f)
+}
+
+// localWanted 当前是否有界面回显之外的消费者需要本地帧。
+func (v *VideoEngine) localWanted() bool {
+	if f := v.localWantedFn.Load(); f != nil && *f != nil {
+		return (*f)()
+	}
+	return false
+}
+
+// localFramesWanted 本地帧是否要投递给界面/网页：视频开着，且
+// **回显开着或网页订阅了本地画面**（需求 7 修订：关闭回显只关界面显示，
+// 不影响网页订阅；禁用视频则两边都没有）。
+func (v *VideoEngine) localFramesWanted() bool {
+	return v.enabled.Load() && (v.previewOn.Load() || v.localWanted())
 }
 
 func (v *VideoEngine) emit(local bool, img *image.RGBA) {
@@ -642,6 +669,10 @@ func (v *VideoEngine) handleRTP(pkt *rtp.Packet) {
 		v.recvSSRC = pkt.SSRC
 		v.hasSeq = true
 		v.waitKey = true
+		// 新流的第一包就催对端出关键帧（PLI）：解码要等 IDR，而不少对端
+		// （如 MicroSIP）只在被请求或很久之后才发。不催的话表现为"接通后
+		// 视频窗口一直不出画面，开关一下视频（内部会发 PLI）才出来"。
+		needKeyframe = true
 	}
 	v.lastSeq = pkt.SequenceNumber
 
@@ -897,10 +928,12 @@ func (v *VideoEngine) captureLoop(ctx context.Context) {
 	default:
 	}
 
-	rc, ok := v.NegotiatedCodec()
-	if !ok {
-		return
-	}
+	// ⚠️ **不能因为"还没协商出编码"就退出采集**：视频呼叫是拨出即开摄像头的，
+	// 那时 SDP 还没协商（本地回显与编码无关，必须立刻能看）。早期在这里
+	// `NegotiatedCodec()` 不成立就 return，表现为"视频窗口打开了、摄像头灯也亮了，
+	// 但没有本地回显、对方也看不到我的视频"——整个采集 goroutine 静悄悄退出，
+	// 而 startVideo 是幂等的，接通后不会再启一次。
+	// 现在改为：编码器按需创建，协商好之前只做本地回显。
 	// ⚠️ 编码器必须按**实际帧尺寸**建，不能按请求尺寸。
 	// 摄像头驱动不保证按请求分辨率出图——Windows DirectShow 会挑最接近的
 	// 一档。若编码器按 640×480 建、帧按 352×288 喂，OpenH264/libvpx 会按
@@ -908,9 +941,11 @@ func (v *VideoEngine) captureLoop(ctx context.Context) {
 	// 所以这里每帧比对尺寸，不一致就重建编码器。
 	var (
 		enc              video.Encoder
-		encInW, encInH   int // 编码器的输入尺寸（实际帧尺寸）
-		encOutW, encOutH int // 编码器的输出尺寸（H263 只吃标准尺寸，会不同）
+		encCodec         string // 当前编码器对应的编码名（重协商换编码时重建）
+		encInW, encInH   int    // 编码器的输入尺寸（实际帧尺寸）
+		encOutW, encOutH int    // 编码器的输出尺寸（H263 只吃标准尺寸，会不同）
 		encFPS           = fps
+		encFailKey       string // 建不出来的编码器参数（避免每帧重试刷屏）
 	)
 	defer func() {
 		if enc != nil {
@@ -919,11 +954,14 @@ func (v *VideoEngine) captureLoop(ctx context.Context) {
 	}()
 
 	var readErrs, frames int
-	rebuildEncoder := func(inW, inH int) bool {
+	// rebuildEncoder 按已协商的编码建编码器；失败时返回 false（本帧不发送，
+	// 本地回显不受影响）。
+	rebuildEncoder := func(rc VideoCodec, inW, inH int) bool {
 		if enc != nil {
 			enc.Close()
 			enc = nil
 		}
+		encCodec = ""
 		outW, outH := inW, inH
 		if rc.Name == videoCodecH263 {
 			// H.263 只接受 QCIF/CIF/4CIF 等标准尺寸，缩到能容纳的最大标准档
@@ -934,7 +972,7 @@ func (v *VideoEngine) captureLoop(ctx context.Context) {
 			logx.Logger().Warn("创建视频编码器失败", "codec", rc.Name, "w", outW, "h", outH, "err", err)
 			return false
 		}
-		enc, encInW, encInH, encOutW, encOutH = e, inW, inH, outW, outH
+		enc, encCodec, encInW, encInH, encOutW, encOutH = e, rc.Name, inW, inH, outW, outH
 		logx.Logger().Info("视频编码器已就绪",
 			"codec", rc.Name, "输入", fmt.Sprintf("%dx%d", inW, inH),
 			"编码", fmt.Sprintf("%dx%d", outW, outH), "fps", encFPS)
@@ -974,36 +1012,46 @@ func (v *VideoEngine) captureLoop(ctx context.Context) {
 		}
 		frames++
 
-		if enc == nil || yuv.W != encInW || yuv.H != encInH {
-			if !rebuildEncoder(yuv.W, yuv.H) {
-				return
-			}
-		}
-
-		// 需要缩放时（H263 标准尺寸）先缩放；缩放失败就丢这一帧
-		src := yuv
-		if encOutW != yuv.W || encOutH != yuv.H {
-			scaled, serr := video.ScaleYUV(yuv, encOutW, encOutH)
-			if serr != nil {
-				logx.Logger().Debug("视频缩放失败", "err", serr)
-				continue
-			}
-			src = scaled
-		}
-
+		// 发送本地视频：需要 SDP 已协商出编码；没协商时只做本地回显
 		if v.enabled.Load() && v.sendEnabled.Load() && !v.holdTx.Load() {
-			force := v.forceKey.Swap(false)
-			data, _, err := enc.Encode(src, force)
-			if err != nil {
-				logx.Logger().Debug("视频编码失败", "err", err)
-			} else {
-				v.sendFrame(data)
+			if rc, ok := v.NegotiatedCodec(); ok {
+				if enc == nil || encCodec != rc.Name || yuv.W != encInW || yuv.H != encInH {
+					// 建失败就记住参数，别每帧重试刷屏（换编码/换尺寸才再试）
+					key := fmt.Sprintf("%s/%dx%d", rc.Name, yuv.W, yuv.H)
+					if key != encFailKey {
+						if !rebuildEncoder(rc, yuv.W, yuv.H) {
+							encFailKey = key
+						}
+					}
+				}
+				if enc != nil {
+					// 需要缩放时（H263 标准尺寸）先缩放；缩放失败就丢这一帧
+					src := yuv
+					if encOutW != yuv.W || encOutH != yuv.H {
+						scaled, serr := video.ScaleYUV(yuv, encOutW, encOutH)
+						if serr != nil {
+							logx.Logger().Debug("视频缩放失败", "err", serr)
+							continue
+						}
+						src = scaled
+					}
+					// forceKey 只在实际编码时消费：没协商/建不出编码器时保留，
+					// 等能编码时第一帧就出关键帧
+					force := v.forceKey.Swap(false)
+					data, _, err := enc.Encode(src, force)
+					if err != nil {
+						logx.Logger().Debug("视频编码失败", "err", err)
+					} else {
+						v.sendFrame(data)
+					}
+				}
 			}
 		}
 
-		// 本地回显（需求 7）：用原始帧（未缩放），画面才是摄像头真实观感。
-		// 只受回显开关影响，与推送无关。
-		if v.enabled.Load() && v.previewOn.Load() {
+		// 本地画面（需求 7）：用原始帧（未缩放），画面才是摄像头真实观感。
+		// 与推送无关；关闭回显只影响界面显示，网页订阅了本地画面照样要投递
+		//（见 localFramesWanted），禁用视频则两边都没有。
+		if v.localFramesWanted() {
 			if img, err := video.ToRGBA(yuv); err == nil {
 				v.emit(true, img.RGBA())
 			}

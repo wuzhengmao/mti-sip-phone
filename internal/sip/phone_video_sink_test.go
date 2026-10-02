@@ -60,13 +60,24 @@ func TestVideoSinkChain(t *testing.T) {
 	}
 }
 
-// TestVideoSinkChainWithoutUI 界面未注册时返回 nil（不 panic），
-// 由 startVideo 打 Warn 日志——这是「无界面模式」下的正常情况。
+// TestVideoSinkChainWithoutUI 界面未注册时出口仍可用：帧被静默丢弃，不 panic。
+//
+// 出口是恒定多播对象（core.videoDemux），**不再因"无人接收"而为 nil**——
+// headless 模式、以及「网页订阅了但界面未注册」都属于这种情况，不能据此
+// 判定出口链路断了（早期是单槽，未注册即 nil）。
 func TestVideoSinkChainWithoutUI(t *testing.T) {
 	bus := core.NewBus()
 	app := core.New(config.Default(), nil, bus)
 	p := &Phone{sink: app}
-	if fs := p.videoSinkFor("call-1"); fs != nil {
-		t.Fatal("未注册出口时应返回 nil")
+	fs := p.videoSinkFor("call-1")
+	if fs == nil {
+		t.Fatal("出口应是恒定多播对象，未注册界面时也不为 nil")
+	}
+	fs(false, image.NewRGBA(image.Rect(0, 0, 2, 2))) // 无订阅者：静默丢帧，不得 panic
+
+	// 出口为 nil 只剩一种情况：p.sink 不是 core.App（组装错误）
+	p2 := &Phone{sink: &testSink{}}
+	if fs := p2.videoSinkFor("call-1"); fs != nil {
+		t.Fatal("sink 不是 core.App 时应返回 nil")
 	}
 }

@@ -3,7 +3,76 @@ package ui
 import (
 	"math"
 	"testing"
+
+	"mti-sip-phone/internal/core"
 )
+
+// TestWantVideoWindowWhileSendingLocal 视频呼叫「拨出即显示」：
+// 本端在推本地视频且回显开着时，不等视频协商、不等对端画面就显示窗口
+// （用户要求）；本端不推流且对端没画面时不显示（纯音频通话不留空窗口）。
+func TestWantVideoWindowWhileSendingLocal(t *testing.T) {
+	a := &App{videoOn: true, activeCallID: "c1", callSending: true, previewOn: true}
+	if !a.wantVideoWindow() {
+		t.Fatal("视频呼叫拨出后（本端推流+回显开）应显示视频窗口")
+	}
+
+	// 对端没有视频：sip 侧关闭引擎后 callSending=false → 窗口收起
+	a.callSending = false
+	if a.wantVideoWindow() {
+		t.Fatal("本端不推流且无对端画面时不应显示视频窗口")
+	}
+
+	// 回显关掉：本地画面不显示，窗口也不该为它留着
+	a.callSending = true
+	a.previewOn = false
+	if a.wantVideoWindow() {
+		t.Fatal("回显关闭且无对端画面时不应显示视频窗口")
+	}
+
+	// 对端画面到了：照常显示
+	a.remoteHasVideo = true
+	a.callHasVideo = true
+	if !a.wantVideoWindow() {
+		t.Fatal("收到对端画面后应显示视频窗口")
+	}
+}
+
+// TestWantVideoWindowWithWebSubscription 网页订阅视频期间不显示视频窗口
+// （REQ-VIDEO-009：画面改在网页看），退订后立即恢复。
+func TestWantVideoWindowWithWebSubscription(t *testing.T) {
+	a := &App{videoOn: true, activeCallID: "c1", callHasVideo: true, remoteHasVideo: true}
+	if !a.wantVideoWindow() {
+		t.Fatal("有远端画面时应显示视频窗口")
+	}
+	a.webVideoOn = true
+	if a.wantVideoWindow() {
+		t.Fatal("网页订阅期间不应显示视频窗口")
+	}
+	a.webVideoOn = false
+	if !a.wantVideoWindow() {
+		t.Fatal("网页退订后应恢复显示视频窗口")
+	}
+}
+
+// TestOnVideoWebEvent 网页订阅事件（video.web）驱动窗口显隐。
+//
+// 回归测试：总线是**进程内**的，事件负载是 core.WebVideoState 结构体、
+// 不经 JSON；界面若照 WS 客户端的习惯断言成 map[string]any，断言恒失败，
+// 表现为"网页订阅了但桌面视频窗口不关"（编译运行都不报错）。
+func TestOnVideoWebEvent(t *testing.T) {
+	// 只验证「事件 → webVideoOn 状态翻转」（真实的窗口显隐需要 Fyne 运行时，
+	// 判定逻辑由 TestWantVideoWindowWithWebSubscription 覆盖）
+	a := &App{}
+	a.onEvent(core.Event{Name: "video.web", Data: core.WebVideoState{Active: true, Remote: true, Viewers: 1}})
+	if !a.webVideoOn {
+		t.Fatal("收到 active=true 的 video.web 事件后应进入网页订阅状态")
+	}
+	a.videoOn = false // 退订方向会走"恢复显示窗口"分支，测试里没有 Fyne 应用，先让它不成立
+	a.onEvent(core.Event{Name: "video.web", Data: core.WebVideoState{}})
+	if a.webVideoOn {
+		t.Fatal("收到 active=false 后应退出网页订阅状态")
+	}
+}
 
 // TestVideoFitSize 视频窗口尺寸规则（用户指定）：
 //  1. 优先按原视频宽高显示；

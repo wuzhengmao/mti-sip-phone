@@ -88,16 +88,37 @@ func (p *Phone) videoSinkFor(callID string) media.FrameSink {
 	}
 }
 
+// localWantedFunc 本地帧的额外消费者判定（网页订阅本地画面，REQ-VIDEO-009）。
+//
+// 界面回显关掉时，本地帧的 YUV→RGBA 转换本来会整个省掉；但网页若订阅了本地
+// 画面，画面就不该跟着黑掉——把 core.App 的判定注入媒体层，由它逐帧决定。
+// 取不到（p.sink 不是 core.App）时返回 nil，行为与从前一致。
+func (p *Phone) localWantedFunc() func() bool {
+	prov, ok := p.sink.(interface{ LocalVideoWanted() bool })
+	if !ok {
+		return nil
+	}
+	return prov.LocalVideoWanted
+}
+
 // notifyVideoState 上报视频状态（低频，走事件总线没问题）。
+//
+// 引擎已回收（对端没有视频 / answer 拒绝视频）时上报**全零状态**：视频呼叫
+// 是"拨出即开摄像头+回显"的，对端没有视频时必须能让界面把视频窗口收回去，
+// 否则会停在"发送中/回显中"的旧状态上、摄像头也白开。
 func (p *Phone) notifyVideoState(cs *callSession) {
-	if cs == nil || cs.video == nil {
+	if cs == nil {
+		return
+	}
+	if cs.video == nil {
+		p.sink.OnVideoState(cs.id, core.VideoState{})
 		return
 	}
 	w, h, _ := cs.video.RemoteSize()
 	st := core.VideoState{
 		Negotiated: cs.video.Available(),
 		Enabled:    cs.video.IsEnabled(),
-		PreviewOn:    cs.video.IsPreviewOn(),
+		PreviewOn:  cs.video.IsPreviewOn(),
 		Sending:    cs.video.IsSending(),
 		Width:      w,
 		Height:     h,
@@ -158,7 +179,7 @@ func (p *Phone) AnswerVideo(callID string) error {
 // false（普通接听）时视频段方向为 recvonly——**只接收对方的视频**（REQ-VIDEO-004）。
 //
 // 注意：sipgo 的 RespondSDP 发送 200 后按 RFC 6026 阻塞等待对端 ACK
-//（最长 64*T1=32 秒），必须放在后台 goroutine 执行，否则阻塞 UI 线程
+// （最长 64*T1=32 秒），必须放在后台 goroutine 执行，否则阻塞 UI 线程
 // 导致界面一直停留在振铃状态。
 func (p *Phone) answerIncoming(callID string, withVideo bool) error {
 	cs := p.getCall(callID)
@@ -259,11 +280,13 @@ func (p *Phone) startVideo(cs *callSession, sendLocal bool) {
 	send := sendLocal && p.cameraUsable()
 	sink := p.videoSinkFor(cs.id)
 	if sink == nil {
-		// 出口为空 = 画面一定不显示。这条日志是排查"视频窗口一片黑"的第一线索
-		//（正常情况界面层已在启动时注册，出现即说明注册链路断了）。
-		logx.Logger().Warn("视频帧出口不可用，画面不会显示（界面未注册 VideoSink）", "callId", cs.id)
+		// 出口为空 = 画面一定不显示。出口经 core.App.VideoFrameSink() 多播，
+		// **恒不为 nil**（无订阅者时静默丢帧），所以这里只可能是 p.sink 不是
+		// core.App（组装错误）。这条日志是排查"画面一片黑"的第一线索。
+		logx.Logger().Warn("取不到视频帧出口，画面不会显示（p.sink 不是 core.App）", "callId", cs.id)
 	}
 	v.SetFrameSink(sink)
+	v.SetLocalWantedFunc(p.localWantedFunc())
 	if send {
 		vc := p.videoConfig()
 		v.StartCamera(vc.CameraID, vc.CameraName, vc.Width, vc.Height, vc.FPS, vc.BitrateKbps*1000)

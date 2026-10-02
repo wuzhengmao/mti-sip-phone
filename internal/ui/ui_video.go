@@ -186,15 +186,23 @@ const (
 // wantVideoWindow 是否**有内容可显示**，据此决定视频窗口显隐。
 //
 // 规则（用户要求）：
+//   - 本端在推本地视频且回显开着 → 显示——**视频呼叫一拨出就显示**（本地回显
+//     立刻能看到，不等协商、不等对端画面）；对端没有视频时 sip 侧会关掉引擎
+//     并上报零状态，窗口随之收起；
 //   - 有远端画面 → 显示；
-//   - 本端要推流且回显开着 → 显示（此时即使摄像头打不开也是黑底回显区，
-//     而不是"窗口不出现"，用户要的是这个）；
-//   - 只有音频（普通接听、对端没视频）→ **不显示**，不留一个空窗口。
+//   - 只有音频（普通接听、对端没视频）→ **不显示**，不留一个空窗口；
+//   - 网页订阅了视频（REQ-VIDEO-009）→ 不显示，画面在网页看。
 func (a *App) wantVideoWindow() bool {
-	if !a.videoOn || a.activeCallID == "" || !a.callHasVideo {
+	if a.webVideoOn {
 		return false
 	}
-	return a.remoteHasVideo || (a.callSending && a.previewOn)
+	if !a.videoOn || a.activeCallID == "" {
+		return false
+	}
+	if a.callSending && a.previewOn {
+		return true
+	}
+	return a.callHasVideo && a.remoteHasVideo
 }
 
 // showVideoWindow 显示视频窗口（需求 6）。
@@ -235,6 +243,9 @@ func (a *App) hideVideoWindow() {
 	a.videoSurface.remote.Hide()
 	a.videoSurface.local.Hide()
 	a.videoSurface.border.Hide()
+	// 画面一并清空：视频关闭/挂断后若窗口再次显示，不该先闪出上一帧的定格画面
+	a.videoSurface.remote.Image = nil
+	a.videoSurface.local.Image = nil
 	a.videoSurface.remote.Refresh()
 	a.videoSurface.local.Refresh()
 	a.videoSurface.border.Refresh()
@@ -438,6 +449,12 @@ func (a *App) renderVideoFrame(local bool) {
 	}
 	if ref == nil || ref.callID != a.activeCallID {
 		return // 过期通话的帧，丢弃
+	}
+	if a.webVideoOn {
+		// 网页正在看画面：软电话不再显示视频窗口，帧**也不落画布**。
+		// 这里必须短路——renderVideoFrame 里还有直接 Show() 的分支，
+		// 只靠 wantVideoWindow 挡不住（窗口已存在时会被逐帧显示回来）。
+		return
 	}
 
 	if local {
