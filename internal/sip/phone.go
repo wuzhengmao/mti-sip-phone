@@ -42,6 +42,13 @@ type Phone struct {
 
 	regCancel context.CancelFunc
 
+	// 注册看护参数（REQ-CALL-009，测试注入用）：零值取默认值；
+	// 必须在 Register 之前设置，之后由看护 goroutine 只读。
+	watchTick  time.Duration                                            // 巡检周期
+	watchGap   time.Duration                                            // 墙钟跳变阈值（休眠唤醒判定）
+	watchNow   func() time.Time                                         // 取当前时刻（墙钟比较用）
+	watchProbe func(ctx context.Context, target string) (string, error) // 出向源地址探测
+
 	calls map[string]*callSession
 
 	autoAnswer atomic.Bool // 自动接听开关
@@ -186,6 +193,11 @@ func (p *Phone) setupHandlers() {
 func (p *Phone) Register(ctx context.Context, acc config.Account) error {
 	p.mu.Lock()
 	p.acc = acc
+	// STUN 未启用时清空旧公网地址：否则用户关掉 STUN 重新注册后，
+	// Contact 仍会带上一次探测到的公网地址（localHost 无条件优先 publicIP）。
+	if !acc.STUNEnabled || acc.STUNServer == "" {
+		p.publicIP = ""
+	}
 	p.mu.Unlock()
 
 	if p.regCancel != nil {
@@ -194,30 +206,14 @@ func (p *Phone) Register(ctx context.Context, acc config.Account) error {
 	regCtx, cancel := context.WithCancel(ctx)
 	p.regCancel = cancel
 
-	// STUN 公网地址探测（启用时，REQ-ACC-017）：后台执行，
-	// 探测成功后通过 stunCh 通知注册循环立即重新注册，
-	// 让 Contact 携带公网地址（NAT 穿透）。
-	stunCh := make(chan struct{}, 1)
-	go func() {
-		if !acc.STUNEnabled || acc.STUNServer == "" {
-			return
-		}
-		ip, err := stunDiscover(acc.STUNServer)
-		if err != nil {
-			logx.Logger().Warn("STUN 探测失败", "err", err)
-			return
-		}
-		p.mu.Lock()
-		p.publicIP = ip
-		p.mu.Unlock()
-		// 通知注册循环重注册（sendRegister 内部会发布"注册中"状态）
-		select {
-		case stunCh <- struct{}{}:
-		default:
-		}
-	}()
+	// 立即重新注册信号（REQ-CALL-009）：注册看护（系统休眠唤醒/网络变化，
+	// 见 netwatch.go）与初始 STUN 探测都经这里通知注册循环。
+	// 约定：buffer=1、非阻塞投递、任何一方都不 close——已有待处理信号时
+	// 合并为一次，看护永不阻塞。
+	kickCh := make(chan string, 1)
 
-	go p.registerLoop(regCtx, acc, stunCh)
+	go p.watchRegistration(regCtx, acc, kickCh)
+	go p.registerLoop(regCtx, acc, kickCh)
 	return nil
 }
 
@@ -728,10 +724,12 @@ func (p *Phone) Close() error {
 // ---------------------------------------------------------------------------
 
 // registerLoop 注册生命周期：注册 → 失败退避重试 → 成功后续注册。
-// stunCh：STUN 公网地址探测就绪信号——收到后立即重新注册，
-// 让 Contact 携带公网地址（此前仅把状态打回"注册中"却没有触发
-// 重注册，界面会一直停留在"注册中"直到下次续注册——bug 修复）。
-func (p *Phone) registerLoop(ctx context.Context, acc config.Account, stunCh <-chan struct{}) {
+// kickCh：立即重新注册信号（REQ-CALL-009）——注册看护检测到系统休眠
+// 唤醒、网络变化/恢复时投递，STUN 公网地址就绪也走这条路径（此前仅把
+// 状态打回"注册中"却没有触发重注册，界面会一直停留在"注册中"直到
+// 下次续注册——bug 修复）。收到信号立即重试/重注册，**不重置退避**：
+// 连续失败时退避照常翻倍，防止网络抖动击穿退避。
+func (p *Phone) registerLoop(ctx context.Context, acc config.Account, kickCh <-chan string) {
 	backoff := time.Second
 	expires := acc.Expires // 注册到期时间（REQ-ACC-018），服务端返回值优先
 
@@ -745,6 +743,9 @@ func (p *Phone) registerLoop(ctx context.Context, acc config.Account, stunCh <-c
 			logx.Logger().Warn("注册失败，将重试", "err", err, "backoff", backoff.String())
 			select {
 			case <-time.After(backoff):
+			case reason := <-kickCh:
+				// 网络恢复/休眠唤醒等：跳过退避立即重试
+				logx.Logger().Info("收到重新注册信号，跳过退避立即重试", "reason", reason)
 			case <-ctx.Done():
 				return
 			}
@@ -762,13 +763,13 @@ func (p *Phone) registerLoop(ctx context.Context, acc config.Account, stunCh <-c
 		logx.Logger().Info("注册成功", "expires", expires, "contact", contact.Addr())
 
 		// 续注册：到期前 30% 时重新注册（按 RFC 3261 建议）；
-		// STUN 就绪时立即重新注册
+		// 收到看护信号（休眠唤醒/网络变化/STUN 就绪）时立即重新注册
 		renew := time.Duration(float64(expires)*0.7) * time.Second
 		select {
 		case <-time.After(renew):
 			// 继续循环重新注册
-		case <-stunCh:
-			logx.Logger().Info("STUN 公网地址就绪，立即重新注册")
+		case reason := <-kickCh:
+			logx.Logger().Info("收到重新注册信号，立即重新注册", "reason", reason)
 		case <-ctx.Done():
 			return
 		}

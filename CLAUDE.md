@@ -128,7 +128,8 @@ internal/
   config/     JSON 配置加载与保存（密码 AES-256-GCM 加密、原子写入）
   logx/       slog 日志：滚动+gzip 归档、信令跟踪 TraceSIP（自动脱敏）
   core/       应用核心：状态机、事件总线（发布-订阅）、Telephony 抽象接口
-  sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理）
+  sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理；
+              netwatch.go 为注册看护：休眠唤醒/网络切换后立即重新注册，REQ-CALL-009）
   media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus 编解码、播放环形缓冲、SDP 协商
   audio/      音频设备：malgo 后端（全双工采集/播放、设备枚举/选择、提示音）
   wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳、网页视频订阅 video.go）
@@ -290,6 +291,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   - 2xx 的 ACK 是独立事务走 OnAck handler；RespondSDP 按 RFC 6026 阻塞等待 ACK（最长 64×T1=32s），必须放后台 goroutine；
   - 事务层对 CANCEL 自动回 200+487；ServerTx 无最终响应时 TerminateGracefully 会立即 Terminate（后续 Respond 必失败）；
   - Timer_I=T4=5s：re-INVITE 事务需手动延迟 Terminate 防止重传风暴。
+- **注册看护（`internal/sip/netwatch.go`，REQ-CALL-009）的休眠检测必须用墙钟**：判断"系统刚休眠唤醒"要比较相邻两次巡检的 `UnixNano()` 差；**别写成 `ts.Sub(last)` / `time.Since`**——它们走**单调时钟**，而系统挂起期间单调时钟不走（Linux `CLOCK_MONOTONIC` 明确如此，Windows QPC 视硬件），恰好检测不到要检测的那段"丢失的时间"（写成 Sub 会静默失效，注入假时钟的单测同样测不出来，只有真机休眠能验）。另外三条约束：① 看护的 kick 通道是 buffer=1 + `select default` 非阻塞投递、**任何一方都不 close**（改成阻塞发送会把看护卡死）；② 上网基线要**进 ticker 循环前**先探一次（只记录不判定），否则注册后首个巡检周期内的网络切换永远检测不到；③ 网络变化后启用 STUN 时**重探失败要清空 `publicIP`**（回退本机地址），留着失效的公网地址注册会得到"显示已注册但不可达"。TCP 传输另需丢弃 sipgo 复用的连接（UDP 通配绑定可自愈，TCP 死连接不会被清出池）。
 - **Fyne 的键盘分发是"二选一"，别指望覆写子类能收到键**：驱动先把键入交给**当前聚焦的控件**，**只有没有控件聚焦时**才走 canvas 的 `OnTypedKey`/`OnTypedRune`（见 `internal/driver/glfw/window.go` 的键处理）。踩过：① 拨号框的按键音钩子做成"继承 `widget.SelectEntry` 覆写 `TypedRune`"——SelectEntry 聚焦时 `FocusGained` 会把焦点转给**它内部的 Entry**，覆写的方法永远收不到键（表现为输入框里敲数字没有任何回调）；所以"输入框里敲数字要响/要发 DTMF"这种需求**做不到也别做**——本项目的约定恰好相反：**输入框里输入数字不响也不发 DTMF**（用户明确要求），按键音只属于"点号码盘"与"未聚焦输入框时在主窗体敲数字"两条路径。② 想让通话中键盘数字发 DTMF，则必须先把输入框 `Disable()`（禁用后不可聚焦，键才会落到 canvas 回调）——通话中主窗体正是这么做的。
 - **Fyne**：UI 必须主线程（goroutine 运行会托盘失效+线程告警）；dialog 的 parent 传 nil 直接 panic（主窗口未显示时不要弹 dialog）；`SetSystemTrayWindow` 会覆盖 CloseIntercept（需重新接管）并注册单击回调；Window 无 Visible() 查询 API（主窗口显示状态用全局标识 mainShown 跟踪）。
 - **Fyne 托盘菜单**：菜单最后一项若不带 `IsQuit` 标记，Fyne 会自动补一个本地化的 `Quit` 项（`driver_desktop.go` 的 `addMissingQuitForMenu`，按 `lang.L("Quit")` 比对标签，中文标签匹配不上）。本项目的「退出」项经 `markTrayQuit` 处理——**仅 Linux 打标记**，Windows 保持多一个 Quit 的现状（用户要求）。新增托盘菜单项时注意最后一项的角色。

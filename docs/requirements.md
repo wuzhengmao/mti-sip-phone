@@ -78,7 +78,7 @@
 | REQ-CALL-006 | DTMF 发送：RFC 2833（RTP telephone-event） | P1 | 已完成 |
 | REQ-CALL-007 | 通话记录：呼入 / 呼出 / 未接，记录对方号码、时间、通话时长 | P1 | 待开发 |
 | REQ-CALL-008 | 呼叫失败处理：忙线、无应答、号码不存在等场景给出明确提示 | P0 | 已完成|
-| REQ-CALL-009 | 系统休眠 / 网络切换后自动恢复注册 | P1 | 待开发 |
+| REQ-CALL-009 | 系统休眠 / 网络切换后自动恢复注册：注册看护每 5 秒巡检**墙钟跳变**（休眠唤醒）与**到服务器的出向源地址变化/网络恢复**，命中即刻重新注册（STUN 启用时先重探公网地址）；TCP 传输同时丢弃复用的旧信令连接（实机休眠与切网已验证） | P1 | 已完成 |
 | REQ-CALL-014 | 自动接听开关：开启后来电自动接听（界面按钮切换）；网页可经 WS `system.setAutoAnswer` 设置，**两端共用一份状态**（谁改都广播 `system.autoAnswer`，另一端按钮同步） | P0 | 已完成 |
 | REQ-CALL-015 | 支持 INVITE 的 Call-Info 头 answer-after=x：x=0 立即自动接听，x>0 延迟 x 秒后自动接听 | P0 | 已完成 |
 | REQ-CALL-016 | 保持发送 re-INVITE：本端保持时 SDP 方向 a=sendonly，取消保持恢复 a=sendrecv；通话中处理对端 re-INVITE（对端保持时 offer 为 a=recvonly），按镜像方向应答；保持状态每通通话结束后复原 | P0 | 已完成 |
