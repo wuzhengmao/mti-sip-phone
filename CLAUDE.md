@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.7**（dev 开发中；1.0.6 含拨号按键音与 DTMF 收发、通话中主窗体、架构设计文档，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
+当前版本 **1.0.8**（dev 开发中；1.0.7 含未接来电桌面通知、休眠/网络切换后自动恢复注册、服务端心跳检测，并修复第一声回铃音断续（真因是日志轮转的 Windows 删除顺序缺陷）、SIP 信令日志重复、RTP/RTCP 端口配对，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
 真实环境：OpenSIPS 2.4.11（10.168.4.40:15060，账号 2999），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
 
@@ -26,7 +26,7 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 ```bash
 # 构建脚本按目标打印本次能力（如 CGO+音频+视频，缺库时标出无视频/无Opus）；视频/Opus 取决于
 # 第三方静态库是否已生成（见下），缺哪个就降级为哪个没有。
-# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.7-rc），
+# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.8-rc），
 # 正式构建用 SIP_PHONE_RELEASE=1（发布脚本会设）；不经脚本的 go build/go run 是基础版本号。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO）
@@ -69,9 +69,9 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 `/docs/upload`、`/docs/api`）。本仓库侧的发布入口：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.7-rc），不上传
+./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.8-rc），不上传
 ./scripts/release.sh --pre             # 预发布：真实上传（站点标记为预发布）
-./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.7
+./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.8
 # Windows 用 scripts/release.bat（同样的参数，内部走 git-bash）
 ```
 
@@ -281,7 +281,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **交流、文档、注释、提交信息、界面文案一律中文**。
 - **Git 工作流**：开发在分支上进行（工作分支 dev，master 为收口分支）；**会话中修改的代码不得自动提交**——提交与 push 必须经用户人工确认后执行，且**不自动合并到 master**（合并 master 需用户明确指示）。
 - **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
-- 版本 1.0.7 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
+- 版本 1.0.8 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
 - 弹窗按钮文案「确定/取消」。
 - 需求变更同步更新 docs/requirements.md 与 changelog.md。
 - 单通话限制：呼叫/振铃/通话中禁止新呼出（返回错误）；新来电直接 486 USER_BUSY。

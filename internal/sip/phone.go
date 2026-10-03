@@ -94,7 +94,7 @@ type callSession struct {
 	videoMu    sync.Mutex         // 视频引擎创建/启动串行化
 }
 
-// UserAgentName 软电话标识（REQ-ACC-014）：格式 "mti-sip-phone v1.0.7"。
+// UserAgentName 软电话标识（REQ-ACC-014）：格式 "mti-sip-phone v1.0.8"。
 func UserAgentName() string {
 	return "mti-sip-phone v" + core.Version
 }
