@@ -41,12 +41,10 @@ SRC_DIR="$ROOT/third_party/src"
 OUT_DIR="$ROOT/third_party/audio"
 
 CLEAN=0
-FORCE=0
 TARGETS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --clean) CLEAN=1 ;;
-        --force) FORCE=1 ;;
         --help|-h) sed -n '2,25p' "$0"; exit 0 ;;
         -*) echo "未知选项: $1" >&2; exit 2 ;;
         *) TARGETS="$TARGETS $1" ;;
@@ -265,6 +263,17 @@ build_opus() {
         [ -f Makefile ] && make distclean >/dev/null 2>&1 || true
         local host_arg=""
         [ -n "$HOST_TRIPLE" ] && host_arg="--host=$HOST_TRIPLE"
+
+        # mingw 目标：预定义 _FORTIFY_SOURCE，阻止 libopus 自带的 AX_ADD_FORTIFY_SOURCE
+        # 宏再加 -D_FORTIFY_SOURCE=2（该宏先测「是否已定义」，定义了就不加）。
+        # 开了 fortify 之后 memcpy/memset 会被换成 __memcpy_chk/__memset_chk——那是
+        # glibc 的加固符号，mingw 的 C 运行库不提供，而最终链接由 Go 驱动（不走 gcc
+        # 的默认 spec，不会自动带 libssp），在 Debian/Ubuntu 的 mingw-w64 上直接报
+        # `undefined reference to __memcpy_chk`（WinLibs 恰好能过，所以只在 Linux
+        # 主机交叉 Windows 时暴露）。编解码库损失的加固收益可忽略，换取跨工具链可用。
+        case "$HOST_TRIPLE" in
+            *mingw*) export CFLAGS="-O2 -D_FORTIFY_SOURCE=0" ;;
+        esac
         # --disable-extra-programs：不构建 opus_demo / test_opus_* 等程序，
         # 只要静态库；--disable-doc 跳过文档（需要 doxygen）。
         # --disable-dependency-tracking：automake 的自动依赖跟踪在 configure

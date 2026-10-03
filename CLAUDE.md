@@ -462,8 +462,8 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   （单个路径恰好是"第一个"）。`build.sh` 因此用 `pwd -W` 取 `ABS_ROOT`（与
   `scripts/build-video-libs.sh` 的 `abspath` 同理）；`build.bat` 用 `%CD%` 本来就是
   Windows 形式。手工跑 `go test -tags …` 时同理，别用 `$(pwd)`。
-- **音频静态库：libopus 是 autotools 工程（视频那三个库都不是），Windows 上要绕开两个坑**，
-  都在 `scripts/build-audio-lib.sh` 里：
+- **音频静态库：libopus 是 autotools 工程（视频那三个库都不是），构建时要绕开三个坑**，
+  都在 `scripts/build-audio-lib.sh` 里（前两个是 Windows 专有）：
   1. **MAKE 传裸命令名 + `--disable-dependency-tracking`**：Makefile 递归调用 `$(MAKE)`，
      Windows 上递归是 CreateProcess 按 **Windows PATH** 查程序名，而 git-bash 里 `make`
      只是 shell 层解析（PATH 里实际只有 `mingw32-make.exe`），直接给 `make` 会报
@@ -474,6 +474,15 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
      `C:\Program Files\Git\usr\bin\`——空格把命令行切碎，编译时报
      `sh: line 1: C:/Program: No such file or directory`。用 `cygpath -d -w $(command -v sh)`
      得到 `C:/PROGRA~1/...` 消除空格，命令行赋值 `SHELL=` 优先于 Makefile 里的 `/bin/sh`。
+  3. **mingw 目标必须关掉 libopus 自带的 FORTIFY_SOURCE**：opus 的 configure 用
+     `AX_ADD_FORTIFY_SOURCE` 宏（m4/ax_add_fortify_source.m4）无条件加
+     `-D_FORTIFY_SOURCE=2`，于是 `memcpy`/`memset` 被换成 `__memcpy_chk`/`__memset_chk`
+     ——glibc 的加固符号，mingw 的 C 运行库没有，而最终链接由 **Go 驱动**（不走 gcc 的
+     默认 spec，不会自动补 `-lssp`），Debian/Ubuntu 的 mingw-w64 下报
+     `undefined reference to __memcpy_chk`（实测；**WinLibs 恰好能过，所以只在 Linux
+     主机交叉 Windows 时暴露**）。脚本对 `*mingw*` 目标预设
+     `CFLAGS="-O2 -D_FORTIFY_SOURCE=0"`——那个宏先测「是否已定义」，定义了就跳过。
+     Linux 目标保留 fortify（glibc 提供符号）。
 - **视频：新流的第一包就要发 PLI 催关键帧**（`handleRTP` 的 `!v.hasSeq` 分支）。
   解码要等 IDR，而不少对端（实测 MicroSIP）只在被请求或很久之后才发——不催的话
   表现为"接通后视频窗口迟迟不出画面，开关一下视频（内部会发 PLI）才出来"。
