@@ -394,7 +394,10 @@ api_put_file "应用图标 icon.svg" "$ROOT/release/icon.svg" \
 
 TARBALL_ARG="$(cygpath -m "$TARBALL" 2>/dev/null || echo "$TARBALL")"
 BODY="$(mktemp)"
-CODE="$(curl -sS --max-time 600 "${CURL_TLS[@]}" -o "$BODY" -w '%{http_code}' -X POST \
+# 上传几十 MB，给个进度条：--progress-bar 走 stderr（终端可见），
+# stdout 只留 -w 的状态码，仍能被命令替换干净地捕获（所以这里不用 -s/-sS）。
+echo "上传发布包（$(stat -c %s "$TARBALL") 字节，$(basename "$TARBALL")）…"
+CODE="$(curl -S --progress-bar --max-time 600 "${CURL_TLS[@]}" -o "$BODY" -w '%{http_code}' -X POST \
     -H "Authorization: Bearer $UPLOAD_TOKEN" \
     -F "file=@$TARBALL_ARG" \
     -F "version=$VERSION" \
