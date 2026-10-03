@@ -280,7 +280,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - 需求变更同步更新 docs/requirements.md 与 changelog.md。
 - 单通话限制：呼叫/振铃/通话中禁止新呼出（返回错误）；新来电直接 486 USER_BUSY。
 - WS 端口可配置（默认 8765），被占用自动 +1 并保存；无 token 鉴权（仅回环）。
-- SDP 编解码优先级：PCMA > PCMU > Opus；Opus 本端 offer 固定 PT 96（rtpmap `opus/48000/2`），answer 仍复用对端 PT；RTCP 端口 = RTP 端口 + 1（SDP `a=rtcp` 宣告）。
+- SDP 编解码优先级：PCMA > PCMU > Opus；Opus 本端 offer 固定 PT 96（rtpmap `opus/48000/2`），answer 仍复用对端 PT；**RTP 端口按 RFC 3550 取偶数、RTCP = RTP + 1**（`bindRTPRTCP` 命中奇数就重选，音频/视频两对端口都走它），SDP 用 `a=rtcp` 宣告 RTCP 端口。
 - 视频 PT 固定（**只作用于本端 offer**）：H264=99 / H263-1998=98 / VP8=100 / VP9=101；优先级顺序不变
   （H264 > VP8 > VP9 > H263-1998），m= 行按优先级列出（`RTP/AVP 99 100 101 98`）。answer 必须复用对端 PT。
 
@@ -299,6 +299,8 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **splash 窗口也会进任务栏（Windows）**：GLFW 给**每个**顶层窗口都设 `WS_EX_APPWINDOW`（`glfw/src/win32_window.c` 的 `getWindowExStyle` 写死），这个扩展样式的作用就是"强制生成任务栏按钮"，会压过 `WS_POPUP` 本来的不占任务栏语义——更新提示窗因此带着一条任务栏标题（用户实测）。**关键是改样式的时机**：只在窗口显示之后再异步改（曾用"显示 → 定位协程里换样式 + hide/show 刷新"）**不够**——外壳是状态驱动地扫描任务栏窗口，往往已经按 APPWINDOW 把按钮建出来了，之后改样式、隐藏都不会把它收回去（用户实测：点「稍后」关掉提示窗后，任务栏上那条按钮还残留着点不动）。正确做法见 `topmost_windows.go` 的 `showUpdateWindow`：在**第一次显示的同一步内**走 Show（首次 Show 才创建 GLFW 窗口）→ 立刻 `w.Hide()` → `setToolWindowStyle(hwnd)`（APPWINDOW 换成 TOOLWINDOW）→ `w.Show()`——外壳还没来得及处理"显示"，窗口已经是工具窗口，按钮根本不会建。`positionUpdateWindow` 里的 `setToolWindowStyle` 只是幂等兜底。⚠️ 读写扩展样式用 `Get/SetWindowLongPtrW`，32 位 user32 没有这两个导出（`LazyProc.Call` 会 panic 且 GUI 子系统无可见输出），必须按 `Find()` 结果回退 `Get/SetWindowLongW`。**通话面板与更新提示窗都按工具窗口显示（不占任务栏）**——面板走 `showCallWindow`、提示窗走 `showUpdateWindow`，两者都进 `showWindowAsTool`；只有视频窗口保留任务栏条目（它是带标题栏、可拖动的普通窗口，用户可能要从任务栏找它）。
 - **音频管理器（internal/audio）的线程模型**：后端初始化在后台 goroutine，`NewManager` 最多等 `initWait`(2s) 就返回；所有会碰后端的操作（开关音频流、播放提示音）都排入单 worker 的 FIFO 队列后立即返回，调用方（UI 线程、SIP 线程）不会被设备操作阻塞。**不要持 `m.mu` 调用后端**——miniaudio 的设备操作在音频服务不可达时会长时间阻塞（`PULSE_SERVER=tcp:localhost` 实测 15 秒），持锁会把 UI 线程的 `enqueue`/`SetMic` 一起卡死；正确做法是先取状态快照、释放锁再调后端（见 `startStreamFor`/`stopStream`）。设备枚举 `Devices()` 保持同步，调用方需自行放进后台 goroutine（界面侧见 `refreshDevices`）。后端内部同理：`malgoBackend.toneMu` 只护提示音状态，**不得跨越 `malgo.InitDevice`/`device.Start`/`device.Uninit` 持有**——miniaudio 启动/销毁设备要等音频回调线程，而回调要拿 `toneMu`，持锁即死锁（树莓派 PulseAudio 实测 `ma_device_start` 永不返回，音频 worker 卡死，之后所有音频操作排队不执行、通话无声）。
 - **通话面板窗口控制按平台拆分**：`ui_call.go`/`ui.go` 只调用平台函数（`moveCallWindowToCorner`、`callWindowTitle`、`markTrayQuit`、面板尺寸常量），实现分别在 `topmost_windows.go`（Win32）与 `topmost_linux.go`（X11）——**勿把任一侧的逻辑写进共享文件**。Linux 侧靠 `driver.NativeWindow.RunNative` 取 X11 窗口号（回调收到 `driver.X11WindowContext`），需经 `fyne.DoAndWait` 在主线程取；`fyne.DoAndWait` 不可在主线程调用（会 panic），故 `moveCallWindowToCorner` 内部起 goroutine。Wayland 会话下 X11 手段全部无效（不能自定位、去装饰看合成器）——所以 Linux 默认把后端固定到 X11（见下方「Linux 桌面后端」条）。X11 侧还额外把 `_NET_WM_STATE` 写成**窗口属性**（不只发 ClientMessage），因为 Xwayland 下没有独立 X11 窗口管理器处理消息。但**任务栏条目在 labwc 下无法由客户端去掉**（实测属性/消息都不生效）：任务栏走 foreign-toplevel 协议，该协议没有 skip-taskbar 字段，`_NET_WM_STATE_SKIP_TASKBAR` 不会透传。要隐藏只能用 labwc 自己的窗口规则（`~/.config/labwc/rc.xml`，labwc ≥0.6.4）：`<windowRule title="SIP" skipTaskbar="yes" skipWindowSwitcher="yes"/>`——按 `title` 匹配（面板标题恒以 `SIP` 开头，主窗体是 `mti-sip-phone …`），**勿按 `identifier` 匹配**（Xwayland 下两窗口 WM_CLASS 相同，会连主窗体一起隐藏）。用户已确认该条目可接受，不要再在客户端代码里尝试修它。
+- **服务端心跳（REQ-ACC-020/021）与 OPTIONS 的关系，别想当然**：启用后只是注册报文的 **User-Agent 带 `optchk`**，服务端据此定期发 OPTIONS 探测；**OPTIONS 不要专门处理——sipgo 默认回 405，实测 OpenSIPS 接受**。曾实现过"逐字回抄的 200 + Contact + 重传缓存"，服务端仍判探测失败并摘注册（NAT/rport 下它登记的是改写后的外部地址，与我们的 Contact 对不上）。**心跳计数必须挂在传输层读钩子（`readFilter`）上**：服务端的探测复用**同一个 Via branch**，sipgo 会把 Timer J（32 秒）内相同 branch 的请求当**重传**、不再回调 handler——按 handler 计数会把 10 秒的心跳看成 ~40 秒。超时判定是 **2.5 个周期**（`hbOverdueFactor`）：先置**未注册**（托盘/圆点变红、原因"服务端心跳超时"），再立即重新注册，触发一次后复位。
+- **信令日志唯一出口是 `internal/sip/tracer.go` 的全局跟踪器**（sipgo 传输层钩子 + 「SIP 信令记录」开关）：**业务代码里不要再散点调 `logx.TraceSIP`**，否则同一条报文在日志里出现两份（历史缺陷，已清理 11 处）；跟踪器里另有"非 SIP 载荷不记"的过滤（挡掉服务端/NAT 的四个 0 字节保活包）。
 - **媒体/NAT**：对称 NAT 下 UDP 映射需持续出向流量保活（早期媒体阶段 SetKeepalive 持续发静音帧）；SDP 宣告地址与 socket 绑定地址分离（SetSDPIP）；183→200 可能换 SSRC/端口（引擎已自动处理，勿移除 playPush 的重置逻辑）。
 - **自更新重启时序**（勿简化）：重启请求只标记 `restartRequested` 并取消 ctx，**释放单实例锁与拉起新进程必须放在退出收尾**（`shutdown` 之后、进程退出之前，见 main.go 的 `spawnNewProcessIfRequested`）——顺序反了会让新进程因锁冲突转发参数后退出，或因 WS 端口仍被占用而 +1 写回配置、SIP 双注册。历史缺陷：旧 `onRestart` 释放锁+拉起进程后不退出旧进程（已修复）。Windows 上运行中的 exe **能改名不能覆盖**，替换流程为 exe→.old、.new→exe、失败回滚（`internal/updater/replace.go`，已用真实进程验证）。
 - **更新提示窗与通话面板都吸附右下角**：通话期间隐藏更新提示窗（`setCallUI` 非空闲分支），通话结束后按 `updatePopupPending` 补弹；不要在两者都可见时做偏移摆放。
@@ -472,6 +474,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **视频窗口摆放要直接读通话面板的可见矩形**（`visibleRect` + DWM 扩展框架边界），
   不要自己按工作区+边距算：面板定位用的是**未缩放**的 `callPanelMargin`(16 物理像素)，
   视频窗口若按 `16×缩放` 算，DPI 非 100%（如 125%）时就差 4px。
+- **音频：播放缓冲超深截断要丢"最安静"的窗口，不能从最旧端硬切**（`playRing.trimQuiet`）：硬切会把音调从中间切掉，听感是"断续"——实测每通呼出早期媒体建立约 2 秒时都会超深一次（对端回铃音刚开始/设备启动期垫高 ~320ms），被切的恰好是**第一声回铃**（用户报的"第一声回铃断续、第二声正常"就是它）。现在在缓冲区最旧一段里找能量最低的窗口丢（回铃音/语音的停顿足够容纳），找不到安静位置才退回最旧端并在接缝处做 2ms 交叉淡化。
 - **音频：播放环形缓冲必须封顶深度**（`playMaxDepth` 500ms → 截到 `playTargetDepth`
   200ms）。读侧（音频回调）恒为实时速率，而写侧会被丢包补静音、对端/网关突发
   一次性垫高；垫高后深度**只增不减**（读多少写多少），表现为"通话越久延迟越大、

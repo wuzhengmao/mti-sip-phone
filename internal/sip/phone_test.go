@@ -1,8 +1,8 @@
 package sip
 
 import (
-	"fmt"
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -69,6 +69,13 @@ func (s *testSink) hasEvent(prefix string) bool {
 		}
 	}
 	return false
+}
+
+// regStates 注册状态序列快照（带锁，供断言"先掉线再重注册"的先后顺序）。
+func (s *testSink) regStates() []core.RegisterState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]core.RegisterState(nil), s.regs...)
 }
 
 func (s *testSink) lastReg() core.RegisterState {

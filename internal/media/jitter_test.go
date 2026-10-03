@@ -122,3 +122,46 @@ func TestPlayRingReset(t *testing.T) {
 		t.Fatalf("Reset 后应读空，实际 %d", n)
 	}
 }
+
+// TestPlayRingTrimQuiet 超深截断要丢"最安静"的一段：回铃音场景（静音 + 音调）
+// 丢静音、音调一个样本都不能少——硬切会把音调截断，听感就是"断续"。
+func TestPlayRingTrimQuiet(t *testing.T) {
+	r := newPlayRing(8)
+	silence := make([]int16, 3000) // 375ms 静音
+	tone := make([]int16, 1500)    // 187ms 音调（幅值 8000，便于辨认）
+	for i := range tone {
+		tone[i] = 8000
+	}
+	r.Write(silence)
+	r.Write(tone) // 深度 4500 > 上限 4000 → 截断到 1600（丢掉 2900，静音够容纳）
+
+	if d := r.Depth(); d != playTargetDepth {
+		t.Fatalf("截断后深度应为 %d，实际 %d", playTargetDepth, d)
+	}
+	// 音调必须完整保留（1500 样本）
+	out := make([]int16, 8192)
+	n := r.Read(out)
+	toneCount := 0
+	for _, v := range out[:n] {
+		if v == 8000 {
+			toneCount++
+		}
+	}
+	if toneCount != len(tone) {
+		t.Fatalf("音调应完整保留 %d 个样本，实际 %d（被硬切在音调里了）", len(tone), toneCount)
+	}
+}
+
+// TestPlayRingTrimContinuous 全是有声内容（找不到安静窗口）时退回最旧端，
+// 深度仍被压回目标值且不 panic。
+func TestPlayRingTrimContinuous(t *testing.T) {
+	r := newPlayRing(8)
+	loud := make([]int16, 8000)
+	for i := range loud {
+		loud[i] = 9000
+	}
+	r.Write(loud)
+	if d := r.Depth(); d != playTargetDepth {
+		t.Fatalf("连续有声内容也应压回目标深度，实际 %d", d)
+	}
+}

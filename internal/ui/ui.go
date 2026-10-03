@@ -77,6 +77,7 @@ type App struct {
 	accStunCheck      *widget.Check
 	accStunServer     *widget.Entry
 	rportCheck        *widget.Check
+	chkOptCheck       *widget.Check // 服务端心跳检测（User-Agent 带 optchk，REQ-ACC-020）
 	accTransport      *widget.Select
 	accAccount        *widget.Entry
 	accAuthUser       *widget.Entry
@@ -480,6 +481,10 @@ func (a *App) buildSettingsPage() {
 			logx.Logger().Warn("切换 rport 失败", "err", err)
 		}
 	})
+	// 服务端心跳检测（默认开启，REQ-ACC-020）：开启后注册报文的 User-Agent
+	// 带 optchk 标记，服务端据此定期发 OPTIONS 探测；OPTIONS 用 sipgo 默认
+	// 行为回 405 即可（实测服务端接受）。改变的是注册报文内容，随「保存并注册」生效。
+	a.chkOptCheck = widget.NewCheck("启用服务端心跳检测", nil)
 
 	// 表单项采用「label 在上、输入框在下」的堆叠布局，
 	// 避免 Grid 双列在窄窗口下把主窗口撑宽（REQ-UI-019）
@@ -510,6 +515,7 @@ func (a *App) buildSettingsPage() {
 		formItem("显示名", a.accDisplay),
 		formItem("注册到期时间（秒）", a.accExpires),
 		a.rportCheck,
+		a.chkOptCheck,
 		a.accStunCheck,
 		formItem("STUN 服务器", a.accStunServer),
 		saveBtn,
@@ -1419,6 +1425,7 @@ func (a *App) saveAccount() {
 		Port:        port,
 		Expires:     expires,
 		RPort:       a.rportCheck.Checked,
+		ChkOpt:      a.chkOptCheck.Checked,
 		STUNEnabled: a.accStunCheck.Checked,
 		STUNServer:  a.accStunServer.Text,
 		Proxy:       a.accProxy.Text,
@@ -1446,6 +1453,7 @@ func (a *App) loadAccountIntoForm() {
 	acc := a.cfg.Account
 	a.accEnabled.SetChecked(acc.Enabled)
 	a.rportCheck.SetChecked(acc.RPort)
+	a.chkOptCheck.SetChecked(acc.ChkOpt)
 	a.accServerAddr.SetText(fmt.Sprintf("%s:%d", acc.Server, acc.Port))
 	a.accExpires.SetText(fmt.Sprintf("%d", acc.Expires))
 	a.accProxy.SetText(acc.Proxy)
