@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/gen2brain/malgo"
 
@@ -15,17 +16,27 @@ import (
 	"mti-sip-phone/internal/media"
 )
 
+// toneIdleClose 提示音播完后，多久没有新音就关掉提示音设备。
+// 不立刻关是为了让连续按键（DTMF 回显）复用同一个设备——开一次设备要几十毫秒，
+// 拨号时每次按键都重开会有明显滞后感；也不能一直开着，否则静音流长期占着扬声器。
+const toneIdleClose = 1500 * time.Millisecond
+
 // malgoBackend 基于 miniaudio（malgo）的音频后端：
 // 全双工采集/播放、设备枚举、设备选择、提示音播放。需要 CGO。
 type malgoBackend struct {
-	ctx       *malgo.AllocatedContext
-	device    *malgo.Device
-	toneDev   *malgo.Device   // 提示音播放设备
-	toneMu    sync.Mutex
-	tonePCM   []int16
-	toneCh    int
-	tonePos   int
-	toneLoop  bool
+	ctx      *malgo.AllocatedContext
+	device   *malgo.Device
+	toneDev  *malgo.Device // 提示音播放设备
+	toneMu   sync.Mutex
+	tonePCM  []int16
+	toneCh   int
+	tonePos  int
+	toneLoop bool
+	// 设备复用与空闲关闭用（都只在 toneMu 下读写）：
+	toneRate  int         // 当前提示音设备的采样率（0 = 无设备）
+	toneDevID string      // 当前提示音设备的设备 ID（管理器传的原始字符串）
+	toneGen   uint64      // 代次：每次换音 +1，用于作废过期的空闲关闭定时器
+	toneIdle  *time.Timer // 空闲关闭定时器
 }
 
 func newBackend() (Backend, error) {
@@ -148,14 +159,32 @@ func (b *malgoBackend) Stop() {
 // 要拿 toneMu，持锁调用必然死锁（实测：树莓派 PulseAudio 下 ma_device_start
 // 永不返回，音频 worker 卡死，此后所有音频操作排队不执行，通话彻底无声）。
 func (b *malgoBackend) PlayTone(tone *wavPCM, loop bool, deviceID string) error {
-	b.StopTone()
 	if tone == nil || len(tone.pcm) == 0 {
+		b.StopTone()
 		return nil
 	}
 	channels := tone.channels
 	if channels < 1 {
 		channels = 1
 	}
+
+	// 设备复用快路径：同一设备、同采样率、同声道数时只换缓冲区，
+	// 不再反复 Stop/Init（连续按键音就靠它保持跟手）。
+	b.toneMu.Lock()
+	if b.toneDev != nil && b.toneRate == tone.sampleRate &&
+		b.toneCh == channels && b.toneDevID == deviceID {
+		b.toneGen++
+		if b.toneIdle != nil {
+			b.toneIdle.Stop()
+			b.toneIdle = nil
+		}
+		b.tonePCM, b.tonePos, b.toneLoop = tone.pcm, 0, loop
+		b.toneMu.Unlock()
+		return nil
+	}
+	b.toneMu.Unlock()
+
+	b.StopTone()
 
 	deviceConfig := malgo.DefaultDeviceConfig(malgo.Playback)
 	deviceConfig.SampleRate = uint32(tone.sampleRate)
@@ -201,6 +230,7 @@ func (b *malgoBackend) PlayTone(tone *wavPCM, loop bool, deviceID string) error 
 					b.tonePos = 0 // 循环
 				} else {
 					b.tonePCM = nil // 播放完毕
+					b.scheduleToneIdleCloseLocked()
 					break
 				}
 			}
@@ -219,8 +249,39 @@ func (b *malgoBackend) PlayTone(tone *wavPCM, loop bool, deviceID string) error 
 	}
 	b.toneMu.Lock()
 	b.toneDev = device
+	b.toneRate = tone.sampleRate
+	b.toneCh = channels
+	b.toneDevID = deviceID
+	b.toneGen++
 	b.toneMu.Unlock()
 	return nil
+}
+
+// scheduleToneIdleCloseLocked 安排"空闲后关闭提示音设备"（须持 toneMu）。
+// 用代次判断期间有没有新音进来：有就作废这次关闭（新音会自己重启计时）。
+func (b *malgoBackend) scheduleToneIdleCloseLocked() {
+	gen := b.toneGen
+	if b.toneIdle != nil {
+		b.toneIdle.Stop()
+	}
+	b.toneIdle = time.AfterFunc(toneIdleClose, func() { b.closeToneIfIdle(gen) })
+}
+
+// closeToneIfIdle 提示音播完且一段时间没有新音 → 关闭设备。
+func (b *malgoBackend) closeToneIfIdle(gen uint64) {
+	b.toneMu.Lock()
+	b.toneIdle = nil
+	if b.toneGen != gen || b.tonePCM != nil || b.toneDev == nil {
+		b.toneMu.Unlock()
+		return
+	}
+	device := b.toneDev
+	b.toneDev = nil
+	b.toneRate, b.toneCh, b.toneDevID = 0, 0, ""
+	b.toneMu.Unlock()
+
+	// 不持锁调用后端：Uninit 等待回调线程退出，而回调要拿 toneMu。
+	device.Uninit()
 }
 
 // StopTone 停止提示音播放。
@@ -229,6 +290,12 @@ func (b *malgoBackend) StopTone() {
 	device := b.toneDev
 	b.toneDev = nil
 	b.tonePCM = nil
+	b.toneRate, b.toneCh, b.toneDevID = 0, 0, ""
+	b.toneGen++ // 作废在途的空闲关闭定时器
+	if b.toneIdle != nil {
+		b.toneIdle.Stop()
+		b.toneIdle = nil
+	}
 	b.toneMu.Unlock()
 
 	// 不持锁调用后端：Uninit 等待回调线程退出，而回调要拿 toneMu，

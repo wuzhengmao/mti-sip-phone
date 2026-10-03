@@ -209,6 +209,16 @@ func (m *Manager) AttachEngine(engine *media.Engine) {
 	m.mu.Lock()
 	m.engine = engine
 	m.mu.Unlock()
+	if engine != nil {
+		// 收到对端的 DTMF：对端发的是事件包不是音频，本机要自己发声
+		//（真机也是这么做的），否则用户什么都听不到（REQ-CALL-006）。
+		// 扬声器静音时不出声（那是"停止本地播放"的语义）。
+		engine.SetDTMFListener(func(digit string) {
+			if !engine.PlayMuted() {
+				m.PlayDTMF(digit)
+			}
+		})
+	}
 	m.enqueue(func() { m.startStreamFor(engine) })
 }
 
@@ -240,6 +250,34 @@ func (m *Manager) PlayRingback() {
 // PlayBusy 播放遇忙音（一次）：对端回 486 Busy Here / 600 Busy Everywhere 时播。
 func (m *Manager) PlayBusy() {
 	m.enqueue(func() { m.playTone(busy, false, false) }) // 遇忙音：扬声器（同回铃音）
+}
+
+// PlayDTMF 播放按键回显音（REQ-UI-029）：拨号盘按钮 / 主窗体敲数字时本机响一声。
+//
+// 走**独立的提示音播放设备**（同回铃音/遇忙音，目标 = 当前选择的扬声器），
+// 不复用通话的媒体流，所以通话中按键也能听到回显；连续按键会打断上一个音
+// （后端按"同一设备复用 + 空闲自动关闭"处理，见 backend_malgo.go 的 PlayTone）。
+func (m *Manager) PlayDTMF(digit string) {
+	tone := dtmfTones[digit]
+	if tone == nil {
+		return
+	}
+	m.enqueue(func() {
+		m.mu.Lock()
+		backend := m.backend
+		device := m.speakerID
+		m.mu.Unlock()
+		if backend == nil {
+			return
+		}
+		if device == "" {
+			device = "系统默认"
+		}
+		// 按键音不循环、不写 Info 日志（一次拨号会有十几次按键，避免刷日志）
+		if err := backend.PlayTone(tone, false, device); err != nil {
+			logx.Logger().Warn("播放按键音失败", "err", err)
+		}
+	})
 }
 
 // StopRing 停止提示音（振铃结束/通话建立时）。

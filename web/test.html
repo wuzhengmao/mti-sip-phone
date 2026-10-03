@@ -91,6 +91,9 @@
   #log .err { color: #fca5a5; }
   #log .info { color: #cbd5e1; }
   .state-line { font-size: 13px; color: var(--gray); margin-top: 6px; word-break: break-all; }
+  /* DTMF 拨号盘：3×4 紧凑按键，通话接通后在通话控制卡片里出现 */
+  .dtmf-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 10px; max-width: 210px; }
+  .dtmf-pad button { padding: 6px 0; font-size: 14px; }
   /* 站点版本列表（自动更新卡片）：小一号字、紧凑列表，右侧是黄色的「推送」按钮。
      文字用正文色（不用灰色，否则和旁边的提示文字混在一起），版本号加粗。 */
   .upd-list { list-style: none; margin: 6px 0 0; padding: 0; }
@@ -200,6 +203,8 @@
           <button id="btnSpeaker" class="icon-btn" title="扬声器"></button>
           <button id="btnVideoToggle" class="icon-btn" title="视频" style="display:none"></button>
         </div>
+        <!-- DTMF 拨号盘（REQ-CALL-006）：通话接通后显示，点按向对端发 RFC 4733 -->
+        <div id="dtmfPad" class="dtmf-pad" style="display:none"></div>
       </div>
       <p id="noCall" class="state-line">当前没有进行中的通话</p>
       <div class="row" style="margin-top:10px">
@@ -626,6 +631,28 @@
     });
   };
 
+  // ---------------- DTMF 拨号盘（REQ-CALL-006）----------------
+  // 通话接通后显示；点按经 WS call.dtmf 让软电话发 RFC 4733 telephone-event。
+  (function buildDTMFPad() {
+    var pad = $('dtmfPad');
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'].forEach(function (key) {
+      var b = document.createElement('button');
+      b.className = 'ghost';
+      b.textContent = key;
+      b.onclick = function () {
+        if (!currentCall || currentCall.state !== 'established') {
+          addLog('err', '通话未接通，发不了 DTMF');
+          return;
+        }
+        // 成功不记日志（一次拨号几十个键会把日志刷爆），失败才报
+        sdk.sendDTMF(currentCall.id, key).catch(function (e) {
+          addLog('err', '发送 DTMF ' + key + ' 失败: ' + e.message);
+        });
+      };
+      pad.appendChild(b);
+    });
+  })();
+
   // ---------------- 控制按钮 ----------------
 
   $('btnDial').onclick = function () {
@@ -890,6 +917,8 @@
     $('mediaRow').style.display = established ? '' : 'none';
     // 纯音频通话不显示视频开关（与桌面通话面板一致，REQ-VIDEO-008）
     $('btnVideoToggle').style.display = (established && call.hasVideo) ? '' : 'none';
+    // 接通后才显示 DTMF 拨号盘（未接通发不了，REQ-CALL-006）
+    $('dtmfPad').style.display = established ? '' : 'none';
     applyMediaButtons(call);
     // 来电振铃时隐藏挂断（拒接即挂断）；呼出中/通话中显示挂断
     $('btnHangup').style.display = (ringing && incoming) ? 'none' : '';
@@ -907,6 +936,7 @@
     $('btnMute').style.display = 'none';
     $('btnMute').textContent = '保持';
     $('mediaRow').style.display = 'none';
+    $('dtmfPad').style.display = 'none';
     // 通话结束：画面由 SDK 清空（监听 call.terminated），这里只清角标
     resetStats();
   }

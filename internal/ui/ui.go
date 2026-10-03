@@ -57,8 +57,12 @@ type App struct {
 	settingsPage *fyne.Container
 
 	// 拨号盘控件
-	dialEntry     *widget.Entry // 已废弃：由 dialSelect 替代（保留字段避免大改）
-	dialSelect    *widget.SelectEntry
+	dialEntry  *widget.Entry // 已废弃：由 dialSelect 替代（保留字段避免大改）
+	dialSelect *widget.SelectEntry
+
+	// 按键音出口（测试可替换；nil = 走音频管理器）
+	onKeyTone func(key string)
+
 	regDot        *statusDot
 	regLabel      *widget.Label // 本机号码显示
 	autoAnswerBtn *widget.Button
@@ -285,11 +289,19 @@ func (a *App) buildMainWindow() {
 	// 数字/星号/井号直接输入拨号框，退格删除末尾字符。
 	// 输入框获得焦点时按键由其自身消费，此处只处理未被消费的按键。
 	w.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
-		if a.uiState != uiIdle || a.dialSelect == nil {
+		if a.dialSelect == nil {
 			return
 		}
 		// 仅在拨号盘页生效（设置页展示时不处理）
 		if len(a.mainContent.Objects) == 0 || a.mainContent.Objects[0] != a.dialPage {
+			return
+		}
+		// 通话中（REQ-UI-030）：只把数字键透传成 DTMF，其余按键一律不管——
+		// 此时输入框是禁用的，键盘事件不会被任何控件消费，正好落到这里
+		if a.uiState != uiIdle {
+			if a.uiState == uiInCall && isDialDigit(ev.Name) {
+				a.onKeypadDigit(string(ev.Name))
+			}
 			return
 		}
 		switch {
@@ -302,18 +314,43 @@ func (a *App) buildMainWindow() {
 			// 回车直接呼出（输入框聚焦时由 OnSubmitted 处理，不会重复）
 			a.onCallButton()
 		case isDialDigit(ev.Name):
-			digit := string(ev.Name)
-			// 与号码盘一致：呼出过的号码视为已完成输入，重新输入时先清空
-			if a.savedNumber != "" && a.dialSelect.Text == a.savedNumber {
-				a.dialSelect.SetText(digit)
-			} else {
-				a.dialSelect.SetText(a.dialSelect.Text + digit)
-			}
+			a.appendDialKey(string(ev.Name))
+			a.onKeypadDigit(string(ev.Name)) // 按键音（空闲态不会发 DTMF）
 		}
 	})
 
 	// 启动默认隐藏主窗口，仅显示托盘图标（REQ-UI 修订）；
 	// 单击托盘图标或菜单「显示主界面」唤出
+}
+
+// appendDialKey 空闲态把按键字符追加进拨号框：呼出过的号码视为已完成输入，
+// 再次输入时先清空（REQ-UI-024，与号码盘一致）。
+func (a *App) appendDialKey(key string) {
+	if a.dialSelect == nil {
+		return
+	}
+	if a.savedNumber != "" && a.dialSelect.Text == a.savedNumber {
+		a.dialSelect.SetText(key) // 整段替换：重新输入新号码
+		return
+	}
+	a.dialSelect.SetText(a.dialSelect.Text + key)
+}
+
+// onKeypadDigit 拨号键与键盘数字的统一处理（REQ-UI-029）：
+// 本机回显按键音；**通话中**同时向对端发 DTMF（RFC 4733，REQ-CALL-006）——
+// 发送条件与界面状态绑定，空闲时只响一声、不发任何信令。
+func (a *App) onKeypadDigit(key string) {
+	switch {
+	case a.onKeyTone != nil: // 测试注入
+		a.onKeyTone(key)
+	case a.audioMgr != nil:
+		a.audioMgr.PlayDTMF(key)
+	}
+	if a.uiState == uiInCall && a.activeCallID != "" {
+		if err := a.core.SendDTMF(a.activeCallID, key); err != nil {
+			logx.Logger().Debug("发送 DTMF 失败", "digit", key, "err", err)
+		}
+	}
 }
 
 // buildDialPage 拨号盘页：号码输入框 + 3×4 拨号键 + 呼叫按钮（REQ-UI-005）。
@@ -338,6 +375,8 @@ func (a *App) buildDialPage() {
 	a.dialEntry.TextStyle = fyne.TextStyle{Bold: true}
 	a.dialSelect = widget.NewSelectEntry(nil)
 	a.dialSelect.SetPlaceHolder("输入号码或 sip:xxx@主机")
+	// 注意：**输入框里敲数字不回显按键音、也不发 DTMF**（用户明确要求）——
+	// 按键音只属于"点号码盘"与"未聚焦时在主窗体敲数字"这两条路径。
 	a.dialSelect.Wrapping = fyne.TextWrapOff
 	a.dialSelect.Scroll = fyne.ScrollNone
 	// 回车直接呼出（REQ-UI-024）
@@ -361,21 +400,12 @@ func (a *App) buildDialPage() {
 		for _, k := range row {
 			key := k
 			btn := widget.NewButton(key, func() {
-				switch a.uiState {
-				case uiIdle:
-					// 呼出过的号码视为已完成输入：再次点号码盘时
-					// 清空重新输入（REQ-UI-024）
-					if a.savedNumber != "" && a.dialSelect.Text == a.savedNumber {
-						a.dialSelect.SetText(key)
-					} else {
-						a.dialSelect.SetText(a.dialSelect.Text + key)
-					}
-				case uiInCall:
-					// 通话中按键发送 DTMF（REQ-CALL-006）
-					if a.activeCallID != "" {
-						_ = a.core.SendDTMF(a.activeCallID, key)
-					}
+				if a.uiState == uiIdle {
+					a.appendDialKey(key)
 				}
+				// 点号码盘一律回显按键音；通话中还会向对端发 DTMF
+				//（REQ-UI-029 / REQ-CALL-006）；呼出/振铃中按键是禁用的
+				a.onKeypadDigit(key)
 			})
 			btn.Importance = widget.LowImportance
 			a.keypadBtns = append(a.keypadBtns, btn)
@@ -787,7 +817,7 @@ func (a *App) setCallUI(state int, remote string) {
 		if a.callW != nil {
 			a.callW.Hide()
 		}
-		a.dialSelect.Enable()
+		a.applyMainCallMode(false) // 恢复输入框/设置/自动接听/呼叫等控件（REQ-UI-030）
 		if a.savedNumber != "" {
 			a.dialSelect.SetText(a.savedNumber)
 		}
@@ -796,9 +826,11 @@ func (a *App) setCallUI(state int, remote string) {
 		// 视频界面状态一并复位（视频窗口隐藏、帧缓冲清空、按钮复位）
 		a.ringHasVideo = false
 		a.resetVideoUI()
-		// 通话结束后不主动显示主窗体：仅当主窗体是被本次通话自动
-		// 隐藏（通话前可见）时恢复显示
-		if a.mainWasVisible {
+		// 主窗体可见性（REQ-UI-030 修订，用户定的规则）：
+		//  - 通话前是打开的 → **无论通话中开关过没有，结束都显示**；
+		//  - 通话前没开 → 看通话中的最后状态：自己打开又没关就保持，
+		//    自己关掉了（或压根没开过）就不显示。
+		if shouldShowMainAfterCall(a.mainWasVisible, a.mainShown) {
 			a.mainW.Show()
 			a.mainShown = true
 			a.mainW.RequestFocus()
@@ -813,6 +845,8 @@ func (a *App) setCallUI(state int, remote string) {
 	case uiDialing:
 		a.mainW.Hide()
 		a.mainShown = false
+		a.applyMainCallMode(true) // 通话中：主窗体只放开号码按键（REQ-UI-030）
+		a.setKeypadEnabled(false) // 呼叫未接通，发不了 DTMF（REQ-CALL-006）
 		a.buildCallPanelIfNeeded()
 		a.updateCallWindowTitle()
 		a.callNameLabel.SetText(remote)
@@ -825,6 +859,8 @@ func (a *App) setCallUI(state int, remote string) {
 	case uiRinging:
 		a.mainW.Hide()
 		a.mainShown = false
+		a.applyMainCallMode(true)
+		a.setKeypadEnabled(false) // 振铃中还不能发 DTMF
 		a.buildCallPanelIfNeeded()
 		a.updateCallWindowTitle()
 		a.callNameLabel.SetText(remote)
@@ -838,6 +874,8 @@ func (a *App) setCallUI(state int, remote string) {
 	case uiInCall:
 		a.mainW.Hide()
 		a.mainShown = false
+		a.applyMainCallMode(true)
+		a.setKeypadEnabled(true) // 通话中：号码按键用来发 DTMF（REQ-CALL-006）
 		a.buildCallPanelIfNeeded()
 		a.updateCallWindowTitle()
 		a.callNameLabel.SetText(remote)
@@ -846,6 +884,47 @@ func (a *App) setCallUI(state int, remote string) {
 		showCallWindow(a.callW)
 		moveCallWindowToCorner(a.callW)
 		a.startTimer() // 通话时长从 0 开始
+	}
+}
+
+// shouldShowMainAfterCall 通话结束时要不要显示主窗体（REQ-UI-030 的规则，
+// 抽成纯函数便于测试）：
+//   - 通话前是打开的（mainWasVisible）→ 一律显示，不管通话中开关过没有；
+//   - 通话前没开 → 只有"通话中自己打开且没关"（mainShown 仍为 true）才显示。
+func shouldShowMainAfterCall(mainWasVisible, mainShown bool) bool {
+	return mainWasVisible || mainShown
+}
+
+// applyMainCallMode 按"是否在通话中"收紧/恢复主窗体控件（REQ-UI-030）。
+//
+// 通话期间主窗体可以从托盘再次唤出，但**只允许点号码按键、或用键盘输入数字**
+// （两者都发 DTMF）：输入框（含最近号码下拉）、设置、自动接听、呼叫/视频呼叫
+// 按钮全部禁用，并强制回到拨号盘页；号码按键的可用性由 setCallUI 按通话阶段管
+// （只有通话中才可用）。通话结束后整体恢复。
+func (a *App) applyMainCallMode(inCall bool) {
+	if inCall {
+		a.showDialPage()
+	}
+	setEnabled := func(c interface {
+		Enable()
+		Disable()
+	}, on bool) {
+		if c == nil {
+			return
+		}
+		if on {
+			c.Enable()
+		} else {
+			c.Disable()
+		}
+	}
+	// 输入框禁用后不可聚焦，键盘数字因此落到 canvas 按键回调 → 发 DTMF
+	setEnabled(a.dialSelect, !inCall)
+	for _, c := range []interface {
+		Enable()
+		Disable()
+	}{a.settingsBtn, a.autoAnswerBtn, a.callBtn, a.videoCallBtn} {
+		setEnabled(c, !inCall)
 	}
 }
 
@@ -1269,9 +1348,9 @@ func (a *App) setAutoAnswer(enabled bool) {
 // 通话期间（呼叫/振铃/通话中）主窗口保持隐藏，通话面板关闭后
 // 才可唤出（REQ-UI-025 修订）。
 func (a *App) showMain() {
-	if a.uiState != uiIdle {
-		return
-	}
+	// 通话中也能从托盘唤出主窗体（REQ-UI-030）：此时主窗体只放开号码按键与
+	// 键盘输入（发 DTMF），输入框/设置/呼叫按钮等一律禁用，见 applyMainCallMode
+	a.applyMainCallMode(a.uiState != uiIdle)
 	a.mainW.Show()
 	a.mainShown = true
 	a.mainW.RequestFocus()
@@ -1764,11 +1843,14 @@ func callData(data any) (callID string, call *core.Call) {
 	return callID, call
 }
 
-// isDialDigit 判断按键是否为可拨号的数字键（0-9 / * / #，REQ-UI-024）。
-func isDialDigit(name fyne.KeyName) bool {
-	if len(name) != 1 {
+// isDialChar 判断字符是否为可拨号的按键（0-9 / * / #，REQ-UI-024）
+func isDialChar(s string) bool {
+	if len(s) != 1 {
 		return false
 	}
-	c := name[0]
+	c := s[0]
 	return (c >= '0' && c <= '9') || c == '*' || c == '#'
 }
+
+// isDialDigit 判断按键名是否为可拨号的数字键（0-9 / * / #，REQ-UI-024）。
+func isDialDigit(name fyne.KeyName) bool { return isDialChar(string(name)) }

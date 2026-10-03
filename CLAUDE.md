@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.5**（dev 开发中；1.0.4 含 Opus 音频编解码与视频负载类型号固定，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
+当前版本 **1.0.6**（dev 开发中；1.0.5 含更新站点发布流程、SDK 定时查询更新与强制推送、窗口不占任务栏，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
 真实环境：OpenSIPS 2.4.11（10.168.4.40:15060，账号 2999），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
 
@@ -26,7 +26,7 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 ```bash
 # 构建脚本按目标打印本次能力（如 CGO+音频+视频，缺库时标出无视频/无Opus）；视频/Opus 取决于
 # 第三方静态库是否已生成（见下），缺哪个就降级为哪个没有。
-# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.5-rc），
+# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.6-rc），
 # 正式构建用 SIP_PHONE_RELEASE=1（发布脚本会设）；不经脚本的 go build/go run 是基础版本号。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO）
@@ -63,9 +63,9 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 `/docs/upload`、`/docs/api`）。本仓库侧的发布入口：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.5-rc），不上传
+./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.6-rc），不上传
 ./scripts/release.sh --pre             # 预发布：真实上传（站点标记为预发布）
-./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.5
+./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.6
 # Windows 用 scripts/release.bat（同样的参数，内部走 git-bash）
 ```
 
@@ -152,8 +152,9 @@ web/
 release/      发布到更新站点的配置与元数据：release.conf（站点/应用 ID/令牌）、
               app.json（应用级元数据，经站点 metadata 接口写入）、icon.svg（图标，经 icon 接口写入）
 scripts/      第三方库构建（build-video-libs.*、build-audio-lib.*）与一键发布（release.sh/.bat）
-docs/         requirements.md（需求）、ws-protocol.md（WS 协议）、auto-update.md（自动更新与
-              更新站点接入：规范摘要、REST API、生产环境、参考实现、接入清单）；changelog.md 在仓库根目录
+docs/         design.md（架构设计：分层与依赖、各模块职责、关键决策、目录地图——新同学先看这份）、
+              requirements.md（需求）、ws-protocol.md（WS 协议）、auto-update.md（自动更新与
+              更新站点接入：规范摘要、REST API、参考实现、接入清单）；changelog.md 在仓库根目录
 ```
 
 ## 分层架构与事件流
@@ -273,7 +274,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **交流、文档、注释、提交信息、界面文案一律中文**。
 - **Git 工作流**：开发在分支上进行（工作分支 dev，master 为收口分支）；**会话中修改的代码不得自动提交**——提交与 push 必须经用户人工确认后执行，且**不自动合并到 master**（合并 master 需用户明确指示）。
 - **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
-- 版本 1.0.5 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
+- 版本 1.0.6 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
 - 弹窗按钮文案「确定/取消」。
 - 需求变更同步更新 docs/requirements.md 与 changelog.md。
 - 单通话限制：呼叫/振铃/通话中禁止新呼出（返回错误）；新来电直接 486 USER_BUSY。
@@ -289,6 +290,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   - 2xx 的 ACK 是独立事务走 OnAck handler；RespondSDP 按 RFC 6026 阻塞等待 ACK（最长 64×T1=32s），必须放后台 goroutine；
   - 事务层对 CANCEL 自动回 200+487；ServerTx 无最终响应时 TerminateGracefully 会立即 Terminate（后续 Respond 必失败）；
   - Timer_I=T4=5s：re-INVITE 事务需手动延迟 Terminate 防止重传风暴。
+- **Fyne 的键盘分发是"二选一"，别指望覆写子类能收到键**：驱动先把键入交给**当前聚焦的控件**，**只有没有控件聚焦时**才走 canvas 的 `OnTypedKey`/`OnTypedRune`（见 `internal/driver/glfw/window.go` 的键处理）。踩过：① 拨号框的按键音钩子做成"继承 `widget.SelectEntry` 覆写 `TypedRune`"——SelectEntry 聚焦时 `FocusGained` 会把焦点转给**它内部的 Entry**，覆写的方法永远收不到键（表现为输入框里敲数字没有任何回调）；所以"输入框里敲数字要响/要发 DTMF"这种需求**做不到也别做**——本项目的约定恰好相反：**输入框里输入数字不响也不发 DTMF**（用户明确要求），按键音只属于"点号码盘"与"未聚焦输入框时在主窗体敲数字"两条路径。② 想让通话中键盘数字发 DTMF，则必须先把输入框 `Disable()`（禁用后不可聚焦，键才会落到 canvas 回调）——通话中主窗体正是这么做的。
 - **Fyne**：UI 必须主线程（goroutine 运行会托盘失效+线程告警）；dialog 的 parent 传 nil 直接 panic（主窗口未显示时不要弹 dialog）；`SetSystemTrayWindow` 会覆盖 CloseIntercept（需重新接管）并注册单击回调；Window 无 Visible() 查询 API（主窗口显示状态用全局标识 mainShown 跟踪）。
 - **Fyne 托盘菜单**：菜单最后一项若不带 `IsQuit` 标记，Fyne 会自动补一个本地化的 `Quit` 项（`driver_desktop.go` 的 `addMissingQuitForMenu`，按 `lang.L("Quit")` 比对标签，中文标签匹配不上）。本项目的「退出」项经 `markTrayQuit` 处理——**仅 Linux 打标记**，Windows 保持多一个 Quit 的现状（用户要求）。新增托盘菜单项时注意最后一项的角色。
 - **窗口图标与托盘图标是两回事，别互相牵连**：GLFW 建的窗口不设自己的图标就**继承应用图标**（`fyne.App.SetIcon`）——应用图标固定绿色话机（用户要求：标准 app 图标是绿话机，红色只作异常提醒），所以**每个窗口都要自己 `SetIcon(IconPhoneGreen)`**，否则未注册时会顶着红色话机出现（更新提示窗就这么漏过：任务栏那条标题的图标是红的）。反过来，托盘图标在 **Fyne 的托盘就绪回调**里取：显式 `SetSystemTrayIcon` 过就用它，**没设过才退回应用图标**（`internal/driver/glfw/driver_desktop.go` 的 `runSystray`）——应用图标改绿之后必须在 `SetSystemTrayMenu` 之后补一次 `updateTrayIcon()`，否则托盘丢掉"未注册红"的提醒（REQ-UI-011）。`SetSystemTrayIcon` 在托盘就绪前调用只会让底层库记一条 "tray not ready yet"，图标已存下、就绪时照样生效。
