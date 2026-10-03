@@ -1,0 +1,15 @@
+{
+  "name": "mti-sip-phone 软电话",
+  "summary": "跨平台 SIP 软电话：托盘常驻、语音/视频通话、本地 WebSocket 控制接口与 JS SDK",
+  "description": "跨平台 SIP 软电话（Windows / Linux，x86_64 与 arm64），常驻系统托盘。\n\n- **语音**：SIP 注册、呼出/呼入、保持、DTMF；音频 PCMA / PCMU / Opus\n- **视频**：H264 / VP8 / VP9 / H263-1998，摄像头可用时双向视频\n- **集成**：本地 WebSocket 控制接口 + JS SDK（网页拨号、事件推送、视频订阅）\n- **更新**：应用内提示 → 用户确认后自动下载、替换并重启",
+  "vendor": "MTI",
+  "license": "Proprietary",
+  "tags": [
+    "sip",
+    "softphone",
+    "voip",
+    "desktop"
+  ],
+  "channel": "stable",
+  "order": 10
+}
