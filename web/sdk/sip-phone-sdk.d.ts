@@ -16,6 +16,23 @@ declare class SipPhoneSDK {
     autoReconnect?: boolean;
     /** 重连间隔毫秒，默认 3000 */
     reconnectDelay?: number;
+    /**
+     * 更新站点根地址（如 http://update.example.com）。设置后 SDK 连上软电话会
+     * **定时**查询该站点有没有更高版本，有则自动告知软电话（system.notifyUpdate）；
+     * 不传 = 不自动查询。查询结果见 update.check 事件。
+     */
+    updateUrl?: string;
+    /** 更新站点上的应用 ID，默认 'mti-sip-phone' */
+    appId?: string;
+    /** 查询间隔毫秒，默认 30 分钟（钳制到 60 秒 ~ 24 小时） */
+    updateInterval?: number;
+    /** 发布通道（如 beta），默认站点默认通道 */
+    updateChannel?: string;
+    /**
+     * 是否接受预发布版；不传 = 自适应（本地版本含 "-" 如 1.0.5-rc 时视为 true，
+     * 正式版只看正式版）。
+     */
+    updatePrerelease?: boolean;
   });
 
   /** 是否已连接 */
@@ -33,7 +50,9 @@ declare class SipPhoneSDK {
    *         call.failed / call.muted / call.audio（麦克风/扬声器开关）/
    *         call.dialing / call.video / video.web /
    *         register.state / system.state / system.update /
-   *         video.frame（订阅视频后逐帧推送）/ connected / disconnected
+   *         video.frame（订阅视频后逐帧推送）/ update.check /
+   *         connected / disconnected
+   * 注：SDK 本地事件（connected / disconnected / update.check）不会派发给 '*' 订阅者。
    */
   on(event: string, fn: (data: any) => void): this;
 
@@ -108,6 +127,39 @@ declare class SipPhoneSDK {
    * version 不高于软电话当前版本时返回错误码 update_not_newer。
    */
   notifyUpdate(info: SipUpdateInfo): Promise<{ phase: string; version: string; currentVersion: string }>;
+
+  /**
+   * 立即向更新站点查一次版本（不必等定时器）。结果同时经 update.check 事件派发；
+   * 未配置 updateUrl 或尚未连接软电话时返回 rejected Promise。
+   */
+  checkUpdate(): Promise<SipUpdateCheckResult>;
+
+  /**
+   * 列出更新站点上的最新版本与最新稳定版（各带本平台可用的下载地址），
+   * 供页面展示或手动「推送更新」用。**不做版本比较**——软电话侧默认仍会
+   * 拦下不高于当前版本的通知，要强推需在 notifyUpdate 里带 force: true。
+   */
+  listReleases(): Promise<{
+    /** 软电话当前版本 */
+    current: string;
+    /** 最新版本（含预发布）；站点上没有版本时为 null */
+    latest: SipSiteRelease | null;
+    /** 最新稳定版；通道里只有预发布时同样为 null */
+    latestStable: SipSiteRelease | null;
+  }>;
+
+  /**
+   * 运行期修改更新站点配置（改地址/应用 ID/间隔/通道/预发布），改完立即生效：
+   * 已连接时重启定时器并马上查一次；url 置空 = 停止自动查询。
+   * prerelease 传 null = 恢复自适应。
+   */
+  setUpdateSource(options: {
+    url?: string;
+    appId?: string;
+    interval?: number;
+    channel?: string;
+    prerelease?: boolean | null;
+  }): { url: string; appId: string; interval: number; channel: string; prerelease: boolean | null };
 
   /**
    * 订阅视频画面（REQ-VIDEO-009）。**SDK 自己把画面渲染到传入的 <video>**，
@@ -280,6 +332,50 @@ interface SipUpdateInfo {
   os?: string;
   /** 可选：目标架构（如 amd64），提供时须与软电话一致 */
   arch?: string;
+  /**
+   * 强制推送：跳过"版本必须更高"的检查（联调/回滚时按指定版本强推）。
+   * 只应由页面手动推送时设置；SDK 的定时查询不带这个标记。
+   */
+  force?: boolean;
+}
+
+/** 更新站点上某个版本的摘要（listReleases() 的条目；站点上没有该版本时为 null） */
+interface SipSiteRelease {
+  version: string;
+  /** 版本标题（release.json 的 title） */
+  title: string;
+  /** 预发布版（版本号含 - 或 _） */
+  prerelease: boolean;
+  publishedAt: string;
+  /** 更新说明（站点上的原文 Markdown） */
+  notes: string;
+  /** 站点标记的强制更新 */
+  mandatory: boolean;
+  /** 本平台产物的文件名 / 下载地址 / 校验和 / 字节数；本平台无产物时为前两项空串 */
+  file: string;
+  url: string;
+  sha256: string;
+  size: number;
+}
+
+/** 一次更新站点查询的结果（update.check 事件负载 / checkUpdate() 返回值） */
+interface SipUpdateCheckResult {
+  /** 软电话当前版本（查询失败且尚未取到时为空串） */
+  currentVersion: string;
+  /** 站点上该通道的最新版本（查询失败或无更新时为空串） */
+  latestVersion: string;
+  updateAvailable: boolean;
+  /** 是否已把新版本告知软电话（true 后由软电话弹提示，是否更新由用户点） */
+  notified: boolean;
+  /**
+   * 未告知的原因：up_to_date（已是最新）/ no_download（有新版本但本平台无产物）/
+   * already_notified（同版本已告知过）/ update_not_newer / update_in_progress /
+   * notify_failed
+   */
+  reason: '' | 'up_to_date' | 'no_download' | 'already_notified' | 'update_not_newer' |
+    'update_in_progress' | 'notify_failed';
+  /** 失败说明（中文；成功为空串） */
+  error: string;
 }
 
 /** 自动更新状态（system.update 事件负载 / getState().update） */
