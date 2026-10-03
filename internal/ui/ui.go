@@ -1042,13 +1042,20 @@ func (a *App) setRegState(state string) {
 	}
 }
 
-// updateWindowTitle 标题栏与托盘悬停提示："mti-sip-phone - 本机号码"。
-func (a *App) updateWindowTitle() {
+// appTitle 应用标题："mti-sip-phone - 本机号码"（未注册/未配置时只有应用名）。
+// 主窗口标题栏、托盘悬停提示与未接来电通知共用。
+func (a *App) appTitle() string {
 	account := a.core.State().Register.Account
 	title := "mti-sip-phone"
 	if account != "" {
 		title += " - " + account
 	}
+	return title
+}
+
+// updateWindowTitle 标题栏与托盘悬停提示。
+func (a *App) updateWindowTitle() {
+	title := a.appTitle()
 	a.mainW.SetTitle(title)
 	// 托盘悬停提示（systray 需已就绪；未就绪时由后续事件刷新）
 	systray.SetTooltip(title)
@@ -1253,8 +1260,22 @@ func (a *App) onEvent(ev core.Event) {
 	case "call.terminated", "call.failed":
 		// 停止振铃音，并按结果放提示音：遇忙放忙音，其余放挂断音
 		reason := ""
+		missed := false
 		if m, ok := ev.Data.(map[string]any); ok {
 			reason, _ = m["reason"].(string)
+			missed, _ = m["missed"].(bool)
+		}
+		if missed {
+			// 未接来电（REQ-UI-010）：是否未接由核心判定（core.missedOnEnd），
+			// 这里只负责弹桌面通知。振铃时长在主线程读（callStartAt 由界面
+			// 计时器维护，未接来电不会走到"通话时长"分支，所以它就是振铃起点）。
+			if _, call := callData(ev.Data); call != nil {
+				var ringFor time.Duration
+				if !a.callStartAt.IsZero() {
+					ringFor = time.Since(a.callStartAt)
+				}
+				a.notifyMissedCall(call, ringFor)
+			}
 		}
 		if a.audioMgr != nil {
 			a.ringbackOn = false
