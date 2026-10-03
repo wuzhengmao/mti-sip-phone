@@ -5,6 +5,7 @@
 - 变更记录：[changelog.md](changelog.md)
 - 需求文档：[docs/requirements.md](requirements.md)
 - WS 协议：[docs/ws-protocol.md](docs/ws-protocol.md)
+- 自动更新与更新站点接入：[docs/auto-update.md](docs/auto-update.md)
 
 ## 目标平台
 
