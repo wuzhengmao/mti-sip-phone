@@ -44,22 +44,32 @@ func TestLocalFramesWanted(t *testing.T) {
 // --- SDP：音频行为回归 + 视频扩展 ---
 
 // TestSDPOfferAudioGolden 纯音频 offer 的逐字节回归。
-// 需求 1：音频编解码优先级必须是 PCMA(8) 在 PCMU(0) 之前。
+// 需求 1：音频编解码优先级必须是 PCMA(8) 在 PCMU(0) 之前；Opus 排在最后
+// （固定 PT 96），telephone-event(101) 恒在末尾。
 func TestSDPOfferAudioGolden(t *testing.T) {
 	e := newTestEngine(t)
 	e.SetSDPIP("10.0.0.5")
 	e.ssrc = 42
 	e.localPort = 40000
 
+	// 含 Opus 的构建（-tags audio）与不含的构建期望文本不同：
+	// 两边的逐字节断言都要保留（前者是新增能力，后者是既有行为回归）。
+	opusPT := ""
+	opusRtpmap := ""
+	if OpusSupported() {
+		opusPT = " 96"
+		opusRtpmap = "a=rtpmap:96 opus/48000/2\r\n"
+	}
 	got := e.SDPOffer()
 	want := "v=0\r\n" +
 		"o=- 42 1 IN IP4 10.0.0.5\r\n" +
 		"s=mti-sip-phone\r\n" +
 		"c=IN IP4 10.0.0.5\r\n" +
 		"t=0 0\r\n" +
-		"m=audio 40000 RTP/AVP 8 0 101\r\n" +
+		"m=audio 40000 RTP/AVP 8 0" + opusPT + " 101\r\n" +
 		"a=rtpmap:8 PCMA/8000\r\n" +
 		"a=rtpmap:0 PCMU/8000\r\n" +
+		opusRtpmap +
 		"a=rtpmap:101 telephone-event/8000\r\n" +
 		"a=fmtp:101 0-16\r\n" +
 		"a=rtcp:40001\r\n" +
@@ -142,9 +152,48 @@ func TestNegotiateVideoPriority(t *testing.T) {
 	if rc.Name != videoCodecH264 {
 		t.Fatalf("应按优先级选 H264，实际 %s", rc.Name)
 	}
-	// answer 必须复用**对端**的 PT 号（100），不是本端的 96
+	// answer 必须复用**对端**的 PT 号（100），不是本端的 H264 号 99
 	if pt != 100 {
 		t.Fatalf("应复用对端 PT 100，实际 %d", pt)
+	}
+}
+
+// TestVideoOfferFixedPTs 本端 offer 的视频 PT 号固定（用户指定）：
+// H264=99 / H263-1998=98 / VP8=100 / VP9=101，m= 行仍按优先级顺序列出。
+func TestVideoOfferFixedPTs(t *testing.T) {
+	if !VideoSupported() {
+		t.Skip("未启用视频的构建（需要 -tags video）")
+	}
+	v, err := NewVideoEngine("127.0.0.1")
+	if err != nil {
+		t.Fatalf("创建视频引擎失败: %v", err)
+	}
+	defer v.Close()
+	sec := v.offerSection("sendrecv")
+	if sec == nil {
+		t.Fatal("可用编码非空时应输出视频段")
+	}
+	want := map[string]uint8{
+		videoCodecH264: 99,
+		videoCodecVP8:  100,
+		videoCodecVP9:  101,
+		videoCodecH263: 98,
+	}
+	if len(sec.Codecs) != len(want) {
+		t.Fatalf("应列出全部 %d 种编码，实际 %d", len(want), len(sec.Codecs))
+	}
+	for _, c := range sec.Codecs {
+		if want[c.Encoding] != c.PT {
+			t.Fatalf("%s 的 PT 应为 %d，实际 %d", c.Encoding, want[c.Encoding], c.PT)
+		}
+	}
+	// 优先级顺序不变：H264 > VP8 > VP9 > H263-1998
+	order := make([]string, len(sec.Codecs))
+	for i, c := range sec.Codecs {
+		order[i] = c.Encoding
+	}
+	if got := strings.Join(order, ","); got != "H264,VP8,VP9,H263-1998" {
+		t.Fatalf("视频优先级顺序应为 H264,VP8,VP9,H263-1998，实际 %s", got)
 	}
 }
 

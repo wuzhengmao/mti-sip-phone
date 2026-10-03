@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU 通话、保持、DTMF；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
+mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
 当前版本 **1.0.4**（dev 开发中；1.0.3 含视频通话与网页订阅视频，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。
 
@@ -15,7 +15,7 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 | 领域 | 选型 | 说明 |
 | --- | --- | --- |
 | SIP 信令 | github.com/emiago/sipgo v1.6.0 | UDP/TCP，DialogClientSession / DialogServerSession |
-| 媒体 | pion/rtp、pion/rtcp、pion/sdp/v3、pion/stun、github.com/zaf/g711 | RTCP 为 v1.2.x 新 API（CompoundPacket/Goodbye，非旧版 Bye） |
+| 媒体 | pion/rtp、pion/rtcp、pion/sdp/v3、pion/stun、github.com/zaf/g711、libopus（cgo） | RTCP 为 v1.2.x 新 API（CompoundPacket/Goodbye，非旧版 Bye）；音频扩展编解码（Opus）由 `-tags audio` 启用，静态库见下 |
 | 音频设备 | github.com/gen2brain/malgo v0.11.26 | miniaudio 绑定，**CGO**；`-tags noaudio` 切空后端（纯 Go 构建/测试） |
 | GUI | fyne.io/fyne/v2 v2.8.1 | 要求 UI 运行在主线程 |
 | WebSocket | github.com/coder/websocket | 仅监听 127.0.0.1，无 token 鉴权 |
@@ -42,6 +42,9 @@ build.bat
 export CC="<WinLibs mingw64/bin/gcc.exe 路径>"   # build.bat 输出里可见
 export CGO_ENABLED=1
 go test ./internal/media/ ./internal/wsapi/ ./internal/sip/ ./internal/ui/ ./internal/updater/
+# 带 Opus 的包还要 -tags audio（需先跑 scripts/build-audio-lib.bat 生成静态库，
+# 并把 third_party/audio/<目标>/{include,lib} 经 CGO_CFLAGS/CGO_LDFLAGS 传入）：
+go test -tags audio ./internal/media/
 
 # 运行
 dist/sip-phone-windows-amd64.exe       # 托盘常驻；关闭主窗口=隐藏到托盘
@@ -91,7 +94,7 @@ internal/
   logx/       slog 日志：滚动+gzip 归档、信令跟踪 TraceSIP（自动脱敏）
   core/       应用核心：状态机、事件总线（发布-订阅）、Telephony 抽象接口
   sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理）
-  media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU 编解码、播放环形缓冲、SDP 协商
+  media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus 编解码、播放环形缓冲、SDP 协商
   audio/      音频设备：malgo 后端（全双工采集/播放、设备枚举/选择、提示音）
   wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳、网页视频订阅 video.go）
   updater/    自动更新：前端经 WS 告知新版本 → 用户确认后下载（sha256/
@@ -133,7 +136,7 @@ main（组装）
 
 ## 关键信令流程（sip/phone.go）
 
-- **呼出**：Dial → INVITE（SDP offer，PCMA 优先）→ WaitAnswer（180/183 回调里 OnRinging；183 带 SDP 即早期媒体：SDPApplyAnswer → SetMuted(true)+SetKeepalive(true) → attachAudio+Start）→ 2xx → SDPApplyAnswer → ACK → SetKeepalive(false)+SetMuted(false) → OnEstablished。
+- **呼出**：Dial → INVITE（SDP offer，PCMA > PCMU > Opus 优先）→ WaitAnswer（180/183 回调里 OnRinging；183 带 SDP 即早期媒体：SDPApplyAnswer → SetMuted(true)+SetKeepalive(true) → attachAudio+Start）→ 2xx → SDPApplyAnswer → ACK → SetKeepalive(false)+SetMuted(false) → OnEstablished。
 - **呼入**：handleIncoming → 忙检查（`len(p.calls)>0` 直接 486 Busy Here）→ SDPAnswer 解析 offer → OnIncoming → 180 / 自动接听 → Answer 后台 goroutine RespondSDP（200+SDP，阻塞等 ACK）→ attachAudio+Start → OnEstablished。
 - **挂断竞态处理**（多处历史 bug，勿简化）：
   - 呼入振铃中挂断=拒接：**603 必须先于 ctx cancel 发出**（handleIncoming 退出后事务被终止，603 发不出去）；
@@ -157,6 +160,14 @@ main（组装）
 
 FFmpeg 的 configure **刻意不启用 libvpx/libopenh264**（只解码），因此不需要 pkg-config
 ——WinLibs 工具链里没有 pkg-config，这是方案能落地的前提；编码直接由 cgo 链接那两个库。
+
+**音频 Opus（`internal/media/codec_opus.go`，cgo + libopus）**：编码用官方 libopus（FFmpeg
+自带的 `ff_opus_encoder` 标着 `AV_CODEC_CAP_EXPERIMENTAL`，官方不认为可用于生产，故不用）。
+静态库由 `scripts/build-audio-lib.sh` / `.bat` 生成到 `third_party/audio/<target>/{include,lib}`
+（已 gitignore，音频第三方库的统一入口，以后加 G.722 等也走这里）。配置与视频**完全独立**：
+探测到 `lib/libopus.a` 就加 `-tags audio` 并注入 `CGO_CFLAGS`/`CGO_LDFLAGS`，缺失则降级为
+**无 Opus**（SDP 不宣告，仍走 PCMA/PCMU），两个库都在时标签是 `-tags video,audio`（音频扩展统一用 `audio`，以后加 G.722 等同标签）。
+libopus 构建很轻（秒级，无 nasm/pkg-config 依赖，x86 的 SIMD 走编译器 intrinsics）。
 
 **四个目标的可行性**（都是交叉编译，宿主机位数无关）：
 
@@ -227,7 +238,9 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - 需求变更同步更新 docs/requirements.md 与 changelog.md。
 - 单通话限制：呼叫/振铃/通话中禁止新呼出（返回错误）；新来电直接 486 USER_BUSY。
 - WS 端口可配置（默认 8765），被占用自动 +1 并保存；无 token 鉴权（仅回环）。
-- SDP 编解码优先级：PCMA > PCMU；RTCP 端口 = RTP 端口 + 1（SDP `a=rtcp` 宣告）。
+- SDP 编解码优先级：PCMA > PCMU > Opus；Opus 本端 offer 固定 PT 96（rtpmap `opus/48000/2`），answer 仍复用对端 PT；RTCP 端口 = RTP 端口 + 1（SDP `a=rtcp` 宣告）。
+- 视频 PT 固定（**只作用于本端 offer**）：H264=99 / H263-1998=98 / VP8=100 / VP9=101；优先级顺序不变
+  （H264 > VP8 > VP9 > H263-1998），m= 行按优先级列出（`RTP/AVP 99 100 101 98`）。answer 必须复用对端 PT。
 
 ## 已知陷阱（修改相关代码前必读）
 
@@ -252,7 +265,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   - **Wayland 会话 + X 显示真的可连接时，把后端固定为 X11**（`os.Setenv("FYNE_PLATFORM","x11")`，探测用 `x11DisplayAvailable()`）：Wayland 协议不允许客户端自定位窗口、去装饰、自行置顶，通话面板只能居中带标题栏；且新映射窗口拿不到指针焦点（合成器防抢焦点，`RequestFocus` 被拒），空窗期里 fyne 的指针位置停在旧值上，**点任何位置都会按旧坐标命中控件**（实测表现为刚弹出时点「接听」却挂断）。走 X11（Xwayland）后这些按 X11 语义正常工作。用户已设 `FYNE_PLATFORM` 时不覆盖；无 `DISPLAY` 或连不上（Xwayland 未运行）时回落原生 Wayland。
   **排查用 `FYNE_PLATFORM=x11|wayland` 强制后端**（Fyne 自带开关，会转成 GLFW 平台提示）；`env -u WAYLAND_DISPLAY` **无效**——GLFW 平台探测失败后会回落到 libwayland 的默认 `wayland-0`，仍旧走 Wayland。
 - **视频：answer 必须复用对端的 PT 号**。原来 `negotiateSDP` 返回本地 PT 直接拿去生成 answer，
-  音频因为 PCMA/PCMU 是静态 8/0 侥幸无事；视频全是动态 PT（96–99），按本地号回会协商串味。
+  音频因为 PCMA/PCMU 是静态 8/0 侥幸无事；视频全是动态 PT（本端固定 98–101），按本地号回会协商串味。
   现在 `Engine.activePT` 记录「线上实际使用的号」（offerer=本端号，answerer=对端号）。
 - **视频：answer 的 m= 行数量与顺序必须与 offer 一致**（RFC 3264），不接受视频时输出
   `m=video 0 RTP/AVP ...` 拒绝段而不是省略该行，否则 FreeSWITCH 部分版本回 488。
@@ -418,6 +431,47 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   一次性垫高；垫高后深度**只增不减**（读多少写多少），表现为"通话越久延迟越大、
   有几秒"。早先容量给到 8 秒，等于允许累积 8 秒延迟。截断时会打
   `播放缓冲超深已截断` 的 Warn（限频 10s），这是排查延迟的第一线索。
+- **Opus：RTP 时钟率 48000 与 PCM 帧长 160 不是一回事**。内部 PCM 管线恒为 8kHz
+  （设备、播放缓冲、提示音都是 8k），所以编码器/解码器以 `Fs=8000` 创建——窄带工作，
+  不需要重采样，对端发宽带/全带包也能解码（libopus 内部降到 8k 输出）。但 SDP 的
+  `rtpmap` 与 RTP 时间戳必须按 **48000** 走：`a=rtpmap:96 opus/48000/2`、20ms 帧的
+  时间戳步长 **960**。`Codec.FrameSize()` 曾兼任「PCM 帧长」与「时间戳增量」
+  （静态 PT 的 G.711 下两者恰好都是 160 才没暴露），现已拆出 **`Codec.TimestampStep()`**，
+  `sendPacket` 用它递增 `e.ts`——加新编解码器时别再用 FrameSize 当时戳步长。
+- **Opus：编解码器实例是包级共享的（`supportedCodecs` 是原型），带 C 状态**。
+  靠可选接口 `resetter`（`Reset()` → `OPUS_RESET_STATE`）在**通话开始（`Start()`）、
+  解码流重置（`playPush` 的 SSRC/大跳变分支）、协商切换编解码器**时复位；本应用限
+  单通话所以安全。若将来支持多路通话，必须改成每个 `Engine` 一份实例。
+  编码器另有一把锁：采集回调（`FeedMic`）与 SIP 线程（`punchHole`/早期媒体保活）会并发调 `Encode`。
+- **Opus：answer 不能用本端 PT 反查编码名**。`audioSection` 现在接收「编解码器 + 线上 PT」
+  对（`codecPT`），offer 用各自的固定本端号、answer 用 `activePT`（对端号）；此前的
+  `codecByPT(pt).Name()` 在动态 PT 下会兜底成 PCMA、时钟率还会写死 8000。
+  `matchAudioCodec` 的「静态号回退」也只认 0–95：对端用 96 号却不写 rtpmap 时不能当 Opus。
+- **Opus：丢包用 PLC 而不是补静音**（`plcCodec` 可选接口，`fillLoss`）。最多外推 5 帧
+  （100ms），再多就补静音——这是把「丢包补静音」的既有语义按编解码器能力细分，
+  G.711 无 PLC，行为与从前逐字节一致。
+- **DTMF（RFC 4733）与 Opus 的时钟域不同，这是对的**：telephone-event 在本端 SDP 里
+  单独宣告 8000 时钟，`SendDTMF` 的 duration 单位就是 1/8000；而事件包携带的 RTP
+  时间戳取自音频流（Opus 下是 48000 域）。duration 只看事件自己的时钟，别把两者统一。
+- **CGO_CFLAGS/CGO_LDFLAGS 里的路径，Windows 宿主下必须用 `D:/...` 形式，且这是
+  "只有第一个路径会被转换"的坑**：go build 只把列表里**第一个** MSYS 形式（`/d/git/...`）
+  的路径转成 Windows 形式，其余原样交给原生 gcc → 找不到头文件。实测：`-tags video,audio`
+  时报 `fatal error: opus/opus.h: No such file or directory`，而单独 `-tags audio` 却正常
+  （单个路径恰好是"第一个"）。`build.sh` 因此用 `pwd -W` 取 `ABS_ROOT`（与
+  `scripts/build-video-libs.sh` 的 `abspath` 同理）；`build.bat` 用 `%CD%` 本来就是
+  Windows 形式。手工跑 `go test -tags …` 时同理，别用 `$(pwd)`。
+- **音频静态库：libopus 是 autotools 工程（视频那三个库都不是），Windows 上要绕开两个坑**，
+  都在 `scripts/build-audio-lib.sh` 里：
+  1. **MAKE 传裸命令名 + `--disable-dependency-tracking`**：Makefile 递归调用 `$(MAKE)`，
+     Windows 上递归是 CreateProcess 按 **Windows PATH** 查程序名，而 git-bash 里 `make`
+     只是 shell 层解析（PATH 里实际只有 `mingw32-make.exe`），直接给 `make` 会报
+     `CreateProcess(NULL, make all-recursive, ...) failed`；automake 的依赖跟踪 bootstrap
+     也栽在同一处。
+  2. **给 make 传 8.3 短路径的 SHELL**：automake 的 `LIBTOOL = $(SHELL) $(top_builddir)/libtool`，
+     mingw32-make 把 `$(SHELL)` 原样拼进配方行，而 sh.exe 在
+     `C:\Program Files\Git\usr\bin\`——空格把命令行切碎，编译时报
+     `sh: line 1: C:/Program: No such file or directory`。用 `cygpath -d -w $(command -v sh)`
+     得到 `C:/PROGRA~1/...` 消除空格，命令行赋值 `SHELL=` 优先于 Makefile 里的 `/bin/sh`。
 - **视频：新流的第一包就要发 PLI 催关键帧**（`handleRTP` 的 `!v.hasSeq` 分支）。
   解码要等 IDR，而不少对端（实测 MicroSIP）只在被请求或很久之后才发——不催的话
   表现为"接通后视频窗口迟迟不出画面，开关一下视频（内部会发 PLI）才出来"。
@@ -454,7 +508,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   **越界读，进程直接崩溃**（"视频接听后有时崩溃"的根因）。`captureLoop` 每帧比对
   尺寸不一致就重建编码器；C 侧 `sp_enc_encode` 还有一道 `inW < e->w` 的硬校验兜底。
 - **视频：answer 的视频段必须用对端 PT 号，且不能拿它去查本端编码表**。
-  本端表里是 96–99，对端 offer 可能是 100/101…；用 `videoCodecByPT(peerPT)` 查
+  本端表里是 98–101，对端 offer 可能是 100/101/102…；用 `videoCodecByPT(peerPT)` 查
   必然落空 → 段为 nil → 上层输出 `m=video 0`（等于拒绝视频）→ 两边都看不到画面。
   协商结果已存在 `VideoEngine.codec/peerPT` 里，用 `answerSection()` 直接取。
 - **视频：对端只声明 `packetization-mode=0`（单 NAL）时不能拒掉整条 m=video**。

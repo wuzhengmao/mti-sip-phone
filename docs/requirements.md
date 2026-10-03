@@ -12,7 +12,7 @@
 | 技术栈 | Go 语言 |
 | 目标平台 | Windows、Linux，架构 x86_64 与 arm64 |
 | 对接服务端 | 标准 SIP 服务器，遵循 RFC 3261，不绑定具体厂商实现 |
-| 媒体能力 | 完整语音通话（PCMA / PCMU，真实收发 RTP，接入本地音频设备） |
+| 媒体能力 | 完整语音通话（PCMA / PCMU / Opus，真实收发 RTP，接入本地音频设备） |
 | 使用场景 | 网页操控型软电话：常驻托盘，通过本地 WebSocket 由网页控制，亦可独立拨号 |
 
 ## 2. 文档约定
@@ -29,7 +29,7 @@
 | --- | --- | --- |
 | ACC | 账户与注册 | 账户配置、SIP 注册 |
 | CALL | 呼叫控制 | 呼出、呼入、振铃、接听、挂断、通话记录 |
-| MEDIA | 媒体与音频 | PCMA/PCMU、麦克风与扬声器选择 |
+| MEDIA | 媒体与音频 | PCMA/PCMU/Opus、麦克风与扬声器选择 |
 | UI | 界面交互 | 托盘、主界面、来电窗口、通话面板、设置 |
 | WS | 本地 WebSocket 接口 | 网页通过本机 WS 控制与监听软电话 |
 | PROTO | sip:// 协议 | 网页通过 sip:// 拉起软电话并携带注册信息 |
@@ -102,9 +102,10 @@
 | REQ-MEDIA-005 | 抖动缓冲（jitter buffer）与丢包隐藏（PLC） | P0 | 已完成|
 | REQ-MEDIA-006 | 音量控制：麦克风增益与扬声器音量可调，支持通话中调整 | P1 | 待确认 |
 | REQ-MEDIA-007 | 音频预处理：回声消除（AEC）、降噪（NS）、自动增益（AGC） | P2 | 待确认 |
-| REQ-MEDIA-008 | 编解码扩展：G.722 / Opus | P2 | 待确认 |
+| REQ-MEDIA-008 | 编解码扩展：Opus（SDP 优先级排在 PCMA/PCMU 之后，本端 offer 固定 PT 96、rtpmap `opus/48000/2`；answer 按 RFC 3264 复用对端 PT；编解码器内部按 8kHz 窄带工作，对端宽带包也能解码） | P2 | 已完成（1.0.4） |
 | REQ-MEDIA-009 | 媒体加密：SRTP / DTLS-SRTP | P2 | 待确认 |
 | REQ-MEDIA-010 | 通话录音 | P2 | 待确认 |
+| REQ-MEDIA-011 | 编解码扩展：G.722 | P2 | 待确认 |
 
 ### 4.4 界面交互（UI）
 
@@ -210,7 +211,7 @@
 
 | 编号 | 需求 | 优先级 | 状态 |
 | --- | --- | --- | --- |
-| REQ-VIDEO-001 | 支持发起与接收视频呼叫；视频编解码 h264 / h263 / vp8 / vp9（SDP 按优先级协商）；音频编解码优先级 PCMA 高于 PCMU；音频播放缓冲深度封顶（丢包补静音/对端突发不再累积成几秒延迟）；视频丢包后重置解包器并请求关键帧（不再花屏）；对端 offer 里 H264 只声明 `packetization-mode=0`（单 NAL）时**照常接受视频**——该参数只管对端自己怎么发，answer 的 fmtp 回对端声明的模式（早期直接跳过 H264 导致 200 OK 回 `m=video 0`，接听后两边都没画面） | P0 | 已完成 |
+| REQ-VIDEO-001 | 支持发起与接收视频呼叫；视频编解码 h264 / h263 / vp8 / vp9（SDP 按优先级协商，本端 offer 的 PT 固定为 H264=99 / H263-1998=98 / VP8=100 / VP9=101）；音频编解码优先级 PCMA > PCMU > Opus；音频播放缓冲深度封顶（丢包补静音/对端突发不再累积成几秒延迟）；视频丢包后重置解包器并请求关键帧（不再花屏）；对端 offer 里 H264 只声明 `packetization-mode=0`（单 NAL）时**照常接受视频**——该参数只管对端自己怎么发，answer 的 fmtp 回对端声明的模式（早期直接跳过 H264 导致 200 OK 回 `m=video 0`，接听后两边都没画面） | P0 | 已完成 |
 | REQ-VIDEO-002 | 配置页可选择摄像头（枚举系统设备），设置即时生效并保存 | P0 | 已完成 |
 | REQ-VIDEO-003 | 主窗体呼叫按钮缩小，右侧新增视频呼叫按钮（仅图标无文字），点击发起视频呼叫：**视频窗口随即打开并显示本地回显**（不等对端接听）；对端没有视频时自动关闭视频窗口与摄像头，本次通话退化为纯音频 | P0 | 已完成 |
 | REQ-VIDEO-004 | 来电含视频时，来电弹窗在「接听」左侧显示「视频接听」按钮：点它打开摄像头双向视频；只点普通「接听」= **不接受视频**（answer 里 m=video 端口置 0，对端也不再发）；**自动接听**（SIP 头 answer-after 与自动接听开关）对视频呼叫等同「视频接听」——打开摄像头双向视频，摄像头被禁用/不可用时退化成 recvonly（只收不发） | P0 | 已完成 |
@@ -248,6 +249,7 @@
 | SIP 协议栈 | **emiago/sipgo v1.6.0** | BSD-2，活跃维护；REGISTER/INVITE/Digest(MD5+SHA-256)/UDP/TCP/TLS |
 | RTP / SDP / RTCP | **pion**（rtp / sdp/v3 / rtcp） | MIT，纯 Go |
 | G.711 编解码 | **zaf/g711 v1.4.0** | 纯 Go 零依赖 |
+| Opus 编解码 | **libopus**（cgo 静态库） | 参考实现，`-tags audio`；库由 scripts/build-audio-lib.* 生成到 third_party/audio/<目标>，缺失则降级为无 Opus（SDP 不宣告） |
 | 音频设备层 | **malgo v0.11.26**（miniaudio） | 唯一全双工+枚举成熟方案；需 CGO；`-tags noaudio` 可切空后端 |
 | 交叉编译 | CGO + MinGW（本机）/ Docker（Linux arm64）/ llvm-mingw（win arm64） | 出包方案待定（CI 矩阵 vs 本机 Docker） |
 | WS 库 | **coder/websocket** | 已选，ISC，活跃维护 |

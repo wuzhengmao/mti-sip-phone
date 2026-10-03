@@ -17,10 +17,46 @@ import (
 	"mti-sip-phone/internal/logx"
 )
 
-// 支持的编解码器（按优先级排序：PCMA 优先，其次 PCMU；双方能力交集取最前者）
-var supportedCodecs = []Codec{
+// supportedCodecs 支持的编解码器（按优先级排序：PCMA 优先，其次 PCMU，
+// Opus 最后——用户明确要求 Opus 排在 SDP 末尾）。双方能力交集取最前者。
+// Opus 由构建标签 audio 提供（见 optionalCodecs，以后其他音频编解码库同此），
+// 未启用的构建里它不存在，
+// SDP 也就不会宣告。
+var supportedCodecs = append([]Codec{
 	NewG711Codec(false), // PCMA（优先）
 	NewG711Codec(true),  // PCMU
+}, optionalCodecs...)
+
+// OpusSupported 当前构建是否含 Opus 编解码器（黄金测试与排查用）。
+func OpusSupported() bool { return len(optionalCodecs) > 0 }
+
+// codecSummary 本构建支持的编解码器名列表（日志用）。
+func codecSummary() string {
+	names := make([]string, len(supportedCodecs))
+	for i, c := range supportedCodecs {
+		names[i] = c.Name()
+	}
+	return strings.Join(names, ",")
+}
+
+// plcCodec 可选接口：丢包隐藏（有状态编解码器实现，如 Opus；G.711 没有，
+// 丢包时补静音）。
+type plcCodec interface {
+	// DecodePLC 按上一包状态外推 samples 个样本；无法隐藏时返回 nil。
+	DecodePLC(samples int) []int16
+}
+
+// resetter 可选接口：复位编解码器内部状态（新通话 / 媒体流切换 /
+// 编解码切换时调用）。G.711 无状态，不实现。
+type resetter interface {
+	Reset()
+}
+
+// resetCodec 复位有状态编解码器（见 resetter）。
+func resetCodec(c Codec) {
+	if r, ok := c.(resetter); ok {
+		r.Reset()
+	}
 }
 
 // Engine 一次通话的媒体引擎：RTP/RTCP 收发 + 播放缓冲。
@@ -106,7 +142,12 @@ func NewEngine(localIP string) (*Engine, error) {
 	}
 	e.activePT.Store(uint32(e.codec.PayloadType()))
 	e.rtcp = newRTCPSession(rtcpConn, e)
-	logx.Logger().Debug("媒体引擎已创建", "codec", e.codec.Name(), "localPort", e.localPort, "rtcpPort", e.localPort+1)
+	logx.Logger().Debug("媒体引擎已创建", "codec", e.codec.Name(),
+		"支持", codecSummary(), "localPort", e.localPort, "rtcpPort", e.localPort+1)
+	if opusInitErr != nil {
+		// 库已编进来但实例创建失败：本次通话不可能协商到 Opus，记下来备用
+		logx.Logger().Warn("Opus 编解码器不可用", "err", opusInitErr)
+	}
 	return e, nil
 }
 
@@ -180,6 +221,10 @@ func (e *Engine) SetKeepalive(on bool) {
 // Start 启动媒体收发（在确定远端地址后调用）：
 // RTP 接收循环 + RTCP 收发 + NAT 打洞。
 func (e *Engine) Start() {
+	// 编解码器实例在包级共享（supportedCodecs 是原型），新通话开始时必须
+	// 复位其 C 状态——否则上一通话的解码器状态会串到本次（本应用限单通话，
+	// 复位后即可安全复用）。
+	resetCodec(e.Codec())
 	e.wg.Add(1)
 	go e.recvLoop()
 	e.rtcp.start()
@@ -264,12 +309,13 @@ func (e *Engine) recvLoop() {
 
 // playPush 将解码帧按 RTP 序号写入播放缓冲：
 //   - 乱序/过期包丢弃（G.711 20ms 包乱序概率极低）；
-//   - 序号小跳变（丢包）填静音帧——PLC 采用静音而非循环上一帧，
-//     避免对端停发期间（如回铃音停顿期）无限循环最后 20ms 音频
-//     产生持续嗡鸣噪音（"回铃音变成很大噪音"的根因）；
+//   - 序号小跳变（丢包）填替代帧——有 PLC 的编解码器（Opus）用 libopus
+//     的丢包隐藏外推，其余（G.711）补静音。**都不能循环上一帧**：对端停发
+//     期间（如回铃音停顿期）无限循环最后 20ms 音频会产生持续嗡鸣噪音
+//     （"回铃音变成很大噪音"的根因）；
 //   - SSRC 切换或序号大跳变（> 2 秒，如 183 早期媒体 → 200 新媒体流
-//     重新编号）重置缓冲，以新流为起点（否则旧序列阻塞新语音，
-//     "接通后听不到对方声音"的根因）。
+//     重新编号）重置缓冲并复位编解码器状态，以新流为起点（否则旧序列阻塞
+//     新语音，"接通后听不到对方声音"的根因）。
 func (e *Engine) playPush(ssrc uint32, seq uint16, frame []int16) {
 	e.playMu.Lock()
 	defer e.playMu.Unlock()
@@ -298,12 +344,16 @@ func (e *Engine) playPush(ssrc uint32, seq uint16, frame []int16) {
 		e.lastSeq = seq
 		e.extSeq = 0
 		e.ring.Reset()
+		// 新流的解码状态必须从头开始（旧流的 C 状态会让首个解码帧出杂音）。
+		// 解码器由本接收协程独占（Decode 在调用本函数之前、同一协程），
+		// 此处复位不会与 Decode 并发。
+		resetCodec(e.Codec())
 		e.ring.Write(frame)
 		return
 	}
-	// 丢包：先填静音帧
+	// 丢包：先用 PLC 外推（有的话），其余补静音
 	if gap > 0 {
-		e.ring.Write(make([]int16, int(gap)*len(frame)))
+		e.fillLoss(int(gap), len(frame))
 	}
 	e.lastSeq = seq
 	if dropped := e.ring.Write(frame); dropped > 0 {
@@ -315,6 +365,34 @@ func (e *Engine) playPush(ssrc uint32, seq uint16, frame []int16) {
 				"丢弃样本", dropped, "当前深度ms", e.ring.Depth()*1000/8000,
 				"累计丢弃", e.ring.Trimmed())
 		}
+	}
+}
+
+// plcMaxFrames 丢包隐藏最多外推的帧数（5 × 20ms = 100ms）。
+// 再多就不像话了：连续丢包超过 100ms 时硬撑出来的"语音"比静音更糟。
+const plcMaxFrames = 5
+
+// fillLoss 丢包填充：n 个丢失帧、每帧 samples 个样本。
+// 有 PLC 的编解码器（Opus）先外推若干帧，其余一律补静音；G.711 没有 PLC，
+// 行为与历史完全一致（整段静音）。
+// 调用方持有 playMu；编解码器状态由本接收协程独占。
+func (e *Engine) fillLoss(n, samples int) {
+	if samples <= 0 || n <= 0 {
+		return
+	}
+	plc, _ := e.Codec().(plcCodec)
+	used := 0
+	if plc != nil {
+		for ; used < n && used < plcMaxFrames; used++ {
+			f := plc.DecodePLC(samples)
+			if f == nil {
+				break
+			}
+			e.ring.Write(f)
+		}
+	}
+	if rest := n - used; rest > 0 {
+		e.ring.Write(make([]int16, rest*samples))
 	}
 }
 
@@ -401,7 +479,9 @@ func (e *Engine) sendPacket(codec Codec, payload []byte) {
 		return
 	}
 	e.seq++
-	e.ts += uint32(codec.FrameSize())
+	// 时间戳按 **RTP 时钟率** 递增，不是 PCM 帧长：Opus 的 PCM 帧长是 160
+	//（8kHz 管线）而时钟是 48000，每帧要走 960（见 Codec.TimestampStep）。
+	e.ts += uint32(codec.TimestampStep())
 	e.txPackets.Add(1)
 	e.txBytes.Add(uint64(len(payload)))
 }
@@ -567,32 +647,59 @@ func (e *Engine) Close() {
 // SDP 协商
 // ---------------------------------------------------------------------------
 
-// allCodecPTs 全部支持的编解码器负载类型（按优先级顺序，SDP offer 用）。
-func allCodecPTs() []uint8 {
-	pts := make([]uint8, len(supportedCodecs))
-	for i, c := range supportedCodecs {
-		pts[i] = c.PayloadType()
-	}
-	return pts
+// codecPT 「编解码器 + 线上负载类型号」对。
+// 必须成对传递：按 PT 号反查编码名只在本端 offer 的号段里成立，
+// answer 用的是**对端**的号（Opus 等动态 PT 下会查错编码名）。
+type codecPT struct {
+	c  Codec
+	pt uint8
 }
 
-// SDPOffer 生成本地 SDP offer（PCMA/PCMU + telephone-event，按优先级排序）。
+// allCodecItems 本端支持的全部音频编解码器（各自的固定本端号，按优先级）。
+func allCodecItems() []codecPT {
+	items := make([]codecPT, len(supportedCodecs))
+	for i, c := range supportedCodecs {
+		items[i] = codecPT{c: c, pt: c.PayloadType()}
+	}
+	return items
+}
+
+// negotiatedItem 当前协商结果（编解码器 + 线上号）。
+// 协商路径（SDPAnswerWithDirection / SDPApplyAnswer）已把两者一起写入，
+// 这里直接取，不去按号反查。
+func (e *Engine) negotiatedItem() codecPT {
+	return codecPT{c: e.Codec(), pt: e.payloadType()}
+}
+
+// itemForPT 按线上 PT 取协商结果，供 SDPAnswerFor 使用（调用方传的是对端号）。
+// 正常情况下与 activePT 一致；不一致说明调用顺序错了（协商还没发生），
+// 按本端静态号兜底并告警——Opus 是动态号，兜底会退化成 PCMA。
+func (e *Engine) itemForPT(pt uint8) codecPT {
+	if pt == e.payloadType() {
+		return codecPT{c: e.Codec(), pt: pt}
+	}
+	logx.Logger().Warn("SDP answer 的音频 PT 与协商结果不一致（按静态号兜底）",
+		"pt", pt, "activePT", e.payloadType())
+	return codecPT{c: codecByPT(pt), pt: pt}
+}
+
+// SDPOffer 生成本地 SDP offer（PCMA/PCMU/Opus + telephone-event，按优先级排序）。
 func (e *Engine) SDPOffer() string {
-	return e.sdp("sendrecv", allCodecPTs())
+	return e.sdp("sendrecv", allCodecItems())
 }
 
 // SDPOfferWithDirection 生成指定媒体方向的 SDP offer
 //（保持 re-INVITE 用：保持 sendonly / 恢复 sendrecv）。
 func (e *Engine) SDPOfferWithDirection(dir string) string {
-	return e.sdp(dir, allCodecPTs())
+	return e.sdp(dir, allCodecItems())
 }
 
 // SDPNegotiatedAnswer 呼入接听时的 200 answer：仅含协商后的编解码器
 //（RFC 3264 answer 只列双方协商结果）。
 // 用 activePT（对端号）而非 codec.PayloadType()（本端号）——音频静态 PT
-// 两者相同，动态 PT 下必须用对端号。
+// 两者相同，动态 PT（Opus）下必须用对端号。
 func (e *Engine) SDPNegotiatedAnswer() string {
-	return e.sdp("sendrecv", []uint8{e.payloadType()})
+	return e.sdp("sendrecv", []codecPT{e.negotiatedItem()})
 }
 
 // SDPAnswer 解析远端 offer，协商编解码并返回本地 answer。
@@ -613,10 +720,12 @@ func (e *Engine) SDPAnswerWithDirection(offer []byte, dir string) (string, error
 	e.codecMu.Unlock()
 	// answerer：线上用**对端**的负载类型号（RFC 3264）
 	e.activePT.Store(uint32(peerPT))
+	// 编解码器换了（对端号 + 新编码）：复位其内部状态
+	resetCodec(codec)
 	e.setRemote(remote, rtcpPort)
 	// 远端地址更新后打洞（NAT 下对端媒体包需先有出向包放行）
 	e.punchHole()
-	return e.sdp(dir, []uint8{peerPT}), nil
+	return e.sdp(dir, []codecPT{{c: codec, pt: peerPT}}), nil
 }
 
 // SDPApplyAnswer 处理远端对本地 offer 的应答：提取远端 RTP 地址并切换编解码。
@@ -630,6 +739,8 @@ func (e *Engine) SDPApplyAnswer(answer []byte) error {
 	e.codecMu.Unlock()
 	// offerer：answer 里的号取自本端 offer，即为本端号
 	e.activePT.Store(uint32(pt))
+	// 编解码器换了（183 早期媒体 → 200 可能换编码）：复位其内部状态
+	resetCodec(codec)
 	e.setRemote(remote, rtcpPort)
 	// 远端地址更新（如 183 → 200 端口变化）后重新打洞
 	e.punchHole()
@@ -646,17 +757,20 @@ func (e *Engine) sdpIPForSDP() string {
 }
 
 // audioSection m=audio 段（不含会话头）。
-// pts 按优先级顺序；telephone-event（101）恒在末尾。
-func (e *Engine) audioSection(dir string, pts []uint8) sdpSection {
-	codecs := make([]sdpCodec, 0, len(pts)+1)
-	for _, pt := range pts {
-		// 注意用 Name()（"PCMA"）而不是 RTPMap()（"PCMA/8000"）——
-		// buildSDP 会自己拼 "/<ClockRate>"，用 RTPMap 会输出
+// items 按优先级顺序（编解码器与线上号成对，见 codecPT）；telephone-event（101）恒在末尾。
+func (e *Engine) audioSection(dir string, items []codecPT) sdpSection {
+	codecs := make([]sdpCodec, 0, len(items)+1)
+	for _, it := range items {
+		// 注意用 Name()（"PCMA" / "opus"）而不是 RTPMap()（"PCMA/8000"）——
+		// buildSDP 会自己拼 "/<ClockRate>[/<Channels>]"，用 RTPMap 会输出
 		// "a=rtpmap:8 PCMA/8000/8000" 这种非法行。
+		// 时钟率与声道数取自编解码器本身：Opus 是 48000 且要写 "/2"（RFC 7587），
+		// 不能像原来那样写死 8000。
 		codecs = append(codecs, sdpCodec{
-			PT:        pt,
-			Encoding:  codecByPT(pt).Name(),
-			ClockRate: 8000,
+			PT:        it.pt,
+			Encoding:  it.c.Name(),
+			ClockRate: it.c.ClockRate(),
+			Channels:  it.c.Channels(),
 		})
 	}
 	codecs = append(codecs, sdpCodec{PT: telephoneEventPT, Encoding: "telephone-event", ClockRate: 8000, FMTP: "0-16"})
@@ -670,15 +784,15 @@ func (e *Engine) audioSection(dir string, pts []uint8) sdpSection {
 }
 
 // sdp 构造纯音频 SDP 文本（会话头 + m=audio）。
-func (e *Engine) sdp(dir string, pts []uint8) string {
-	return buildSDP(e.ssrc, e.sdpIPForSDP(), []sdpSection{e.audioSection(dir, pts)})
+func (e *Engine) sdp(dir string, items []codecPT) string {
+	return buildSDP(e.ssrc, e.sdpIPForSDP(), []sdpSection{e.audioSection(dir, items)})
 }
 
 // SDPOfferFor 构造呼出 / 重协商用的 offer：会话头 + m=audio + 可选 m=video。
 // videoDir 为空时按本端能力推导（能发 → sendrecv，只能收 → recvonly）；
 // v 为 nil 或本构建无视频能力时不输出 m=video。
 func SDPOfferFor(audio *Engine, v *VideoEngine, audioDir, videoDir string) string {
-	sections := []sdpSection{audio.audioSection(audioDir, allCodecPTs())}
+	sections := []sdpSection{audio.audioSection(audioDir, allCodecItems())}
 	if v != nil {
 		if s := v.offerSection(videoDir); s != nil {
 			sections = append(sections, *s)
@@ -703,7 +817,7 @@ func SDPAnswerFor(audio *Engine, v *VideoEngine, offer *Offer, audioPT uint8, vi
 	for _, kind := range order {
 		switch kind {
 		case "audio":
-			sections = append(sections, audio.audioSection("sendrecv", []uint8{audioPT}))
+			sections = append(sections, audio.audioSection("sendrecv", []codecPT{audio.itemForPT(audioPT)}))
 		case "video":
 			var sec *sdpSection
 			if v != nil {
@@ -723,7 +837,7 @@ func SDPAnswerFor(audio *Engine, v *VideoEngine, offer *Offer, audioPT uint8, vi
 		}
 	}
 	if len(sections) == 0 {
-		sections = append(sections, audio.audioSection("sendrecv", []uint8{audioPT}))
+		sections = append(sections, audio.audioSection("sendrecv", []codecPT{audio.itemForPT(audioPT)}))
 	}
 	return buildSDP(audio.ssrc, audio.sdpIPForSDP(), sections)
 }
@@ -785,7 +899,8 @@ func negotiateMedia(sd *sdp.SessionDescription, kind string) (*net.UDPAddr, Code
 	return info.Addr, codec, pt, info.RTCPPort, nil
 }
 
-// matchAudioCodec 按本地优先级在 offer 的负载类型中挑音频编解码器。
+// matchAudioCodec 按本地优先级在 offer 的负载类型中挑音频编解码器
+//（PCMA > PCMU > opus，opus 是动态 PT，只在对方也支持时才选中）。
 // 先按 rtpmap 名匹配，再回退到静态负载类型号（对端未写 a=rtpmap 的旧式实现）。
 func matchAudioCodec(info *MediaInfo) (Codec, uint8, bool) {
 	for _, c := range supportedCodecs {
@@ -795,10 +910,12 @@ func matchAudioCodec(info *MediaInfo) (Codec, uint8, bool) {
 			}
 		}
 	}
-	// 回退：静态负载类型号直接命中
+	// 回退：静态负载类型号直接命中。
+	// 只认 0–95（静态号段）：Opus 的本端号 96 是动态号，对端用 96 号却不写
+	// a=rtpmap 时不能当成 Opus（那是它自己的动态号，含义未知）。
 	for _, c := range supportedCodecs {
 		for _, pt := range info.PTs {
-			if pt == c.PayloadType() && info.Rtpmap[pt] == "" {
+			if pt <= 95 && pt == c.PayloadType() && info.Rtpmap[pt] == "" {
 				return c, pt, true
 			}
 		}

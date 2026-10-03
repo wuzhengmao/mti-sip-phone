@@ -13,19 +13,28 @@ import (
 
 // Codec 编解码器接口：音频帧（PCM 16bit）与 RTP 负载之间的转换。
 type Codec interface {
-	// Name 编解码器名，如 PCMU / PCMA
+	// Name 编解码器名，如 PCMU / PCMA / opus
 	Name() string
-	// PayloadType RTP 负载类型号（PCMU=0，PCMA=8）
+	// PayloadType RTP 负载类型号（PCMU=0，PCMA=8，opus=96）
 	PayloadType() uint8
-	// ClockRate 采样率，Hz
+	// ClockRate RTP 时钟率（G.711 = 8000，Opus = 48000）
 	ClockRate() int
-	// FrameSize 每帧样本数（20ms@8kHz = 160）
+	// FrameSize 每帧 PCM 样本数（内部管线恒为 8kHz：20ms = 160）
 	FrameSize() int
+	// TimestampStep 每帧的 RTP 时间戳增量（时钟率单位；20ms 帧 = ClockRate/50）。
+	// **不等于 FrameSize**：Opus 的 PCM 帧长是 160（8kHz 管线）而时间戳步长
+	// 是 960（48000 时钟）——FrameSize 曾兼任二者，静态 PT 的 G.711 下两者
+	// 恰好相等才没暴露。
+	TimestampStep() int
+	// Channels SDP a=rtpmap 宣告的声道数：1 时省略（G.711 惯例），
+	// Opus 固定为 2（RFC 7587 的线上常量，与实际单声道无关）。
+	Channels() int
 	// Encode PCM → RTP 负载
 	Encode(pcm []int16) ([]byte, error)
 	// Decode RTP 负载 → PCM
 	Decode(data []byte) ([]int16, error)
 	// RTPMap SDP a=rtpmap 属性值，如 "PCMU/8000"
+	//（本端不用它拼 SDP——audioSection 自己拼 ClockRate/Channels）
 	RTPMap() string
 }
 
@@ -43,11 +52,16 @@ type g711Codec struct {
 	muLaw bool
 }
 
-func (c *g711Codec) Name() string        { return c.name }
-func (c *g711Codec) PayloadType() uint8  { return c.pt }
-func (c *g711Codec) ClockRate() int      { return 8000 }
-func (c *g711Codec) FrameSize() int      { return 160 } // 20ms @ 8kHz
-func (c *g711Codec) RTPMap() string      { return fmt.Sprintf("%s/8000", c.name) }
+func (c *g711Codec) Name() string       { return c.name }
+func (c *g711Codec) PayloadType() uint8 { return c.pt }
+func (c *g711Codec) ClockRate() int     { return 8000 }
+func (c *g711Codec) FrameSize() int     { return 160 } // 20ms @ 8kHz
+// TimestampStep G.711 的 PCM 帧长与 RTP 时间戳步长同为 160（20ms @ 8kHz）。
+func (c *g711Codec) TimestampStep() int { return 160 }
+
+// Channels G.711 惯例不在 rtpmap 里写声道数（返回 1 即省略）。
+func (c *g711Codec) Channels() int  { return 1 }
+func (c *g711Codec) RTPMap() string { return fmt.Sprintf("%s/8000", c.name) }
 
 // Encode 将 PCM 样本编码为 G.711 字节。
 func (c *g711Codec) Encode(pcm []int16) ([]byte, error) {
