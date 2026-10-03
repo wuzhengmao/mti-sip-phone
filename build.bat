@@ -6,6 +6,8 @@ rem windows/386 GUI build needs 32-bit MinGW: MSYS2 (pacman -S mingw-w64-i686-gc
 rem or WinLibs i686 at %USERPROFILE%\tools\winlibs-i686; without it the 386
 rem target is skipped, there is no headless fallback anymore.
 rem Linux GUI and Windows GUI cross builds from Linux are done by ./build.sh
+rem Version: read from internal\core\buildinfo.go (never written here); dev builds
+rem get "-rc", official builds are built by scripts\release.bat (SIP_PHONE_RELEASE=1)
 
 rem Auto-detect WinLibs (installed via winget), fallback to gcc in PATH
 set "GCC="
@@ -30,6 +32,25 @@ for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "Get-Date -For
 if defined BUILD_TS set "BUILD_TS=%BUILD_TS:~0,19%"
 set "LDFLAGS=-s -w"
 if defined BUILD_TS set "LDFLAGS=%LDFLAGS% -X mti-sip-phone/internal/core.BuildTime=%BUILD_TS%"
+
+rem App version: the base version lives in internal\core\buildinfo.go (single
+rem source of truth, this script never writes it). Dev builds get "-rc" (not an
+rem official release) so that publishing the official build with the same number
+rem still triggers an update notification: 1.0.5-rc < 1.0.5, see
+rem internal\updater\version.go. Official build: set SIP_PHONE_RELEASE=1
+rem (scripts\release.bat does that; it also builds the publish package).
+set "VER_BASE="
+for /f "tokens=4" %%a in ('findstr /b /c:"var Version = " internal\core\buildinfo.go') do set "VER_BASE=%%~a"
+if not defined VER_BASE goto :vererr
+set "APP_VERSION=%VER_BASE%-rc"
+if "%SIP_PHONE_RELEASE%"=="1" set "APP_VERSION=%VER_BASE%"
+set "LDFLAGS=%LDFLAGS% -X mti-sip-phone/internal/core.Version=%APP_VERSION%"
+if "%SIP_PHONE_RELEASE%"=="1" goto :ver_release
+echo Version: %APP_VERSION% - dev build
+goto :ver_done
+:ver_release
+echo Version: %APP_VERSION% - release build
+:ver_done
 
 rem 1) Windows amd64 GUI: no console, tray app, CGO+audio
 call :codec_setup windows-amd64
@@ -65,7 +86,7 @@ echo [3/3] i686 gcc not found, skipping dist\sip-phone-windows-386.exe
 echo       install MSYS2 mingw-w64-i686-gcc or WinLibs i686 to enable it
 
 :summary
-echo Build OK:
+echo Build OK: version %APP_VERSION%
 echo   dist\sip-phone-windows-amd64.exe          - tray GUI, no console
 echo   dist\sip-phone-console.exe                - console, headless/debug
 if not defined GCC32 goto :done
@@ -76,6 +97,10 @@ exit /b 0
 
 :err
 echo Build FAILED
+exit /b 1
+
+:vererr
+echo Build FAILED: cannot parse base version from internal\core\buildinfo.go
 exit /b 1
 
 rem ---------------------------------------------------------------

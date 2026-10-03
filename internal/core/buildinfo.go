@@ -7,6 +7,11 @@ import (
 )
 
 // Version 应用版本号（构建时可通过 -ldflags 覆盖）。
+//
+// 这里是**基础版本号**、唯一真相源：build.bat / build.sh 读它，开发构建
+// 注入 "1.0.5-rc"（-rc = 非正式版），`SIP_PHONE_RELEASE=1` 的正式构建注入
+// "1.0.5"。发布脚本与构建脚本都只读不写——版本号变更须人工确认。
+// 注意：不经构建脚本的 go build / go run 得到的是这里的基础版本号（无 -rc）。
 var Version = "1.0.5"
 
 // BuildTime 构建时间，由构建脚本通过 -ldflags -X 注入，格式 2006-01-02T15:04:05

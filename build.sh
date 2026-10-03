@@ -18,6 +18,8 @@
 #   两个库都存在时标签为 -tags video,audio。
 # 注意：交叉出的 Linux 产物链接的是构建机 sysroot 里的 glibc，目标机 glibc 过旧
 # 会报 GLIBC_x.y not found，此时改用更旧的构建环境（或 Docker 镜像）交叉。
+# 版本号：脚本产出的一律是「开发版」（版本号带 -rc，取自 internal/core/buildinfo.go
+# 的基础版本）；正式发布走 SIP_PHONE_RELEASE=1 ./build.sh（scripts/release.sh 调用）。
 set -e
 cd "$(dirname "$0")"
 
@@ -27,6 +29,23 @@ mkdir -p dist
 # 构建时间注入 core.BuildTime（设置页版本行显示）；ISO 8601，T 分隔避免 ldflags 参数空格问题
 BUILD_TS="$(date '+%Y-%m-%dT%H:%M:%S')"
 LDFLAGS="-s -w -X mti-sip-phone/internal/core.BuildTime=${BUILD_TS}"
+
+# 版本号：基础版本从 internal/core/buildinfo.go 读取（唯一真相源，脚本只读不改）。
+# 开发构建一律带 -rc（非正式版）：正式版发布时数字相同（1.0.5 vs 1.0.5-rc）
+# 也要能通知更新——预发布低于同号正式版的比较规则见 internal/updater/version.go。
+# 正式构建：SIP_PHONE_RELEASE=1 ./build.sh（发布脚本 scripts/release.sh 会设置）。
+VERSION_BASE="$(sed -n 's/^var Version = "\(.*\)"$/\1/p' internal/core/buildinfo.go)"
+if [ -z "$VERSION_BASE" ]; then
+    echo "无法从 internal/core/buildinfo.go 解析基础版本号" >&2
+    exit 1
+fi
+if [ "${SIP_PHONE_RELEASE:-}" = "1" ]; then
+    APP_VERSION="$VERSION_BASE"
+else
+    APP_VERSION="${VERSION_BASE}-rc"
+fi
+LDFLAGS="$LDFLAGS -X mti-sip-phone/internal/core.Version=${APP_VERSION}"
+echo "版本：${APP_VERSION}$([ "${SIP_PHONE_RELEASE:-}" = "1" ] && echo "（正式版）" || echo "（开发版，-rc）")"
 
 NATIVE_ARCH="$(go env GOARCH)"
 
@@ -298,5 +317,5 @@ else
     echo "            （386 带视频时链接仍需 g++ 提供的 libstdc++；摄像头在 386 上不可用）"
 fi
 
-echo "构建完成：dist/"
+echo "构建完成：dist/（版本 ${APP_VERSION}）"
 ls -la dist/

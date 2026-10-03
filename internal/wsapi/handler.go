@@ -287,6 +287,7 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 			Notes   string `json:"notes"`
 			OS      string `json:"os"`
 			Arch    string `json:"arch"`
+			Force   bool   `json:"force"` // 强制推送：跳过版本高低检查
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil {
 			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("参数格式错误"))
@@ -295,7 +296,7 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		// 参数校验（必填、地址合法性、平台一致性、版本高低）在 updater 内完成
 		err := s.app.NotifyUpdate(core.UpdateInfo{
 			Version: p.Version, URL: p.URL, SHA256: p.SHA256,
-			Notes: p.Notes, OS: p.OS, Arch: p.Arch,
+			Notes: p.Notes, OS: p.OS, Arch: p.Arch, Force: p.Force,
 		})
 		if err != nil {
 			resp = errMessage(msg.ID, codeOf(err), err)

@@ -10,6 +10,9 @@ type UpdateInfo struct {
 	Notes   string `json:"notes,omitempty"`  // 可选：更新说明
 	OS      string `json:"os,omitempty"`     // 可选：前端认定的目标平台，提供时须与自身一致
 	Arch    string `json:"arch,omitempty"`   // 可选：前端认定的目标架构，提供时须与自身一致
+	// Force 强制推送：跳过"版本必须更高"的检查（联调/回滚时按指定版本强推）。
+	// 只由调用方显式设置——SDK 的定时查询始终走版本比较，不会带这个字段。
+	Force bool `json:"force,omitempty"`
 }
 
 // 更新状态机阶段。
