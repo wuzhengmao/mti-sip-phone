@@ -152,8 +152,9 @@ web/
 release/      发布到更新站点的配置与元数据：release.conf（站点/应用 ID/令牌）、
               app.json（应用级元数据，经站点 metadata 接口写入）、icon.svg（图标，经 icon 接口写入）
 scripts/      第三方库构建（build-video-libs.*、build-audio-lib.*）与一键发布（release.sh/.bat）
-docs/         requirements.md（需求）、ws-protocol.md（WS 协议）、auto-update.md（自动更新与
-              更新站点接入：规范摘要、REST API、生产环境、参考实现、接入清单）；changelog.md 在仓库根目录
+docs/         design.md（架构设计：分层与依赖、各模块职责、关键决策、目录地图——新同学先看这份）、
+              requirements.md（需求）、ws-protocol.md（WS 协议）、auto-update.md（自动更新与
+              更新站点接入：规范摘要、REST API、参考实现、接入清单）；changelog.md 在仓库根目录
 ```
 
 ## 分层架构与事件流
