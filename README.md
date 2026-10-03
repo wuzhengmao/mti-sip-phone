@@ -23,6 +23,9 @@ Linux 上用 mingw-w64 交叉构建（glfw 的 C 源码与 mingw 专用头随 go
 （Linux 本机 / WSL2 / Docker）里构建。
 
 ```bash
+# 版本号：构建脚本从 internal/core/buildinfo.go 读基础版本。开发构建自动加 -rc
+# （如 1.0.5-rc，非正式版）；正式版：SIP_PHONE_RELEASE=1 build.bat（发布脚本会设）。
+
 # Windows：一键构建（自动探测 WinLibs gcc），产物输出到 dist/：
 build.bat
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频）
@@ -53,6 +56,33 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 - 配置文件：`%APPDATA%/mti-sip-phone/config.json`（Windows）/ `~/.config/mti-sip-phone/config.json`（Linux）
 - 日志文件：配置目录下 `logs/sip-phone.log`（按大小滚动，含 SIP 信令）
 - sip:// 协议：网页链接 `sip://账号:密码@服务器:5060` 拉起软电话并写入注册信息
+
+## 发布到更新站点
+
+站点是独立的「软件更新中心」（当前部署在 https://update.wuzm219.cn，发布规范见其
+`/docs/release-spec`、`/docs/upload`、`/docs/api`）。本仓库的发布入口是 `scripts/release.sh`
+（Windows 用 `scripts\release.bat`，内部走 git-bash）：
+
+```bash
+./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.5-rc），不上传
+./scripts/release.sh --pre             # 预发布：上传 1.0.5-rc（站点标记为预发布）
+./scripts/release.sh                   # 正式版：以 1.0.5 编译并上传
+```
+
+- 站点地址 / 应用 ID / 上传令牌（可选站点证书）在 `release/release.conf`，环境变量可覆盖。
+  站点启用 TLS 时地址要直接写 `https://主机:端口`（HTTP 端口只会 301 跳转，POST 跟随跳转
+  会退化成 GET）；内部自签名站点填 `CA_CERT` 让 curl 校验。
+- 发布物：`mti-sip-phone-<平台>-<架构>[.exe]`（**文件名不含版本号**，同一平台的下载地址
+  跨版本不变）、`release.json`、`CHANGELOG.md`（取自 changelog.md 的对应版本段）、
+  `SHA256SUMS`，打成 tar.gz 上传。
+- 应用级信息走站点接口写入（不直接动归档目录）：`release/app.json`
+  → `PUT /api/v1/apps/<应用ID>/metadata`（整份替换，字段要写全），`release/icon.svg`
+  → `PUT /api/v1/apps/<应用ID>/icon`。
+- 网页端 SDK 定时查询更新站点（初始化时传 `updateUrl`），查到更高版本会经 WS 通知软电话，
+  由用户在软电话界面上确认后下载更新；页面可通过 `update.check` 事件看到查询结果。
+
+Windows 上一键只出 Windows 产物；Linux 产物需在 Linux 机器上 `./build.sh` 之后再发布。
+开发构建的版本号带 `-rc`，正式版发布时数字相同也会收到更新通知。
 
 ## 当前状态（开发中）
 
