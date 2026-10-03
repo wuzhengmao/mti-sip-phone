@@ -24,13 +24,15 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 ## 构建、测试与运行
 
 ```bash
+# 构建脚本按目标打印本次能力（如 CGO+音频+视频，缺库时标出无视频/无Opus）；视频/Opus 取决于
+# 第三方静态库是否已生成（见下），缺哪个就降级为哪个没有。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
-#   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频）
+#   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO）
 #   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
 #   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标）
 build.bat
 
-# Linux 一键构建（本机 GUI 版 + 交叉 Windows GUI / 对侧 Linux 架构版，均 CGO+音频，输出 dist/）：
+# Linux 一键构建（本机 GUI 版 + 交叉 Windows GUI / 对侧 Linux 架构版，均 CGO，输出 dist/）：
 #   dist/sip-phone-linux-<本机arch>           本机 Linux 托盘版
 #   dist/sip-phone-linux-<对侧arch>           交叉版（amd64 主机→arm64，arm64 主机→amd64；需对侧
 #                                             架构的交叉 gcc + 图形栈开发包，缺失则跳过并打印准备步骤）

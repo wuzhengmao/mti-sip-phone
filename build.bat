@@ -32,14 +32,14 @@ set "LDFLAGS=-s -w"
 if defined BUILD_TS set "LDFLAGS=%LDFLAGS% -X mti-sip-phone/internal/core.BuildTime=%BUILD_TS%"
 
 rem 1) Windows amd64 GUI: no console, tray app, CGO+audio
-echo [1/3] Building dist\sip-phone-windows-amd64.exe (GUI, audio)...
 call :codec_setup windows-amd64
+echo [1/3] Building dist\sip-phone-windows-amd64.exe (%FEATURES%)...
 go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui" -o dist\sip-phone-windows-amd64.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 
 rem 2) Windows console build (-headless server mode / command line debug)
-echo [2/3] Building dist\sip-phone-console.exe (console, for headless)...
 call :codec_setup windows-amd64
+echo [2/3] Building dist\sip-phone-console.exe (%FEATURES%, console/headless)...
 go build %TAGS_ARG% -ldflags "%LDFLAGS%" -o dist\sip-phone-console.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 
@@ -50,12 +50,12 @@ if exist "%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe"
 rem NOTE: no parentheses or trailing "..." in echo lines inside if/else blocks,
 rem cmd.exe mis-parses them as a command group and aborts with a syntax error.
 if not defined GCC32 goto :skip386
-echo [3/3] Building dist\sip-phone-windows-386.exe - GUI tray, audio, static
 set CGO_ENABLED=1
 set CC=%GCC32%
 set GOOS=windows
 set GOARCH=386
 call :codec_setup windows-386
+echo [3/3] Building dist\sip-phone-windows-386.exe (%FEATURES%, static)...
 go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui -extldflags -static" -o dist\sip-phone-windows-386.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 goto :summary
@@ -66,10 +66,10 @@ echo       install MSYS2 mingw-w64-i686-gcc or WinLibs i686 to enable it
 
 :summary
 echo Build OK:
-echo   dist\sip-phone-windows-amd64.exe          - GUI tray, audio
+echo   dist\sip-phone-windows-amd64.exe          - tray GUI, no console
 echo   dist\sip-phone-console.exe                - console, headless/debug
 if not defined GCC32 goto :done
-echo   dist\sip-phone-windows-386.exe            - GUI tray, audio, static
+echo   dist\sip-phone-windows-386.exe            - tray GUI, static
 :done
 echo Linux GUI and Windows GUI cross builds: run ./build.sh on Linux
 exit /b 0
@@ -98,11 +98,22 @@ rem ---------------------------------------------------------------
 :codec_setup
 set "TAGS_ARG="
 set "BUILD_TAGS="
+set "VIDEO_ON="
+set "AUDIO_ON="
+set "FEATURES="
 set "CGO_CFLAGS="
 set "CGO_LDFLAGS="
 call :video_setup %~1
 call :audio_setup %~1
 if defined BUILD_TAGS set "TAGS_ARG=-tags %BUILD_TAGS%"
+rem FEATURES: what this target really gets (no codec lists - audio is the
+rem base and Opus is part of audio; video and Opus come from their static
+rem libraries). All four combinations spelled out; how to add a missing one
+rem is in the hint lines above.
+set "FEATURES=CGO, audio, no video, no opus"
+if defined VIDEO_ON set "FEATURES=CGO, audio, video, no opus"
+if defined AUDIO_ON set "FEATURES=CGO, audio, no video"
+if defined VIDEO_ON if defined AUDIO_ON set "FEATURES=CGO, audio, video"
 goto :eof
 
 :video_setup
@@ -114,6 +125,7 @@ if not exist "third_party\video\%~1\lib\libvpx.a" goto :video_incomplete
 if not exist "third_party\video\%~1\lib\libopenh264.a" goto :video_incomplete
 set "CGO_CFLAGS=%CGO_CFLAGS% -I%CD%\third_party\video\%~1\include"
 set "CGO_LDFLAGS=%CGO_LDFLAGS% -L%CD%\third_party\video\%~1\lib"
+set "VIDEO_ON=1"
 if not defined BUILD_TAGS goto :video_first_tag
 set "BUILD_TAGS=%BUILD_TAGS%,video"
 goto :eof
@@ -134,6 +146,7 @@ if not exist "third_party\audio\%~1\lib" goto :audio_none
 if not exist "third_party\audio\%~1\lib\libopus.a" goto :audio_incomplete
 set "CGO_CFLAGS=%CGO_CFLAGS% -I%CD%\third_party\audio\%~1\include"
 set "CGO_LDFLAGS=%CGO_LDFLAGS% -L%CD%\third_party\audio\%~1\lib"
+set "AUDIO_ON=1"
 if not defined BUILD_TAGS goto :audio_first_tag
 set "BUILD_TAGS=%BUILD_TAGS%,audio"
 goto :eof
