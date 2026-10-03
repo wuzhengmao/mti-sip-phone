@@ -38,9 +38,9 @@
   };
 
   // 更新站点默认参数：应用 ID 就是软电话在更新站点上的标识；
-  // 查询间隔默认 30 分钟（下限 60 秒，避免误配 0 时打爆站点）。
+  // 查询间隔默认 5 分钟（下限 60 秒，避免误配 0 时打爆站点）。
   const DEFAULT_UPDATE_APP_ID = 'mti-sip-phone';
-  const DEFAULT_UPDATE_INTERVAL = 30 * 60 * 1000;
+  const DEFAULT_UPDATE_INTERVAL = 5 * 60 * 1000;
   const MIN_UPDATE_INTERVAL = 60 * 1000;
   const UPDATE_FETCH_TIMEOUT = 10000;
 
@@ -56,7 +56,7 @@
      * @param {string} [options.updateUrl]  更新站点根地址（如 http://update.example.com）。
      *                                      不传 = 不自动查询更新；查询结果见 update.check 事件
      * @param {string} [options.appId]      更新站点上的应用 ID，默认 'mti-sip-phone'
-     * @param {number} [options.updateInterval] 查询间隔毫秒，默认 30 分钟（下限 60 秒）
+     * @param {number} [options.updateInterval] 查询间隔毫秒，默认 5 分钟（下限 60 秒）
      * @param {string} [options.updateChannel]  发布通道（如 beta），默认站点默认通道
      * @param {boolean} [options.updatePrerelease] 是否接受预发布版；不传 = 自适应
      *                                      （本地版本含 "-" 如 1.0.5-rc 时视为 true）
@@ -983,7 +983,7 @@
     return String(url || '').trim().replace(/\/+$/, '');
   }
 
-  /** clampUpdateInterval 查询间隔钳制到 [60 秒, 24 小时]，非法值取默认 30 分钟 */
+  /** clampUpdateInterval 查询间隔钳制到 [60 秒, 24 小时]，非法值取默认 5 分钟 */
   function clampUpdateInterval(ms) {
     const n = Number(ms);
     if (!isFinite(n) || n <= 0) {
