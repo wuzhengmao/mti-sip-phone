@@ -25,8 +25,9 @@ var ErrMediaRejected = errors.New("对端拒绝了该媒体")
 // sdpCodec 一条编解码器（对应 a=rtpmap，可带 a=fmtp）。
 type sdpCodec struct {
 	PT        uint8
-	Encoding  string // rtpmap 编码名，如 "PCMA" / "H264" / "H263-1998"
+	Encoding  string // rtpmap 编码名，如 "PCMA" / "opus" / "H264" / "H263-1998"
 	ClockRate int
+	Channels  int    // >1 时输出 "/<Channels>"（Opus 固定 2；G.711 与视频不写）
 	FMTP      string // 空则不输出 a=fmtp
 }
 
@@ -61,7 +62,12 @@ func buildSDP(ssrc uint32, ip string, sections []sdpSection) string {
 		}
 		b.WriteString("\r\n")
 		for _, c := range s.Codecs {
-			fmt.Fprintf(&b, "a=rtpmap:%d %s/%d\r\n", c.PT, c.Encoding, c.ClockRate)
+			fmt.Fprintf(&b, "a=rtpmap:%d %s/%d", c.PT, c.Encoding, c.ClockRate)
+			if c.Channels > 1 {
+				// RFC 7587 要求 Opus 恒写 "/2"（线上常量，与实际单声道无关）
+				fmt.Fprintf(&b, "/%d", c.Channels)
+			}
+			b.WriteString("\r\n")
 		}
 		for _, c := range s.Codecs {
 			if c.FMTP != "" {

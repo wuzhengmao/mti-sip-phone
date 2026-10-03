@@ -12,6 +12,10 @@
 # 视频（REQ-VIDEO-*）：先跑一次 scripts/build-video-libs.sh 生成
 #   third_party/video/<target>/{include,lib}（FFmpeg 解码 + libvpx/OpenH264 编码）。
 #   存在则自动加 -tags video，缺失则该目标构建为无视频版本（音频不受影响）。
+# 音频 Opus：先跑一次 scripts/build-audio-lib.sh 生成
+#   third_party/audio/<target>/{include,lib}（libopus）。存在则自动加 -tags audio，
+#   缺失则该目标不含 Opus（SDP 不宣告，仍走 PCMA/PCMU），与视频互不影响。
+#   两个库都存在时标签为 -tags video,audio。
 # 注意：交叉出的 Linux 产物链接的是构建机 sysroot 里的 glibc，目标机 glibc 过旧
 # 会报 GLIBC_x.y not found，此时改用更旧的构建环境（或 Docker 镜像）交叉。
 set -e
@@ -113,48 +117,128 @@ cross_env_hint() {
 EOF
 }
 
-# ---------- 视频静态库探测 ----------
+# ---------- 第三方编解码库探测（视频 / 音频） ----------
 #
 # third_party/video/<target> 由 scripts/build-video-libs.sh 生成（FFmpeg 解码 +
-# libvpx/OpenH264 编码三件套）。齐全则该目标以 -tags video 构建（视频功能可用），
-# 缺失则不加标签——视频降级关闭，音频功能完全不受影响（沿用本脚本「缺失即跳过
-# 并提示」的一贯做法）。
+# libvpx/OpenH264 编码三件套）；third_party/audio/<target> 由
+# scripts/build-audio-lib.sh 生成（libopus 音频编码）。两者**互相独立**：
+# 齐全则加对应标签（video / audio），缺失则该目标降级关闭该功能，其余功能
+# 完全不受影响（沿用本脚本「缺失即跳过并提示」的一贯做法）。
 #
 # 判定必须逐个检查链接所需的 .a 文件，不能只看 lib 目录是否存在：库构建中途失败
-# （或中断）会留下空壳目录，只看目录会把它当成可用，加上 -tags video 后编译立刻
-# 报缺头文件（实测 fatal error: wels/codec_api.h: No such file or directory）。
+# （或中断）会留下空壳目录，只看目录会把它当成可用，加上标签后编译立刻报缺头
+# 文件（视频实测 fatal error: wels/codec_api.h；音频则是 opus/opus.h）。
 # 注意：这里用普通字符串拼接而非 bash 数组——脚本要能用 sh(dash) 直接执行，
 # 数组是 bash 专有语法，dash 会报 Syntax error: "(" unexpected。
-VIDEO_TAGS=""
+BUILD_TAGS=""
+VIDEO_ON=""
+AUDIO_ON=""
+# FEATURES 面向用户的特性摘要（如 "CGO+音频+视频+Opus"），CODEC_NOTES 是探测
+# 过程中攒下的提示行（在目标行之后打印，否则提示会跑到目标行前面去）
+FEATURES=""
+CODEC_NOTES=""
 # internal/video/ffmpeg.go 的 #cgo LDFLAGS 依赖这 5 个静态库（改那边记得同步这里）
 VIDEO_LIBS="libavcodec.a libswscale.a libavutil.a libvpx.a libopenh264.a"
-video_setup() {
-    # $1 = 目标名（如 linux-amd64 / windows-amd64）
-    VIDEO_TAGS=""
-    export CGO_CFLAGS=""
-    export CGO_LDFLAGS=""
-    local dir="third_party/video/$1"
+# internal/media/codec_opus.go 的 #cgo LDFLAGS 依赖 libopus（改那边记得同步这里）
+AUDIO_LIBS="libopus.a"
+
+# 工程根目录的绝对路径。Windows（git-bash）宿主下必须用 **D:/... 形式**：
+# go build 只会把 CGO_CFLAGS/CGO_LDFLAGS 里**第一个** MSYS 形式（/d/git/...）
+# 的路径转成 Windows 形式，后面的原样传给原生 gcc → 找不到头文件（实测：
+# video+opus 同时启用时报 opus/opus.h 缺失，单独启用却正常）。与
+# scripts/build-video-libs.sh 的 abspath 同理。build.bat 用 %CD% 本来就是
+# Windows 形式，不受影响。
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ABS_ROOT="$(pwd -W 2>/dev/null || pwd)" ;;
+    *)                    ABS_ROOT="$(pwd)" ;;
+esac
+
+# 追加一个标签与一组 -I/-L（多个库共存时不能覆盖彼此）
+add_cgo_dir() {
+    BUILD_TAGS="${BUILD_TAGS:+$BUILD_TAGS,}$2"
+    export CGO_CFLAGS="${CGO_CFLAGS:+$CGO_CFLAGS }-I$ABS_ROOT/$1/include"
+    export CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-L$ABS_ROOT/$1/lib"
+}
+
+# codec_note 攒一条提示（在目标构建行之后统一打印）
+codec_note() {
+    CODEC_NOTES="${CODEC_NOTES}      $1
+"
+}
+
+# 探测某个库目录：$1=目录 $2=标签 $3=库文件列表 $4=构建脚本提示
+# 齐全则加标签并注入路径（返回 0），否则记下提示（返回 1）
+codec_libs_ok() {
+    local dir="$1" tag="$2" libs="$3" script="$4"
     local missing="" lib
-    for lib in $VIDEO_LIBS; do
+    for lib in $libs; do
         [ -f "$dir/lib/$lib" ] || missing="$missing $lib"
     done
     if [ -z "$missing" ]; then
-        VIDEO_TAGS="-tags video"
-        export CGO_CFLAGS="-I$(pwd)/$dir/include"
-        export CGO_LDFLAGS="-L$(pwd)/$dir/lib"
-    elif [ -d "$dir" ]; then
-        echo "      提示：$dir 不完整（缺${missing}），本次构建不含视频"
-        echo "            重跑 scripts/build-video-libs.sh 可补齐"
+        add_cgo_dir "$dir" "$tag"
+        return 0
+    fi
+    if [ -d "$dir" ]; then
+        codec_note "提示：$dir 不完整（缺${missing}），本次构建不含该功能"
+        codec_note "      重跑 scripts/$script 可补齐"
     else
-        echo "      提示：未找到 $dir，本次构建不含视频（跑 scripts/build-video-libs.sh 可生成）"
+        codec_note "提示：未找到 $dir，本次构建不含该功能（跑 scripts/$script 可生成）"
+    fi
+    return 1
+}
+
+video_setup() {
+    # $1 = 目标名（如 linux-amd64 / windows-amd64）
+    if codec_libs_ok "third_party/video/$1" video "$VIDEO_LIBS" "build-video-libs.sh"; then
+        VIDEO_ON=1
+    fi
+}
+
+audio_setup() {
+    # $1 = 目标名；音频扩展为独立标签，与视频互不影响
+    if codec_libs_ok "third_party/audio/$1" audio "$AUDIO_LIBS" "build-audio-lib.sh"; then
+        AUDIO_ON=1
+    fi
+}
+
+# 每个目标构建前重置标签与 CGO 路径，再分别探测视频与音频库
+codec_setup() {
+    BUILD_TAGS=""
+    VIDEO_ON=""
+    AUDIO_ON=""
+    CODEC_NOTES=""
+    export CGO_CFLAGS=""
+    export CGO_LDFLAGS=""
+    video_setup "$1"
+    audio_setup "$1"
+    # 特性摘要（不列具体编码格式）：音频是基础（malgo 设备 + G.711，Opus 也是
+    # 音频的一部分），视频与 Opus 由第三方静态库带来。四种组合直接写清楚，
+    # 缺什么在这里标出，具体怎么补见后面的提示行。
+    FEATURES="CGO+音频，无视频、无Opus"
+    if [ -n "$VIDEO_ON" ]; then
+        FEATURES="CGO+音频+视频，无Opus"
+    fi
+    if [ -n "$AUDIO_ON" ]; then
+        FEATURES="CGO+音频，无视频"
+    fi
+    if [ -n "$VIDEO_ON" ] && [ -n "$AUDIO_ON" ]; then
+        FEATURES="CGO+音频+视频"
+    fi
+}
+
+# 组装 -tags 参数（标签用逗号分隔，避免把多个标签拆成多个参数）
+tags_args() {
+    if [ -n "$BUILD_TAGS" ]; then
+        echo "-tags $BUILD_TAGS"
     fi
 }
 
 # ---------- 构建 ----------
 
-echo "[1/4] 构建本机 GUI 版 sip-phone-linux-${NATIVE_ARCH}（CGO+音频）..."
-video_setup "linux-${NATIVE_ARCH}"
-go build $VIDEO_TAGS -ldflags "$LDFLAGS" -o "dist/sip-phone-linux-${NATIVE_ARCH}" ./cmd/sip-phone
+codec_setup "linux-${NATIVE_ARCH}"
+echo "[1/4] 构建本机 GUI 版 sip-phone-linux-${NATIVE_ARCH}（${FEATURES}）..."
+printf '%s' "$CODEC_NOTES"
+go build $(tags_args) -ldflags "$LDFLAGS" -o "dist/sip-phone-linux-${NATIVE_ARCH}" ./cmd/sip-phone
 
 if [ -z "$CROSS_ARCH" ]; then
     echo "[2/4] 跳过 Linux 交叉：本机架构 ${NATIVE_ARCH} 不在支持列表（amd64/arm64）"
@@ -166,24 +250,26 @@ elif [ -n "$CROSS_PC_MISSING" ]; then
     echo "      pkg-config 查找目录：${CROSS_PC_LIBDIR}"
     cross_env_hint
 else
-    echo "[2/4] 交叉构建 dist/sip-phone-linux-${CROSS_ARCH}（CGO+音频，CC=${CROSS_CC}）..."
-    video_setup "linux-${CROSS_ARCH}"
+    codec_setup "linux-${CROSS_ARCH}"
+    echo "[2/4] 交叉构建 dist/sip-phone-linux-${CROSS_ARCH}（${FEATURES}，CC=${CROSS_CC}）..."
+    printf '%s' "$CODEC_NOTES"
     CGO_ENABLED=1 GOOS=linux GOARCH="$CROSS_ARCH" CC="$CROSS_CC" \
         PKG_CONFIG_LIBDIR="$CROSS_PC_LIBDIR" PKG_CONFIG_PATH= \
-        go build $VIDEO_TAGS -ldflags "$LDFLAGS" -o "dist/sip-phone-linux-${CROSS_ARCH}" ./cmd/sip-phone
+        go build $(tags_args) -ldflags "$LDFLAGS" -o "dist/sip-phone-linux-${CROSS_ARCH}" ./cmd/sip-phone
 fi
 
 # Windows amd64 托盘版（参数与 build.bat 的同名目标一致：GUI 子系统无控制台）
 if [ -n "$MINGW64_CC" ]; then
-    video_setup "windows-amd64"
-    if [ -n "$VIDEO_TAGS" ] && [ ! -x "$MINGW64_CXX" ]; then
+    codec_setup "windows-amd64"
+    if [ -n "$VIDEO_ON" ] && [ ! -x "$MINGW64_CXX" ]; then
         echo "[3/4] 跳过 Windows amd64：带视频需要 ${MINGW64_CXX}（g++ 与 gcc 是两个包）"
         echo "      安装：apt install g++-mingw-w64-x86-64 / dnf install mingw64-gcc-c++"
         echo "      若不需要视频：删掉 third_party/video/windows-amd64 即可出无视频版本"
     else
-        echo "[3/4] 交叉构建 dist/sip-phone-windows-amd64.exe（CGO+音频，CC=${MINGW64_CC} CXX=${MINGW64_CXX}）..."
+        echo "[3/4] 交叉构建 dist/sip-phone-windows-amd64.exe（${FEATURES}，CC=${MINGW64_CC} CXX=${MINGW64_CXX}）..."
+        printf '%s' "$CODEC_NOTES"
         CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC="$MINGW64_CC" CXX="$MINGW64_CXX" \
-            go build $VIDEO_TAGS -ldflags "$LDFLAGS -H=windowsgui" \
+            go build $(tags_args) -ldflags "$LDFLAGS -H=windowsgui" \
             -o dist/sip-phone-windows-amd64.exe ./cmd/sip-phone
     fi
 else
@@ -194,15 +280,16 @@ fi
 
 # Windows 386 托盘版（-extldflags -static：免 mingw 运行时 DLL，同 build.bat）
 if [ -n "$MINGW32_CC" ]; then
-    video_setup "windows-386"
-    if [ -n "$VIDEO_TAGS" ] && [ ! -x "$MINGW32_CXX" ]; then
+    codec_setup "windows-386"
+    if [ -n "$VIDEO_ON" ] && [ ! -x "$MINGW32_CXX" ]; then
         echo "[4/4] 跳过 Windows 386：带视频需要 ${MINGW32_CXX}（链接 -lstdc++ 由 g++ 包提供）"
         echo "      安装：apt install g++-mingw-w64-i686 / dnf install mingw32-gcc-c++"
         echo "      若不需要视频：删掉 third_party/video/windows-386 即可出无视频版本"
     else
-        echo "[4/4] 交叉构建 dist/sip-phone-windows-386.exe（CGO+音频，静态，CC=${MINGW32_CC}）..."
+        echo "[4/4] 交叉构建 dist/sip-phone-windows-386.exe（${FEATURES}，静态，CC=${MINGW32_CC}）..."
+        printf '%s' "$CODEC_NOTES"
         CGO_ENABLED=1 GOOS=windows GOARCH=386 CC="$MINGW32_CC" CXX="$MINGW32_CXX" \
-            go build $VIDEO_TAGS -ldflags "$LDFLAGS -H=windowsgui -extldflags -static" \
+            go build $(tags_args) -ldflags "$LDFLAGS -H=windowsgui -extldflags -static" \
             -o dist/sip-phone-windows-386.exe ./cmd/sip-phone
     fi
 else

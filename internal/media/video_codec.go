@@ -30,15 +30,21 @@ type VideoCodec struct {
 
 // supportedVideoCodecs 按优先级排列：H264 > VP8 > VP9 > H263-1998。
 // H264 互通性最好、VP8/VP9 次之，H263-1998 最老。调整优先级只改这里。
+//
+// PT 号是**本端 offer 的固定号**（用户指定）：H264=99 / H263-1998=98 /
+// VP8=100 / VP9=101——号段与优先级顺序无关，m= 行仍按上面的优先级列出
+//（`m=video … RTP/AVP 99 100 101 98`）。音频 Opus 用 96，两者在不同 m= 行，互不冲突。
+// 作为 answerer 时**不**使用这些号，仍按 RFC 3264 复用对端 offer 里的号
+//（见 answerSection 的注释：按本端号回会让协商串味）。
 var supportedVideoCodecs = []VideoCodec{
 	{
-		Name: videoCodecH264, PT: 96, ClockRate: 90000,
+		Name: videoCodecH264, PT: 99, ClockRate: 90000,
 		// profile-level-id=42e01f（Constrained Baseline L3.1）、packetization-mode=1（FU-A 分片）
 		FMTP: "profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1",
 	},
-	{Name: videoCodecVP8, PT: 97, ClockRate: 90000},
-	{Name: videoCodecVP9, PT: 98, ClockRate: 90000},
-	{Name: videoCodecH263, PT: 99, ClockRate: 90000, FMTP: "CIF=1;QCIF=1"},
+	{Name: videoCodecVP8, PT: 100, ClockRate: 90000},
+	{Name: videoCodecVP9, PT: 101, ClockRate: 90000},
+	{Name: videoCodecH263, PT: 98, ClockRate: 90000, FMTP: "CIF=1;QCIF=1"},
 }
 
 // videoCodecByName 按编码名取描述。
