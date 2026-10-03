@@ -33,6 +33,12 @@ func placeVideoWindow(w fyne.Window) {}
 // moveUpdateWindowToCorner 其他平台不做定位（窗口保持默认居中）。
 func moveUpdateWindowToCorner(w fyne.Window) {}
 
+// showUpdateWindow 显示更新提示窗（其他平台无任务栏按钮问题，直接显示）。
+func showUpdateWindow(w fyne.Window) { w.Show() }
+
+// showCallWindow 显示通话面板（其他平台无需为任务栏做额外处理）。
+func showCallWindow(w fyne.Window) { w.Show() }
+
 // updateWindowTitle 更新提示窗标题（与 Windows 一致，中文）。
 func updateWindowTitle() string { return "更新提示" }
 

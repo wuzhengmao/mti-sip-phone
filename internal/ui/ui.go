@@ -818,7 +818,7 @@ func (a *App) setCallUI(state int, remote string) {
 		a.callNameLabel.SetText(remote)
 		a.callStateLabel.SetText("呼叫中")
 		a.rebuildCallRows(dialingButtons)
-		a.callW.Show()
+		showCallWindow(a.callW) // 平台函数：Windows 下不占任务栏（见 showWindowAsTool）
 		moveCallWindowToCorner(a.callW)
 		a.startTimer()
 
@@ -830,7 +830,7 @@ func (a *App) setCallUI(state int, remote string) {
 		a.callNameLabel.SetText(remote)
 		a.callStateLabel.SetText("来电")
 		a.rebuildCallRows(ringingButtons)
-		a.callW.Show()
+		showCallWindow(a.callW)
 		a.callW.RequestFocus()
 		moveCallWindowToCorner(a.callW)
 		a.startTimer() // 振铃时长
@@ -843,7 +843,7 @@ func (a *App) setCallUI(state int, remote string) {
 		a.callNameLabel.SetText(remote)
 		a.callStateLabel.SetText("通话中")
 		a.rebuildCallRows(incallButtons)
-		a.callW.Show()
+		showCallWindow(a.callW)
 		moveCallWindowToCorner(a.callW)
 		a.startTimer() // 通话时长从 0 开始
 	}
@@ -916,11 +916,17 @@ func (a *App) buildTray() {
 	markTrayQuit(quit)
 	menu := fyne.NewMenu("mti-sip-phone", showMain, fyne.NewMenuItemSeparator(), quit)
 
-	// 初始图标按当前注册状态（默认红色，systray 就绪回调自动设置）
-	a.fyne.SetIcon(a.trayIcon())
+	// 应用图标固定为绿色话机（用户要求：标准 app 图标是绿色话机，红色只作
+	// 异常提醒——那个由托盘图标承担）。各窗口另有自己的 SetIcon，这里同时是
+	// "没单独设图标的窗口"的默认值。
+	a.fyne.SetIcon(IconPhoneGreen)
 	// 单击托盘图标唤出主窗口（Fyne 托盘无原生双击事件，单击唤出）
 	a.desk.SetSystemTrayMenu(menu)
 	a.desk.SetSystemTrayWindow(a.mainW)
+	// 托盘图标显式按注册状态给一次（未注册红 / 已注册绿，REQ-UI-011）：
+	// Fyne 的托盘就绪回调只在"从未显式设置过托盘图标"时才退回应用图标，
+	// 不设的话托盘会跟着应用图标一起变绿，丢掉未注册的红色提醒。
+	a.updateTrayIcon()
 	// SetSystemTrayWindow 内部会覆盖窗口的 CloseIntercept（w.Hide）并
 	// 注册单击回调（直接 Show）——两处均不经过应用代码，导致自维护的
 	// mainShown 显示标志失去同步（点 X 后标志仍为 true，通话结束误判

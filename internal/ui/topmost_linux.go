@@ -410,6 +410,15 @@ func placeVideoWindow(w fyne.Window) {
 	}()
 }
 
+// showUpdateWindow 显示更新提示窗。Windows 侧要在"第一次显示"的同一步里
+// 把窗口改成工具窗口（否则外壳会建出任务栏按钮，关掉后还残留）；X11/Wayland
+// 没有这个问题，直接显示即可。
+func showUpdateWindow(w fyne.Window) { w.Show() }
+
+// showCallWindow 显示通话面板（X11/Wayland 不需要为任务栏做额外处理，
+// 面板的去任务栏条目由 X11 属性负责，见本文件内的 moveCallWindowToCorner）。
+func showCallWindow(w fyne.Window) { w.Show() }
+
 // moveUpdateWindowToCorner 把更新提示窗吸附到工作区右下角（同通话面板：
 // 去标题栏、移出任务栏、置顶、尺寸锁定）。尺寸取窗口当前值
 // （内容自适应调整过），而不是固定常量。
