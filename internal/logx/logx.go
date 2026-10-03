@@ -238,27 +238,109 @@ func (w *rotatingFile) open() error {
 }
 
 // archiveName 第 i 份归档文件名（.1.gz 最新归档，.2.gz 次之）。
-func (w *rotatingFile) archiveName(i int) string {
-	return w.path + fmt.Sprintf(".%d.gz", i)
+func archiveName(base string, i int) string {
+	return fmt.Sprintf("%s.%d.gz", base, i)
 }
 
-// rotate 轮转：当前文件压缩归档，旧归档依次后移，删除最旧。
-func (w *rotatingFile) rotate() error {
-	if err := w.f.Close(); err != nil {
+// openTruncate 以清空方式重开当前日志文件（轮转的退路，见 rotate）。
+func (w *rotatingFile) openTruncate() error {
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
 		return err
 	}
-	// 删除最旧归档
-	_ = os.Remove(w.archiveName(maxFiles - 1))
-	// 旧归档依次后移（从旧到新）
-	for i := maxFiles - 2; i >= 1; i-- {
-		_ = os.Rename(w.archiveName(i), w.archiveName(i+1))
+	w.f = f
+	w.size = 0
+	return nil
+}
+
+// rotate 轮转：把当前文件改名"切走"（改名即完成截断），压缩与归档序列
+// 移位交给后台 goroutine —— 不持锁做重活。
+//
+// 为什么不能用"直接 gzip + 删除原文件"（历史缺陷，Windows 专有）：
+//   - 删除/改名要求**所有**句柄都以 FILE_SHARE_DELETE 打开，而 Go 的
+//     os.OpenFile 只给 FILE_SHARE_READ|FILE_SHARE_WRITE（syscall_windows.go
+//     的 sharemode）。原实现 `return os.Remove(src)` 在 `defer in.Close()`
+//     之前执行，自己的读句柄还没关 → 删除**必然失败** → 归档"压完却删不掉"：
+//     文件不截断、尺寸一直大于上限 → **之后每次写日志都再轮转一次**（把整个
+//     文件重新 gzip 一遍），且全程持着 w.mu。实测该缺陷让 SIP/界面/媒体线程
+//     被卡住数百毫秒（原始日志里同一个 recvLoop 迭代内相邻两行日志相差
+//     494ms），媒体开始时更是把 RTP 接收循环卡住——包在 socket 里堆积后成批
+//     涌入、播放缓冲超深截断，"第一声回铃音断续"由此而来；日志本身也永远
+//     轮不掉（实测停在 42MB 且每 10 秒重压一次）。
+//   - 压缩大文件要几百毫秒到数秒，放在写路径里同样会卡住所有写日志的调用方。
+//
+// 退路：改名失败（例如日志被别的程序以无 FILE_SHARE_DELETE 的方式打开）时
+// 退化为清空当前文件（O_TRUNC）；连清空都不行则按"不再轮转"降级——绝不回到
+// "每次写都重新压缩整个文件"的恶性循环。
+func (w *rotatingFile) rotate() error {
+	if w.f != nil {
+		if err := w.f.Close(); err != nil {
+			return err
+		}
+		w.f = nil
 	}
-	// 当前文件压缩为 .1.gz
-	if err := gzipFile(w.path, w.archiveName(1)); err != nil {
-		// 压缩失败：保留未压缩的原文件，直接重开
-		return w.open()
+	// 临时名带时间戳：连续轮转时各自的归档互不覆盖
+	tmp := fmt.Sprintf("%s.%d.rotating", w.path, time.Now().UnixNano())
+	if err := os.Rename(w.path, tmp); err != nil {
+		if terr := w.openTruncate(); terr != nil {
+			warnf("日志轮转失败，降级为持续追加（不再轮转）: 改名 %v / 清空 %v", err, terr)
+			w.size = 0
+			return w.open()
+		}
+		return nil
 	}
-	return w.open()
+	if err := w.open(); err != nil {
+		return err
+	}
+	enqueueArchive(archiveJob{tmp: tmp, base: w.path})
+	return nil
+}
+
+// archiveJob 一次归档任务：把 tmp 压缩为 <base>.1.gz，并把既有归档序列后移。
+type archiveJob struct {
+	tmp  string
+	base string
+}
+
+var (
+	archiveOnce sync.Once
+	archiveCh   chan archiveJob
+)
+
+// enqueueArchive 投递归档任务（非阻塞）：队列满则丢弃该归档，不能拖住写日志。
+func enqueueArchive(job archiveJob) {
+	archiveOnce.Do(func() {
+		archiveCh = make(chan archiveJob, 8)
+		go archiveWorker()
+	})
+	select {
+	case archiveCh <- job:
+	default:
+		warnf("日志归档队列已满，丢弃一次归档: %s", job.tmp)
+		_ = os.Remove(job.tmp)
+	}
+}
+
+// archiveWorker 串行归档（单独 goroutine）：保证 .1.gz 始终是最新一份。
+func archiveWorker() {
+	for job := range archiveCh {
+		// 删除最旧归档
+		_ = os.Remove(archiveName(job.base, maxFiles-1))
+		// 旧归档依次后移（从旧到新）
+		for i := maxFiles - 2; i >= 1; i-- {
+			_ = os.Rename(archiveName(job.base, i), archiveName(job.base, i+1))
+		}
+		if err := gzipFile(job.tmp, archiveName(job.base, 1)); err != nil {
+			warnf("日志归档失败: %v", err)
+			_ = os.Remove(job.tmp)
+		}
+	}
+}
+
+// warnf 轮转/归档失败告警：直接写 stderr（此刻不能用 Logger——可能正持着
+// 日志锁；GUI 子系统无控制台时也只是一次无害的写失败）。
+func warnf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "logx: "+format+"\n", args...)
 }
 
 // gzipFile 将 src 压缩为 dst.gz 并删除 src。
@@ -267,25 +349,33 @@ func gzipFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-
 	out, err := os.Create(dst)
 	if err != nil {
+		in.Close()
 		return err
 	}
 	zw := gzip.NewWriter(out)
 	if _, err := io.Copy(zw, in); err != nil {
 		zw.Close()
 		out.Close()
+		in.Close()
 		os.Remove(dst)
 		return err
 	}
 	if err := zw.Close(); err != nil {
 		out.Close()
+		in.Close()
 		os.Remove(dst)
 		return err
 	}
 	if err := out.Close(); err != nil {
+		in.Close()
+		os.Remove(dst)
+		return err
+	}
+	// 先关自己的句柄再删（Windows 上句柄未关——且共享位不含 FILE_SHARE_DELETE
+	// ——删除必然失败，此处顺序错了就是历史缺陷的根源）
+	if err := in.Close(); err != nil {
 		return err
 	}
 	return os.Remove(src)
@@ -295,10 +385,18 @@ func gzipFile(src, dst string) error {
 func (w *rotatingFile) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.f == nil {
+		if err := w.open(); err != nil {
+			return 0, err
+		}
+	}
 	if w.size+int64(len(p)) > maxFileSize {
 		if err := w.rotate(); err != nil {
 			return 0, err
 		}
+	}
+	if w.f == nil { // 轮转退路可能仍没拿到句柄（见 rotate）
+		return 0, os.ErrClosed
 	}
 	n, err := w.f.Write(p)
 	w.size += int64(n)

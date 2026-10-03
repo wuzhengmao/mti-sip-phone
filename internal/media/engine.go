@@ -116,6 +116,9 @@ type Engine struct {
 	// lastTrimLog 播放缓冲截断日志限频（避免刷屏）
 	lastTrimLog time.Time
 
+	// probe 媒体诊断探针（SIP_PHONE_AUDIODUMP=1 时非 nil，见 debug_probe.go）
+	probe *mediaProbe
+
 	stop chan struct{}
 	wg   sync.WaitGroup
 
@@ -152,6 +155,7 @@ func NewEngine(localIP string) (*Engine, error) {
 		stop:      make(chan struct{}),
 	}
 	e.activePT.Store(uint32(e.codec.PayloadType()))
+	e.probe = newMediaProbe(e.localPort)
 	e.rtcp = newRTCPSession(rtcpConn, e)
 	logx.Logger().Debug("媒体引擎已创建", "codec", e.codec.Name(),
 		"支持", codecSummary(), "localPort", e.localPort, "rtcpPort", e.localPort+1)
@@ -246,6 +250,7 @@ func (e *Engine) Start() {
 	e.wg.Add(1)
 	go e.recvLoop()
 	e.rtcp.start()
+	e.probe.start(e) // 诊断探针（未启用时为 nil，零开销）
 	// NAT 打洞：向对端 RTP 地址发送静音帧，让 NAT 建立端口映射。
 	// 对称 NAT 下对端发来的媒体包（如回铃音）必须先有出向包放行，
 	// 否则 rx=0（回铃音听不到——bug 修复）。
@@ -294,6 +299,9 @@ func (e *Engine) recvLoop() {
 		}
 
 		e.rxPackets.Add(1)
+		if e.probe != nil {
+			e.probe.addPkt()
+		}
 		// 首个外来包日志（Info 级，排查用）：确认对端 RTP 是否
 		// 到达本机——若从未打印则对端媒体包从未到达（网络/对方未发送）
 		if e.rxPackets.Load() == 1 {
@@ -355,6 +363,9 @@ func (e *Engine) playPush(ssrc uint32, seq uint16, frame []int16) {
 		// 乱序 / 过期包：丢弃
 		return
 	}
+	if e.probe != nil {
+		e.probe.writeRx(frame) // 诊断：真正进入播放缓冲的音频样本
+	}
 	// 序号回绕（65535 → 0）：扩展序号 +1（RTCP 报告用）
 	if seq < e.lastSeq {
 		e.extSeq++
@@ -413,10 +424,16 @@ func (e *Engine) fillLoss(n, samples int) {
 			if f == nil {
 				break
 			}
+			if e.probe != nil {
+				e.probe.writeFill(len(f))
+			}
 			e.ring.Write(f)
 		}
 	}
 	if rest := n - used; rest > 0 {
+		if e.probe != nil {
+			e.probe.writeFill(rest * samples)
+		}
 		e.ring.Write(make([]int16, rest*samples))
 	}
 }
@@ -540,6 +557,10 @@ func (e *Engine) ReadPlayback(buf []int16) int {
 	}
 	for i := n; i < len(buf); i++ {
 		buf[i] = 0
+	}
+	if e.probe != nil {
+		e.probe.addRead(len(buf), n)
+		e.probe.writePlay(buf) // 诊断：设备实际拿到的样本（含补的静音）
 	}
 	return len(buf)
 }
@@ -699,6 +720,7 @@ func (e *Engine) Stats() (rx, lost, tx uint64) {
 
 // Close 释放引擎：发 RTCP BYE、停收发循环、关端口。
 func (e *Engine) Close() {
+	e.probe.close()
 	e.rtcp.sendBye()
 	select {
 	case <-e.stop:
