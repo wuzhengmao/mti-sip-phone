@@ -1,7 +1,9 @@
 // Package updater 实现自动更新：接收业务前端经 WS 告知的新版本信息，
 // 由用户在界面上确认后下载（可选 sha256 与可执行文件魔数校验）、替换
 // 当前可执行文件并重启。软电话自身不查询更新服务器——"有没有更高版本"
-// 由前端应用裁决，本包只在版本可比时拒绝降级。
+// 由前端应用裁决（网页端 SDK 定时查询更新站点，见 web/sdk），本包只在
+// 版本可比时拒绝降级：预发布低于同号正式版（开发构建版本号带 -rc，
+// 正式版发布时数字相同也必须能通知更新，规则见 version.go）。
 //
 // 状态变化经 core.Bus 发布 "system.update" 事件（UI 渲染、WS 转发给网页）。
 // 锁序纪律：本包持 u.mu 时不得调用 Options.IsBusy（它会取 core.App 的锁）；
@@ -91,8 +93,11 @@ func (u *Updater) Notify(info core.UpdateInfo) error {
 	if info.Arch != "" && info.Arch != runtime.GOARCH {
 		return fmt.Errorf("%w：目标架构 %s 与当前 %s 不符", core.ErrUpdateInvalid, info.Arch, runtime.GOARCH)
 	}
-	if cmp, ok := compareVersions(info.Version, core.Version); ok && cmp <= 0 {
-		return fmt.Errorf("%w：当前 %s，收到 %s", core.ErrUpdateNotNewer, core.Version, info.Version)
+	// 强制推送（联调/回滚用）跳过版本高低检查；平台一致性等其余校验照旧。
+	if !info.Force {
+		if cmp, ok := compareVersions(info.Version, core.Version); ok && cmp <= 0 {
+			return fmt.Errorf("%w：当前 %s，收到 %s", core.ErrUpdateNotNewer, core.Version, info.Version)
+		}
 	}
 
 	u.mu.Lock()
@@ -116,7 +121,8 @@ func (u *Updater) Notify(info core.UpdateInfo) error {
 	st := u.statusLocked()
 	u.mu.Unlock()
 
-	logx.Logger().Info("收到新版本通知", "version", info.Version, "host", st.Host, "current", core.Version)
+	logx.Logger().Info("收到新版本通知", "version", info.Version, "host", st.Host,
+		"current", core.Version, "强制推送", info.Force)
 	u.publish(st)
 	return nil
 }

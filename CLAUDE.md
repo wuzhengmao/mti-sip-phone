@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.4**（dev 开发中；1.0.3 含视频通话与网页订阅视频，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。
+当前版本 **1.0.5**（dev 开发中；1.0.4 含 Opus 音频编解码与视频负载类型号固定，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
 真实环境：OpenSIPS 2.4.11（10.168.4.40:15060，账号 2999），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
 
@@ -26,6 +26,8 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 ```bash
 # 构建脚本按目标打印本次能力（如 CGO+音频+视频，缺库时标出无视频/无Opus）；视频/Opus 取决于
 # 第三方静态库是否已生成（见下），缺哪个就降级为哪个没有。
+# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.5-rc），
+# 正式构建用 SIP_PHONE_RELEASE=1（发布脚本会设）；不经脚本的 go build/go run 是基础版本号。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO）
 #   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
@@ -54,6 +56,37 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 ```
 
 测试页地址：`http://127.0.0.1:<WS端口>/`（默认 8765，占用自动 +1 并保存配置）。
+
+### 发布到更新站点
+
+更新站点是独立的「软件更新中心」（源码在另一个仓库，规范见其 `/docs/release-spec`、
+`/docs/upload`、`/docs/api`）。本仓库侧的发布入口：
+
+```bash
+./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.5-rc），不上传
+./scripts/release.sh --pre             # 预发布：真实上传（站点标记为预发布）
+./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.5
+# Windows 用 scripts/release.bat（同样的参数，内部走 git-bash）
+```
+
+- 配置在 `release/release.conf`：`UPDATE_SITE`（当前 `https://update.wuzm219.cn`）/ `APP_ID`
+  （mti-sip-phone）/ `UPLOAD_TOKEN`（由站点 `UPLOAD_SECRET` 按应用 ID 推导）/ 可选的
+  `CA_CERT`（内部自签名站点用，curl `--cacert`）、`INSECURE_TLS`；同名环境变量可覆盖，
+  对着本地站点试跑：`UPDATE_SITE=https://localhost:8443 CA_CERT=... ./scripts/release.sh --pre`。
+- 站点启用 TLS（HTTP 端口 301 跳 HTTPS）时 `UPDATE_SITE` **必须直接写 https 地址**：
+  上传是 POST，跟随 301 会退化成 GET。站点用自签名证书时浏览器里的 SDK 查询会被证书拦下，
+  需要把证书装进系统/浏览器信任库（生产站点是 Let's Encrypt 证书，无此问题）。
+- **应用级元数据走站点接口，不要直接动归档目录**：
+  `release/app.json` --PUT--> `/api/v1/apps/<app>/metadata`（**整份替换**，没写的字段会清空，
+  所以该文件要写全；`icon` 字段别手写——图标接口会自己维护它）；
+  `release/icon.svg` --PUT--> `/api/v1/apps/<app>/icon`（类型按内容判定，文件名站点定）。
+  两个接口与上传同令牌，未配置 UPLOAD_SECRET 的站点返回 403。
+- 版本目录内容（打成 **tar.gz** 上传，git-bash 没有 zip）：
+  `mti-sip-phone-<平台>-<架构>[.exe]`（**文件名不含版本号**，同一平台下载地址跨版本不变）、
+  `release.json`（artifacts 显式声明 os/arch/kind/sha256/size）、`CHANGELOG.md`（从根
+  changelog.md 抽取该版本段）、`SHA256SUMS`。站点按版本目录区分版本，文件名只要含平台/架构词。
+- Windows 上一键只能出 Windows 产物；Linux 产物要在 Linux 机器上跑 `build.sh` 后再发布。
+  产物 mtime 早于本次构建开始的会被跳过（防止把上次的旧二进制当新版本发出去）。
 
 **交叉编译说明**：fyne 的 OpenGL 绑定依赖 CGO，需要**目标平台**的 gcc 工具链。
 
@@ -115,8 +148,11 @@ internal/
   autostart/  开机自启（Windows HKCU Run / Linux XDG autostart，其他平台 no-op）
 web/
   test.html   测试页面（内嵌进二进制，右列事件日志）
-  sdk/        JS SDK（sip-phone-sdk.js + .d.ts，无 token）
-docs/         requirements.md（需求）、ws-protocol.md（WS 协议）、changelog.md
+  sdk/        JS SDK（sip-phone-sdk.js + .d.ts，无 token；含定时查询更新站点）
+release/      发布到更新站点的配置与元数据：release.conf（站点/应用 ID/令牌）、
+              app.json（应用级元数据，经站点 metadata 接口写入）、icon.svg（图标，经 icon 接口写入）
+scripts/      第三方库构建（build-video-libs.*、build-audio-lib.*）与一键发布（release.sh/.bat）
+docs/         requirements.md（需求）、ws-protocol.md（WS 协议）；changelog.md 在仓库根目录
 ```
 
 ## 分层架构与事件流
@@ -131,7 +167,7 @@ main（组装）
 ```
 
 - **事件流单向**：sip 层 → `p.sink`（core.App 回调：OnIncoming/OnRinging/OnEstablished/OnFailed/OnTerminated）→ 事件总线 → UI 与 WS 订阅者。
-- **自动更新**：业务前端（网页）经 WS `system.notifyUpdate` 告知新版本（软电话自身不查更新服务器）→ `internal/updater` 校验并发布 `system.update` 事件 → UI 弹右下角提示窗 + 主窗体提示行 → **用户点击后**才下载、替换 exe 并重启（WS 不能触发下载/重启）。下载/替换的进度与失败原因同样经总线事件到 UI 与网页。
+- **自动更新**：业务前端（网页）经 WS `system.notifyUpdate` 告知新版本（软电话自身不查更新服务器）→ `internal/updater` 校验并发布 `system.update` 事件 → UI 弹右下角提示窗 + 主窗体提示行 → **用户点击后**才下载、替换 exe 并重启（WS 不能触发下载/重启）。下载/替换的进度与失败原因同样经总线事件到 UI 与网页。网页侧「有没有更高版本」由 **JS SDK 定时查询更新站点**得到（`updateUrl` 在网页初始化 SDK 时告知，见 `web/sdk/sip-phone-sdk.js` 的 `checkUpdate`/`update.check`），软电话只负责提示与安装。`system.notifyUpdate` 另带可选 `force`（**强制推送**，跳过版本高低检查，测试页「推送更新」按钮用）——SDK 的定时查询**不带**它，自动更新仍按版本比较走。
 - **media.Engine 与音频设备解耦**：音频回调调用 `FeedMic`（任意帧长，内部按 20ms 帧累积发送）/ `ReadPlayback`（任意帧长，内部从样本环形缓冲取）。
 - **播放缓冲**（media/jitter.go）：样本粒度环形缓冲 8 秒容量；RTP 按序号处理——乱序/过期丢弃、丢包填静音（PLC 用静音而非循环旧帧）、SSRC 切换或序号大跳变（>2 秒）重置缓冲（183 早期媒体 → 200 新媒体流的关键）。
 - **保持语义**：本端保持发 re-INVITE（offer `a=sendonly`，恢复 `a=sendrecv`）；对端 re-INVITE 按方向镜像应答（对端 `recvonly` → 本端 `sendonly` 且停止发送）。
@@ -235,7 +271,8 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 
 - **交流、文档、注释、提交信息、界面文案一律中文**。
 - **Git 工作流**：开发在分支上进行（工作分支 dev，master 为收口分支）；**会话中修改的代码不得自动提交**——提交与 push 必须经用户人工确认后执行，且**不自动合并到 master**（合并 master 需用户明确指示）。
-- 版本 1.0.4 不自动升版；changelog.md 只记录版本之间的变化（开发过程不记）。
+- **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
+- 版本 1.0.5 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
 - 弹窗按钮文案「确定/取消」。
 - 需求变更同步更新 docs/requirements.md 与 changelog.md。
 - 单通话限制：呼叫/振铃/通话中禁止新呼出（返回错误）；新来电直接 486 USER_BUSY。
@@ -253,6 +290,8 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   - Timer_I=T4=5s：re-INVITE 事务需手动延迟 Terminate 防止重传风暴。
 - **Fyne**：UI 必须主线程（goroutine 运行会托盘失效+线程告警）；dialog 的 parent 传 nil 直接 panic（主窗口未显示时不要弹 dialog）；`SetSystemTrayWindow` 会覆盖 CloseIntercept（需重新接管）并注册单击回调；Window 无 Visible() 查询 API（主窗口显示状态用全局标识 mainShown 跟踪）。
 - **Fyne 托盘菜单**：菜单最后一项若不带 `IsQuit` 标记，Fyne 会自动补一个本地化的 `Quit` 项（`driver_desktop.go` 的 `addMissingQuitForMenu`，按 `lang.L("Quit")` 比对标签，中文标签匹配不上）。本项目的「退出」项经 `markTrayQuit` 处理——**仅 Linux 打标记**，Windows 保持多一个 Quit 的现状（用户要求）。新增托盘菜单项时注意最后一项的角色。
+- **窗口图标与托盘图标是两回事，别互相牵连**：GLFW 建的窗口不设自己的图标就**继承应用图标**（`fyne.App.SetIcon`）——应用图标固定绿色话机（用户要求：标准 app 图标是绿话机，红色只作异常提醒），所以**每个窗口都要自己 `SetIcon(IconPhoneGreen)`**，否则未注册时会顶着红色话机出现（更新提示窗就这么漏过：任务栏那条标题的图标是红的）。反过来，托盘图标在 **Fyne 的托盘就绪回调**里取：显式 `SetSystemTrayIcon` 过就用它，**没设过才退回应用图标**（`internal/driver/glfw/driver_desktop.go` 的 `runSystray`）——应用图标改绿之后必须在 `SetSystemTrayMenu` 之后补一次 `updateTrayIcon()`，否则托盘丢掉"未注册红"的提醒（REQ-UI-011）。`SetSystemTrayIcon` 在托盘就绪前调用只会让底层库记一条 "tray not ready yet"，图标已存下、就绪时照样生效。
+- **splash 窗口也会进任务栏（Windows）**：GLFW 给**每个**顶层窗口都设 `WS_EX_APPWINDOW`（`glfw/src/win32_window.c` 的 `getWindowExStyle` 写死），这个扩展样式的作用就是"强制生成任务栏按钮"，会压过 `WS_POPUP` 本来的不占任务栏语义——更新提示窗因此带着一条任务栏标题（用户实测）。**关键是改样式的时机**：只在窗口显示之后再异步改（曾用"显示 → 定位协程里换样式 + hide/show 刷新"）**不够**——外壳是状态驱动地扫描任务栏窗口，往往已经按 APPWINDOW 把按钮建出来了，之后改样式、隐藏都不会把它收回去（用户实测：点「稍后」关掉提示窗后，任务栏上那条按钮还残留着点不动）。正确做法见 `topmost_windows.go` 的 `showUpdateWindow`：在**第一次显示的同一步内**走 Show（首次 Show 才创建 GLFW 窗口）→ 立刻 `w.Hide()` → `setToolWindowStyle(hwnd)`（APPWINDOW 换成 TOOLWINDOW）→ `w.Show()`——外壳还没来得及处理"显示"，窗口已经是工具窗口，按钮根本不会建。`positionUpdateWindow` 里的 `setToolWindowStyle` 只是幂等兜底。⚠️ 读写扩展样式用 `Get/SetWindowLongPtrW`，32 位 user32 没有这两个导出（`LazyProc.Call` 会 panic 且 GUI 子系统无可见输出），必须按 `Find()` 结果回退 `Get/SetWindowLongW`。**通话面板与更新提示窗都按工具窗口显示（不占任务栏）**——面板走 `showCallWindow`、提示窗走 `showUpdateWindow`，两者都进 `showWindowAsTool`；只有视频窗口保留任务栏条目（它是带标题栏、可拖动的普通窗口，用户可能要从任务栏找它）。
 - **音频管理器（internal/audio）的线程模型**：后端初始化在后台 goroutine，`NewManager` 最多等 `initWait`(2s) 就返回；所有会碰后端的操作（开关音频流、播放提示音）都排入单 worker 的 FIFO 队列后立即返回，调用方（UI 线程、SIP 线程）不会被设备操作阻塞。**不要持 `m.mu` 调用后端**——miniaudio 的设备操作在音频服务不可达时会长时间阻塞（`PULSE_SERVER=tcp:localhost` 实测 15 秒），持锁会把 UI 线程的 `enqueue`/`SetMic` 一起卡死；正确做法是先取状态快照、释放锁再调后端（见 `startStreamFor`/`stopStream`）。设备枚举 `Devices()` 保持同步，调用方需自行放进后台 goroutine（界面侧见 `refreshDevices`）。后端内部同理：`malgoBackend.toneMu` 只护提示音状态，**不得跨越 `malgo.InitDevice`/`device.Start`/`device.Uninit` 持有**——miniaudio 启动/销毁设备要等音频回调线程，而回调要拿 `toneMu`，持锁即死锁（树莓派 PulseAudio 实测 `ma_device_start` 永不返回，音频 worker 卡死，之后所有音频操作排队不执行、通话无声）。
 - **通话面板窗口控制按平台拆分**：`ui_call.go`/`ui.go` 只调用平台函数（`moveCallWindowToCorner`、`callWindowTitle`、`markTrayQuit`、面板尺寸常量），实现分别在 `topmost_windows.go`（Win32）与 `topmost_linux.go`（X11）——**勿把任一侧的逻辑写进共享文件**。Linux 侧靠 `driver.NativeWindow.RunNative` 取 X11 窗口号（回调收到 `driver.X11WindowContext`），需经 `fyne.DoAndWait` 在主线程取；`fyne.DoAndWait` 不可在主线程调用（会 panic），故 `moveCallWindowToCorner` 内部起 goroutine。Wayland 会话下 X11 手段全部无效（不能自定位、去装饰看合成器）——所以 Linux 默认把后端固定到 X11（见下方「Linux 桌面后端」条）。X11 侧还额外把 `_NET_WM_STATE` 写成**窗口属性**（不只发 ClientMessage），因为 Xwayland 下没有独立 X11 窗口管理器处理消息。但**任务栏条目在 labwc 下无法由客户端去掉**（实测属性/消息都不生效）：任务栏走 foreign-toplevel 协议，该协议没有 skip-taskbar 字段，`_NET_WM_STATE_SKIP_TASKBAR` 不会透传。要隐藏只能用 labwc 自己的窗口规则（`~/.config/labwc/rc.xml`，labwc ≥0.6.4）：`<windowRule title="SIP" skipTaskbar="yes" skipWindowSwitcher="yes"/>`——按 `title` 匹配（面板标题恒以 `SIP` 开头，主窗体是 `mti-sip-phone …`），**勿按 `identifier` 匹配**（Xwayland 下两窗口 WM_CLASS 相同，会连主窗体一起隐藏）。用户已确认该条目可接受，不要再在客户端代码里尝试修它。
 - **媒体/NAT**：对称 NAT 下 UDP 映射需持续出向流量保活（早期媒体阶段 SetKeepalive 持续发静音帧）；SDP 宣告地址与 socket 绑定地址分离（SetSDPIP）；183→200 可能换 SSRC/端口（引擎已自动处理，勿移除 playPush 的重置逻辑）。

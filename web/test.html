@@ -91,6 +91,16 @@
   #log .err { color: #fca5a5; }
   #log .info { color: #cbd5e1; }
   .state-line { font-size: 13px; color: var(--gray); margin-top: 6px; word-break: break-all; }
+  /* 站点版本列表（自动更新卡片）：小一号字、紧凑列表，右侧是黄色的「推送」按钮。
+     文字用正文色（不用灰色，否则和旁边的提示文字混在一起），版本号加粗。 */
+  .upd-list { list-style: none; margin: 6px 0 0; padding: 0; }
+  .upd-list li {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--text); padding: 3px 0;
+  }
+  .upd-list li .txt { flex: 1; word-break: break-all; }
+  .upd-list li .txt b { font-weight: 600; }
+  .upd-list li button { padding: 3px 10px; font-size: 12px; }
   select {
     padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px;
     font-size: 13px; background: #fff; outline: none;
@@ -201,26 +211,6 @@
       </div>
     </div>
 
-    <div class="card" style="margin-top:16px">
-      <h2>自动更新（演示）</h2>
-      <p class="state-line" id="verLine">当前版本：—</p>
-      <div class="row">
-        <label>版本号</label>
-        <input type="text" id="updVersion" placeholder="如 1.0.3（须高于当前版本）">
-      </div>
-      <div class="row">
-        <label>下载地址</label>
-        <input type="text" id="updUrl" placeholder="http://.../sip-phone-windows-amd64.exe">
-      </div>
-      <div class="row">
-        <label>sha256</label>
-        <input type="text" id="updSha" placeholder="可选，提供则强校验">
-      </div>
-      <div class="row">
-        <button id="btnNotifyUpdate" class="ghost">告知新版本</button>
-      </div>
-      <p class="state-line">模拟业务前端流程：查到更高版本后告知软电话。软电话只会弹窗提示，是否下载/重启由用户在软电话界面上确认。</p>
-    </div>
   </div>
 
   <!-- 中列：视频 -->
@@ -292,8 +282,29 @@
     </div>
   </div>
 
-  <!-- 右列：事件日志 -->
+  <!-- 右列：自动更新 + 事件日志 -->
   <div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>自动更新</h2>
+      <p class="state-line" id="verLine">当前版本：—</p>
+      <!-- 更新站点：SDK 初始化时告知地址，连上软电话后定时查询（留空 = 不查询） -->
+      <div class="row">
+        <label>更新站点</label>
+        <input type="text" id="updSite" value="https://update.wuzm219.cn" placeholder="如 https://update.example.com（留空 = 不自动查询）">
+        <button id="btnCheckUpdate">检查更新</button>
+      </div>
+      <div class="row">
+        <label>应用 ID</label>
+        <input type="text" id="updAppId" value="mti-sip-phone">
+        <label>通道</label>
+        <input type="text" id="updChannel" placeholder="默认">
+      </div>
+      <p class="state-line" id="updLine">定时查询：未启用。</p>
+      <!-- 站点版本列表（点「检查更新」拉取）：每行 = 版本 + 黄色「推送」按钮 -->
+      <ul class="upd-list" id="updVersions"></ul>
+      <p class="state-line">「推送」是强制推送：跳过版本比较，低版本/同版本也能推给软电话（联调用）；定时查询始终按版本高低决定要不要提示。</p>
+      <p class="state-line">站点用自签名证书时，浏览器必须先信任该证书（否则查询会被证书校验拦下）；站点若只开了 HTTP 端口且会 301 跳到 HTTPS，这里要直接填 https 地址。</p>
+    </div>
     <div class="card">
       <h2>事件日志</h2>
       <div id="log"></div>
@@ -327,9 +338,12 @@
     ? 'ws://' + location.host + '/ws' : 'ws://127.0.0.1:8765/ws';
   $('wsUrl').value = wsBase;
 
+  // 更新站点地址由网页在初始化 SDK 时告知（留空 = 不自动查询更新）
   var sdk = new SipPhoneSDK({
     url: wsBase,
-    autoReconnect: true
+    autoReconnect: true,
+    updateUrl: $('updSite').value.trim(),
+    appId: $('updAppId').value.trim() || 'mti-sip-phone'
   });
 
   var currentCall = null; // { callId, direction, state }
@@ -503,23 +517,115 @@
     }
   });
 
-  // ---------------- 控制按钮 ----------------
+  // ---------------- 自动更新 ----------------
 
-  // 自动更新演示：模拟业务前端"查到更高版本后告知软电话"
-  $('btnNotifyUpdate').onclick = function () {
-    var info = {
-      version: $('updVersion').value.trim(),
-      url: $('updUrl').value.trim(),
-      sha256: $('updSha').value.trim() || undefined
+  // SDK 定时查询更新站点的结果（SDK 本地事件，不经过 WS）
+  var lastCheckLog = '';
+  sdk.on('update.check', function (r) {
+    var msg;
+    if (r.error) {
+      msg = '更新查询失败：' + r.error;
+    } else if (r.notified) {
+      msg = '发现新版本 v' + r.latestVersion + '（当前 v' + r.currentVersion + '），已告知软电话';
+    } else if (r.updateAvailable) {
+      msg = '有新版本 v' + r.latestVersion + '，但未告知软电话（' + (r.reason || '未知原因') + '）';
+    } else {
+      msg = '已是最新版本（当前 v' + (r.currentVersion || '?') + '）';
+    }
+    // 更新站点没开时每次查询都失败，同一句只记一次，避免刷屏
+    if (msg === lastCheckLog) { return; }
+    lastCheckLog = msg;
+    addLog(r.error ? 'info' : (r.notified ? 'ok' : 'ev'), msg);
+  });
+
+  // 更新站点配置：输入框改动即时生效（SDK 重启定时器并立即查一次；地址留空 = 停表）
+  function applyUpdateSource() {
+    var cfg = sdk.setUpdateSource({
+      url: $('updSite').value.trim(),
+      appId: $('updAppId').value.trim() || 'mti-sip-phone',
+      channel: $('updChannel').value.trim()
+    });
+    $('updAppId').value = cfg.appId;
+    $('updLine').textContent = cfg.url
+      ? '定时查询：' + cfg.url + '（应用 ' + cfg.appId +
+        (cfg.channel ? '，通道 ' + cfg.channel : '') +
+        '，每 ' + Math.round(cfg.interval / 60000) + ' 分钟）'
+      : '定时查询：未启用（填入更新站点地址即启用）';
+    return cfg;
+  }
+  ['updSite', 'updAppId', 'updChannel'].forEach(function (id) {
+    $(id).onchange = function () {
+      var cfg = applyUpdateSource();
+      addLog('info', '更新站点配置已更新：' + (cfg.url || '（未启用自动查询）'));
     };
-    if (!info.version || !info.url) { addLog('err', '请填写版本号与下载地址'); return; }
-    sdk.notifyUpdate(info).then(function (res) {
-      addLog('ok', '已告知软电话：v' + res.version + '（当前 v' + res.currentVersion +
-        '，状态 ' + res.phase + '）——请在软电话上确认更新');
+  });
+  applyUpdateSource();
+
+  // 站点版本列表的一项：版本名 + 黄色「推送」按钮（强制推送，跳过版本比较）
+  function versionItem(label, item, currentVersion) {
+    var li = document.createElement('li');
+    var name = document.createElement('span');
+    name.className = 'txt';
+    if (!item) {
+      name.textContent = label + '：—（站点上没有）';
+      li.appendChild(name);
+      return li;
+    }
+    // 版本号加粗（用 DOM 节点拼，不拼 HTML），标签与括注用普通字重
+    name.appendChild(document.createTextNode(label + '：'));
+    var ver = document.createElement('b');
+    ver.textContent = 'v' + item.version;
+    name.appendChild(ver);
+    var note = '';
+    if (item.prerelease) { note += '（预发布）'; }
+    if (item.version === currentVersion) { note += '（与当前相同）'; }
+    if (note) { name.appendChild(document.createTextNode(note)); }
+    li.appendChild(name);
+
+    var btn = document.createElement('button');
+    btn.className = 'yellow';
+    btn.textContent = '推送';
+    if (!item.url) {
+      btn.disabled = true;
+      btn.title = '站点上该版本没有本平台的产物';
+    }
+    btn.onclick = function () {
+      btn.disabled = true;
+      addLog('info', '强制推送 v' + item.version + '（忽略版本比较）…');
+      sdk.notifyUpdate({
+        version: item.version,
+        url: item.url,
+        sha256: item.sha256,
+        notes: item.notes,
+        force: true
+      }).then(function (res) {
+        addLog('ok', '已强制推送 v' + res.version + '（当前 v' + res.currentVersion +
+          '，状态 ' + res.phase + '）——请在软电话上确认更新');
+      }, function (e) {
+        addLog('err', '推送失败: ' + e.message + (e.code ? '（' + e.code + '）' : ''));
+      }).then(function () { btn.disabled = false; });
+    };
+    li.appendChild(btn);
+    return li;
+  }
+
+  $('btnCheckUpdate').onclick = function () {
+    applyUpdateSource();
+    var box = $('updVersions');
+    box.textContent = '';
+    addLog('info', '查询更新站点版本列表…');
+    sdk.listReleases().then(function (r) {
+      box.appendChild(versionItem('最新版本', r.latest, r.current));
+      box.appendChild(versionItem('最新稳定版', r.latestStable, r.current));
+      addLog('ok', '站点版本：最新 ' + (r.latest ? 'v' + r.latest.version : '—') +
+        '，最新稳定 ' + (r.latestStable ? 'v' + r.latestStable.version : '—') +
+        '（当前 v' + r.current + '）');
     }).catch(function (e) {
-      addLog('err', '告知失败: ' + e.message + (e.code ? '（' + e.code + '）' : ''));
+      addLog('err', '查询版本列表失败: ' + e.message);
     });
   };
+
+  // ---------------- 控制按钮 ----------------
 
   $('btnDial').onclick = function () {
     var target = $('dialTarget').value.trim();

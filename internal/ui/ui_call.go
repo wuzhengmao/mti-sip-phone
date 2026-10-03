@@ -48,10 +48,11 @@ func (a *App) buildCallPanelIfNeeded() {
 	// 缓存始终自洽，画布 == 客户区。
 	w := a.newBorderlessWindow("通话")
 	a.callW = w
-	w.SetIcon(IconPhoneGreen) // 任务栏绿色话机（不继承应用红色图标）
+	// 窗口图标固定绿色话机（不继承应用红色图标）；面板在 Windows 上按工具窗口
+	// 显示、不占任务栏，见 topmost_windows.go 的 showCallWindow。
+	w.SetIcon(IconPhoneGreen)
 	// 无标题栏、无关闭按钮，仅显示窗体内容（REQ-UI-024 修订）：
-	// fyne 公开 API 无 SetDecorated，窗口装饰在 Show 后由
-	// positionCallWindow（stripWindowChrome）通过 Win32 样式移除
+	// fyne 公开 API 无 SetDecorated，无装饰由 splash 窗口保证（见上）。
 	// 关闭面板（Alt+F4 等）= 挂断
 	w.SetCloseIntercept(func() {
 		if a.activeCallID != "" {

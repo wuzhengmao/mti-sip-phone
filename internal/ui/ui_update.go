@@ -209,6 +209,9 @@ func (a *App) buildUpdatePanelIfNeeded() {
 	}
 	// 同通话面板：用 splash 窗口做无边框，不走 Win32 硬改样式（见 newBorderlessWindow）
 	w := a.newBorderlessWindow(updateWindowTitle())
+	// 任务栏/窗口图标用绿色话机（用户要求：标准的 app 图标是绿色话机，
+	// 红色只作异常提醒留给托盘）——不设的话会继承应用图标（未注册时是红色）。
+	w.SetIcon(IconPhoneGreen)
 	a.updW = w
 	// 关闭（Alt+F4 等）：非下载态＝稍后（隐藏窗口，主窗体提示行保留）；
 	// 下载中＝取消下载（不做"后台下载"——窗口关闭后进度不可见，
@@ -273,7 +276,9 @@ func (a *App) showUpdatePopup() {
 	logx.Logger().Info("弹出更新提示窗", "version", a.lastUpdate.Info.Version)
 	a.buildUpdatePanelIfNeeded()
 	a.renderUpdateStatus(a.core.UpdateStatus())
-	a.updW.Show()
+	// 平台函数：Windows 侧在显示的同一步里把窗口改成工具窗口（不占任务栏，
+	// 否则关掉后任务栏会残留一条点不动的按钮，见 topmost_windows.go）
+	showUpdateWindow(a.updW)
 	a.updShown = true
 	moveUpdateWindowToCorner(a.updW)
 }

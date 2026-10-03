@@ -1,6 +1,6 @@
 # 本地 WebSocket 控制协议
 
-> 适用版本：1.0.4。网页通过本机 WebSocket 连接 SIP 软电话，实现拨号、接听、挂断等控制，并接收振铃、挂断等事件。
+> 适用版本：1.0.5。网页通过本机 WebSocket 连接 SIP 软电话，实现拨号、接听、挂断等控制，并接收振铃、挂断等事件。
 >
 > 本文档面向网页前端开发者；JS SDK 已封装本协议，通常无需直接读写报文。
 
@@ -64,7 +64,7 @@
 | `call.setVideo` | `{ "callId": "...", "enabled": true }` | `{ "callId": "..." }` | 视频总开关（纯本地动作，REQ-VIDEO-008）：关 = 不显示远端、不推送本地、视频窗口关闭；状态变化推 `call.video` |
 | `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态、自动接听开关） |
 | `system.setAutoAnswer` | `{ "enabled": true }` | `{ "enabled": true }` | 自动接听开关（REQ-CALL-014）：与软电话界面上的「自动接听」按钮**共用一份状态**，变更后广播 `system.autoAnswer`，桌面按钮与网页据此同步。视频来电自动接听时按「视频接听」接通（REQ-VIDEO-004） |
-| `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64" }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.4" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选 |
+| `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64", "force": false }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.5" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选；`force: true` = **强制推送**，跳过"版本必须更高"的检查（REQ-UPD-015，页面对着手动推送/回滚用；SDK 的定时查询不带它） |
 | `video.subscribe` | `{ "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 }, "local": { "maxWidth": 160, "maxHeight": 120 } }` | 见下 | 订阅视频画面（REQ-VIDEO-009）：**必定订阅远端画面**（`remote` 不传也有默认参数），`local` 可选——不传就是**不订阅本地回显**；两条通道各带各的参数（本地回显通常小一号）。订阅期间**软电话自动关闭视频窗口**，画面以二进制帧推送（见 4.1） |
 | `video.unsubscribe` | `{}` | `{ "local": false, "remote": false }` | 取消本连接的全部视频订阅（两条通道都已退订）；软电话恢复显示视频窗口 |
 | `video.setTransform` | `{ "channel": "remote", "rotate": true }` / `{ "channel": "local", "mirror": true }` / `{ "channel": "remote", "rotation": 90 }` | `{ "remote": { "rotation": 90, "mirror": false }, "local": { "rotation": 0, "mirror": false } }` | 画面旋转/水平镜像（REQ-VIDEO-012）：`rotate: true` = 顺时针 +90°，`rotation` 直接设角度，`mirror` 设水平镜像；`channel` 为 `remote`（远端画面，可省）或 `local`（本地回显）。**状态存在软电话侧、桌面与网页共用一份**，谁改都广播 `video.transform` |
@@ -73,7 +73,7 @@
 
 ```json
 {
-  "version": "1.0.4",
+  "version": "1.0.5",
   "os": "windows",
   "arch": "amd64",
   "register": { "state": "registered", "account": "1001", "reason": "" },
@@ -110,6 +110,7 @@
 
 - 由**业务前端**在查询到更高版本后调用；软电话自身不查询更新服务器。
 - `version` 不高于软电话当前版本 → 失败，错误码 `update_not_newer`（视为正常结果，不必告警）。
+- `force: true` 跳过上面这条版本比较（强制推送，REQ-UPD-015）：同版本、甚至更低版本都会被受理，用于联调与回滚；平台一致性等其余校验不变。**SDK 的定时查询不使用它**——自动更新始终按版本高低决定要不要提示。
 - 参数缺失、`url` 非 http/https、`os`/`arch` 与软电话不一致 → `invalid_params`。
 - 受理后软电话会在右下角弹出提示窗并在主界面显示更新提示行；**是否下载/重启由用户在软电话界面上确认**，本方法不会自动下载。
 - 重复告知同一版本为幂等操作（仍返回 ok）。
@@ -227,14 +228,14 @@
   |                       |<- call.established ---|
 ```
 
-### 6.3 自动更新（版本上报 → 前端告知新版本）
+### 6.3 自动更新（SDK 定时查询更新站点 → 前端告知新版本）
 
 ```
-业务前端（网页）          软电话                  业务平台
+业务前端（网页/SDK）      软电话                  更新站点
   |---- WS 连接 ---------> |                       |
   |<--- system.state ----- |（含 version/os/arch）  |
-  |---------- 查询最新版本（version/os/arch） ----->|
-  |<--------- 有更高版本：版本号 + 下载地址 --------|
+  |---------- 查询最新版本（version/os/arch） ----->|   连上后立即查一次，
+  |<--------- 有更高版本：版本号 + 下载地址 --------|   之后按 SDK 的间隔定时查
   |-- system.notifyUpdate >|                       |
   |<-- 响应 {phase:available}                      |
   |<--- system.update -----|（右下角提示窗 + 主窗体提示行；等待用户点击）
@@ -243,6 +244,12 @@
   |<--- system.update -----|（ready；无通话则自动重启，通话中等待通话结束）
   |         ...软电话替换可执行文件并重启，WS 断开，重连后重新上报...
 ```
+
+查询由 **JS SDK** 完成（`updateUrl` 在网页初始化 SDK 时告知，`checkUpdate` / `setUpdateSource`）：
+站点接口与字段见其《REST API》的 `GET /api/v1/apps/{app}/check`。SDK 只做搬运——
+**不比较版本高低**（裁决在站点与软电话），查到的结果经 SDK 本地事件 `update.check` 给页面
+（本地事件，不经过 WS，也不在本文档第 4 节的事件表里）。软电话侧没有任何轮询逻辑
+（REQ-UPD-009：WS 只能告知，下载与重启必须由用户在软电话界面上点击）。
 
 ## 7. 安全说明
 

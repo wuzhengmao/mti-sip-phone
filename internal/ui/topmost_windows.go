@@ -382,16 +382,96 @@ func moveWindowToCorner(w fyne.Window, titlePrefix string, wDip, hDip float32, p
 // 现象极具迷惑性：来电振铃时三行正常（ringFill 定时重绘掩盖了），一点接听就只剩两行。
 // 保留标题栏后 GLFW 的缓存始终有效，画布 == 客户区，问题从源头消失。
 func positionCallWindow(hwnd, width, height uintptr) {
+	setToolWindowStyle(hwnd) // 兜底：面板同样不占任务栏（见 showWindowAsTool）
 	positionCornerWindow(hwnd, width, height)
 }
 
-// positionUpdateWindow 定位更新提示窗（同通话面板，尺寸另配），
-// 并把窗口从任务栏隐藏（临时浮层不占任务栏按钮，与通话面板的
-// 有意保留不同）。
+// positionUpdateWindow 定位更新提示窗（同通话面板，尺寸另配）：
+// 尺寸交给 Fyne（对齐通话面板），任务栏样式已在显示时处理（见 showWindowAsTool）。
 func positionUpdateWindow(hwnd, width, height uintptr) {
-	// splash 窗口是 WS_POPUP，本就没有任务栏按钮，无需再 WS_EX_TOOLWINDOW /
-	// ITaskbarList::DeleteTab；尺寸同样交给 Fyne（对齐通话面板）。
+	setToolWindowStyle(hwnd) // 兜底：万一还没改过（正常已在显示前改好）
 	positionCornerWindow(hwnd, width, height)
+}
+func showUpdateWindow(w fyne.Window) {
+	showWindowAsTool(w, updateWindowTitlePrefix)
+}
+
+// showCallWindow 显示通话面板，同样按工具窗口显示（不占任务栏）。
+func showCallWindow(w fyne.Window) {
+	showWindowAsTool(w, callWindowTitlePrefix)
+}
+
+// showWindowAsTool 显示窗口，并保证它**不会被外壳建成任务栏按钮**。
+//
+// 为什么需要这么绕：GLFW 给每个顶层窗口都加了 WS_EX_APPWINDOW
+// （glfw/src/win32_window.c 的 getWindowExStyle 写死），而该样式的作用就是
+// "强制生成任务栏按钮"——它压过 WS_POPUP 本来不占任务栏的语义。
+// 只在窗口显示之后异步改样式不够：外壳是**状态驱动**地扫描任务栏窗口，
+// 往往已经按 APPWINDOW 把按钮建出来了，之后再改样式或隐藏都不会把这个按钮
+// 收回去（用户实测：点「稍后」关掉更新提示窗后，任务栏还残留点不动的按钮）。
+// 所以这里在**第一次显示的同一步内**走一遍 Hide → 改成 WS_EX_TOOLWINDOW →
+// Show：外壳还没轮到处理"显示"这件事，窗口已经是工具窗口了，按钮根本不会建。
+// 后续的重复显示（isToolWindow 已为真）直接 Show，不折腾、不闪。
+func showWindowAsTool(w fyne.Window, titlePrefix string) {
+	w.Show() // 首次 Show 才会创建 GLFW 窗口
+	hwnd := findWindowByTitlePrefix(titlePrefix)
+	if hwnd == 0 || isToolWindow(hwnd) {
+		return
+	}
+	w.Hide()
+	setToolWindowStyle(hwnd)
+	w.Show()
+	logx.Logger().Debug("窗口已按工具窗口显示（不占任务栏）", "title", titlePrefix, "hwnd", hwnd)
+}
+
+// exStyle 常量与读写的公共部分（32 位回退见下方注释）。
+const (
+	gwlExStyle    = ^uintptr(19) // GWL_EXSTYLE = -20
+	wsExAppWindow = 0x00040000   // 强制任务栏按钮（GLFW 给每个窗口都加的）
+	wsExToolWnd   = 0x00000080   // 工具窗口：不占任务栏
+)
+
+// exStyleProcs 返回读写扩展样式的两个导出。
+//
+// ⚠️ 32 位 user32.dll 没有 GetWindowLongPtrW / SetWindowLongPtrW 导出，
+// LazyProc.Call 找不到过程会直接 panic（GUI 子系统无控制台，panic 毫无可见
+// 输出）；32 位下 LONG_PTR 与 LONG 同宽，回退到 GetWindowLongW / SetWindowLongW
+// 语义等价（同 CLAUDE.md「32 位 Win32 调用」条）。
+func exStyleProcs() (getLong, setLong *syscall.LazyProc) {
+	user32 := syscall.NewLazyDLL("user32.dll")
+	getLong = user32.NewProc("GetWindowLongPtrW")
+	setLong = user32.NewProc("SetWindowLongPtrW")
+	if getLong.Find() != nil || setLong.Find() != nil {
+		getLong = user32.NewProc("GetWindowLongW")
+		setLong = user32.NewProc("SetWindowLongW")
+	}
+	return getLong, setLong
+}
+
+// isToolWindow 报告窗口是否已经是"工具窗口"（WS_EX_TOOLWINDOW 已置、
+// WS_EX_APPWINDOW 已清）——即已经处理过、不占任务栏。
+func isToolWindow(hwnd uintptr) bool {
+	if hwnd == 0 {
+		return true
+	}
+	getLong, _ := exStyleProcs()
+	ex, _, _ := getLong.Call(hwnd, gwlExStyle)
+	return ex&wsExToolWnd != 0 && ex&wsExAppWindow == 0
+}
+
+// setToolWindowStyle 把 WS_EX_APPWINDOW 换成 WS_EX_TOOLWINDOW（工具窗口不占
+// 任务栏）。幂等：已经改过就什么都不做。
+func setToolWindowStyle(hwnd uintptr) {
+	if hwnd == 0 {
+		return
+	}
+	getLong, setLong := exStyleProcs()
+	ex, _, _ := getLong.Call(hwnd, gwlExStyle)
+	want := (ex | wsExToolWnd) &^ uintptr(wsExAppWindow)
+	if want == ex {
+		return
+	}
+	setLong.Call(hwnd, gwlExStyle, want)
 }
 
 // guid Win32 GUID 布局。

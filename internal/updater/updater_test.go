@@ -106,6 +106,26 @@ func TestNotifyNotNewer(t *testing.T) {
 	}
 }
 
+// TestNotifyForce 强制推送（测试页「推送更新」按钮用）跳过版本高低检查，
+// 但平台一致性等其余校验照旧。
+func TestNotifyForce(t *testing.T) {
+	u := newTestUpdater(t, Options{ExePath: filepath.Join(t.TempDir(), "app.exe")})
+	for _, v := range []string{core.Version, "1.0.0"} {
+		err := u.Notify(core.UpdateInfo{Version: v, URL: "http://x/a.exe", Force: true})
+		if err != nil {
+			t.Errorf("强制推送 %s：期望通过，实际 %v", v, err)
+		}
+	}
+	if got := u.Status(); got.Phase != core.UpdateAvailable || !got.Info.Force {
+		t.Errorf("状态应为 available 且带 Force 标记，实际 %s force=%v", got.Phase, got.Info.Force)
+	}
+	// 强制推送不豁免平台校验
+	u2 := newTestUpdater(t, Options{ExePath: filepath.Join(t.TempDir(), "app.exe")})
+	if err := u2.Notify(core.UpdateInfo{Version: "1.0.0", URL: "http://x/a.exe", OS: "plan9", Force: true}); err == nil {
+		t.Error("强制推送时平台不符仍应报错")
+	}
+}
+
 func TestNotifyIdempotentAndEvents(t *testing.T) {
 	bus := core.NewBus()
 	sub := bus.Subscribe()
