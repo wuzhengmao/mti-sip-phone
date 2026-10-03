@@ -23,6 +23,7 @@ import (
 
 	"mti-sip-phone/internal/audio"
 	"mti-sip-phone/internal/autostart"
+	"mti-sip-phone/internal/calllog"
 	"mti-sip-phone/internal/config"
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
@@ -131,6 +132,18 @@ func main() {
 	app := core.New(cfg, nil, bus)
 	app.SetConfigPath(cfgPath)
 
+	// 通话记录（REQ-CALL-007）：本地 SQLite（纯 Go 驱动，不影响交叉编译）。
+	// 打不开只降级为"本次运行不记录"，不阻断启动。Close 幂等，退出收尾与
+	// defer 都会调（见下方 spawnNewProcessIfRequested 之前那次）。
+	var closeCallLog = func() {}
+	if store, err := calllog.Open(filepath.Join(cfgDir, "call-log.db")); err != nil {
+		logx.Logger().Warn("打开通话记录数据库失败，本次运行不记录通话记录", "err", err)
+	} else {
+		app.SetCallLog(store)
+		closeCallLog = func() { _ = store.Close() }
+	}
+	defer closeCallLog()
+
 	// 自动更新（REQ-UPD-*）：业务前端经 WS 告知新版本，用户在界面上确认后
 	// 下载、替换当前可执行文件并重启。Cleanup 清理上次更新的残留文件，
 	// 必须放在单实例锁之后（避免删到另一实例正在使用的文件）。
@@ -236,6 +249,7 @@ func main() {
 		runGUI(app, audioMgr, cfg, cfgPath, ctx, restart)
 		stop()
 		shutdown(app, tel) // 退出前注销 SIP（REQ-ACC-009）
+		closeCallLog()     // 先放掉数据库，避免新进程启动时撞上旧库的写锁
 		spawnNewProcessIfRequested(&restartRequested, exePath, releaseLock)
 		return
 	}
@@ -243,6 +257,7 @@ func main() {
 	<-ctx.Done()
 	logx.Logger().Info("收到退出信号，正在关闭")
 	shutdown(app, tel)
+	closeCallLog()
 	spawnNewProcessIfRequested(&restartRequested, exePath, releaseLock)
 }
 

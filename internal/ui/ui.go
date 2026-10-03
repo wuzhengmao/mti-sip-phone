@@ -68,6 +68,11 @@ type App struct {
 	autoAnswerBtn *widget.Button
 	callBtn       *compactButton
 	settingsBtn   *widget.Button
+	historyBtn    *widget.Button // 通话记录（REQ-UI-031，位于设置按钮左侧）
+
+	// ---- 通话记录（REQ-CALL-007，与配置页一样切在主窗体内）----
+	historyPage *fyne.Container // 记录页内容（buildHistoryPage 构建）
+	history     *historyState   // 列表状态（见 ui_history.go）
 
 	// 设置页控件
 	settingsScroll    *container.Scroll
@@ -278,6 +283,7 @@ func (a *App) buildMainWindow() {
 
 	a.buildDialPage()
 	a.buildSettingsPage()
+	a.buildHistoryPage()
 
 	a.mainContent = container.NewStack(a.dialPage)
 	w.SetContent(a.mainContent)
@@ -365,9 +371,13 @@ func (a *App) buildDialPage() {
 	statusRow := fyne.NewContainerWithLayout(statusRowLayout{}, a.regDot, a.regLabel)
 	a.settingsBtn = widget.NewButtonWithIcon("", theme.SettingsIcon(), a.showSettings)
 	a.settingsBtn.Importance = widget.LowImportance
+	// 通话记录按钮：放在设置按钮**左边**（REQ-UI-031）
+	a.historyBtn = widget.NewButtonWithIcon("", theme.HistoryIcon(), a.showHistory)
+	a.historyBtn.Importance = widget.LowImportance
 
-	// 顶栏：圆点+号码靠左，设置按钮靠右，自动接听按钮居中
-	topBar := container.NewBorder(nil, nil, statusRow, a.settingsBtn,
+	// 顶栏：圆点+号码靠左，通话记录+设置按钮靠右，自动接听按钮居中
+	topBar := container.NewBorder(nil, nil, statusRow,
+		container.NewHBox(a.historyBtn, a.settingsBtn),
 		container.NewCenter(a.autoAnswerBtn))
 
 	// ---- 号码输入框：可下拉（最近 5 次呼叫号码，去重）----
@@ -448,9 +458,8 @@ func (a *App) buildDialPage() {
 
 // buildSettingsPage 设置页：账户、音频设备、日志、网页接入（REQ-UI-006/012）。
 func (a *App) buildSettingsPage() {
-	// ---- 顶部栏：返回按钮 ----
-	backBtn := widget.NewButtonWithIcon("返回", theme.NavigateBackIcon(), a.showDialPage)
-	backBtn.Importance = widget.LowImportance
+	// ---- 顶部栏：返回图标 + 标题（与通话记录页同款，REQ-UI-031）----
+	topBar := pageTopBar("配置", a.showDialPage, nil)
 
 	// ---- SIP 账户 ----
 	a.accEnabled = widget.NewCheck("启用账户", nil)
@@ -616,7 +625,7 @@ func (a *App) buildSettingsPage() {
 	versionText.TextSize = a.fyne.Settings().Theme().Size(theme.SizeNameCaptionText)
 
 	a.settingsPage = container.NewBorder(
-		container.NewHBox(backBtn),
+		topBar,
 		container.NewHBox(versionText),
 		nil, nil,
 		scroll,
@@ -929,7 +938,7 @@ func (a *App) applyMainCallMode(inCall bool) {
 	for _, c := range []interface {
 		Enable()
 		Disable()
-	}{a.settingsBtn, a.autoAnswerBtn, a.callBtn, a.videoCallBtn} {
+	}{a.settingsBtn, a.historyBtn, a.autoAnswerBtn, a.callBtn, a.videoCallBtn} {
 		setEnabled(c, !inCall)
 	}
 }
@@ -1264,6 +1273,9 @@ func (a *App) onEvent(ev core.Event) {
 		}
 
 	case "call.terminated", "call.failed":
+		// 通话记录窗口开着就刷新（新记录在 core 侧先入队再发事件，这里查得到）。
+		// 必须在下面 call.failed 的提前 return 之前。
+		a.historyOnCallEnded()
 		// 停止振铃音，并按结果放提示音：遇忙放忙音，其余放挂断音
 		reason := ""
 		missed := false

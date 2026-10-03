@@ -43,21 +43,27 @@ func missedNotificationText(c *core.Call, ringFor time.Duration) (title, body st
 	}
 	body = who
 	if ringFor > 0 {
-		body += " - 振铃 " + formatRingDuration(ringFor)
+		body += " - 振铃 " + formatDurationCN(ringFor)
 	}
 	return title, sanitizeNotifyText(body, notifyBodyMax)
 }
 
-// formatRingDuration 振铃时长文案：不足一分钟用秒，超过用「N 分 N 秒」。
-func formatRingDuration(d time.Duration) string {
+// formatDurationCN 时长中文文案（未接通知的振铃时长与通话记录共用）：
+// 不足 1 秒按 1 秒（响过/通过就有时长，避免出现「0 秒」），不足 1 分钟用秒，
+// 不足 1 小时用「N 分 N 秒」，再长用「N 小时 N 分」（不然会念成「65 分 3 秒」）。
+func formatDurationCN(d time.Duration) string {
 	sec := int(d.Seconds())
 	if sec < 1 {
-		sec = 1 // 响过就有时长，避免出现「0 秒」
+		sec = 1
 	}
-	if sec < 60 {
+	switch {
+	case sec < 60:
 		return fmt.Sprintf("%d 秒", sec)
+	case sec < 3600:
+		return fmt.Sprintf("%d 分 %d 秒", sec/60, sec%60)
+	default:
+		return fmt.Sprintf("%d 小时 %d 分", sec/3600, (sec%3600)/60)
 	}
-	return fmt.Sprintf("%d 分 %d 秒", sec/60, sec%60)
 }
 
 // sanitizeNotifyText 清理来自 SIP 报文的文本：去掉控制字符（换行会破坏

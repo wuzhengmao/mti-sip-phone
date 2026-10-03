@@ -431,6 +431,7 @@ const dialCallButtonHeight = 32
 // 通话面板按钮配色（与主界面主题色观感一致）。
 var (
 	colorDangerRed     = color.NRGBA{R: 0xe5, G: 0x39, B: 0x35, A: 0xff} // 挂断
+	colorDangerDark    = color.NRGBA{R: 0xa8, G: 0x18, B: 0x18, A: 0xff} // 深红（通话记录页「清空通话记录」按钮）
 	colorSuccessGreen  = color.NRGBA{R: 0x43, G: 0xa0, B: 0x47, A: 0xff} // 接听/呼叫
 	colorHoldYellow    = color.NRGBA{R: 0xfb, G: 0xc0, B: 0x2d, A: 0xff} // 保持
 	colorHoldBlue      = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff} // 取消保持/开关开
@@ -485,7 +486,9 @@ func newCompactTextButton(text string, iconRes fyne.Resource, bgColor, labelColo
 // 文字居中、四周留主题内边距，宽度随文字自适应；圆角比图标按钮更小
 // （提示窗按钮观感更方正）。
 func newCompactTextOnlyButton(text string, bgColor, labelColor color.NRGBA, onTap func()) *compactButton {
-	b := &compactButton{onTap: onTap}
+	// baseBg 必须一起设：Disable/Enable 会用它还原背景（早先漏设，禁用过
+	// 再启用的纯文字按钮会变成透明底）
+	b := &compactButton{onTap: onTap, baseBg: bgColor}
 	b.bg = canvas.NewRectangle(bgColor)
 	b.bg.CornerRadius = 3
 	b.label = canvas.NewText(text, labelColor)
@@ -535,6 +538,22 @@ func (b *compactButton) SetLabelColor(c color.NRGBA) {
 // SetBg 更新底色。
 func (b *compactButton) SetBg(c color.NRGBA) {
 	b.bg.FillColor = c
+	b.bg.Refresh()
+}
+
+// SetIconSize 覆盖图标尺寸（默认是按钮尺寸的 0.55）。摄像头这类扁宽的图形
+// 在同尺寸下看着偏小，可以单独放大一点（不要超过按钮尺寸，超出会被裁掉）。
+func (b *compactButton) SetIconSize(size float32) {
+	if b.icon == nil {
+		return
+	}
+	b.icon.SetMinSize(fyne.NewSize(size, size))
+	b.Refresh()
+}
+
+// SetCornerRadius 覆盖圆角半径（默认 6；通话记录行内按钮用小圆角）。
+func (b *compactButton) SetCornerRadius(r float32) {
+	b.bg.CornerRadius = r
 	b.bg.Refresh()
 }
 
@@ -819,25 +838,40 @@ func (a *App) withDialogTheme(d dialog.Dialog) {
 	})
 }
 
+// 弹窗一律显示在**父窗口**上（Fyne 把对话框画在父窗口的画布上）：父窗口
+// 隐藏时弹窗用户根本看不见。本项目所有页面都在主窗体内，默认父窗口就是
+// 主窗体；需要指定时用下面带 In 的变体。**永远不要传 nil**（会 panic）。
+
 // showInfo 信息弹窗（按钮文案"确定"，覆盖 Fyne 中文 locale 的"好"）。
-func (a *App) showInfo(title, content string) {
-	d := dialog.NewInformation(title, content, a.mainW)
-	d.SetDismissText("确定")
-	a.withDialogTheme(d)
-	d.Show()
-}
+func (a *App) showInfo(title, content string) { a.showInfoIn(a.mainW, title, content) }
 
 // showError 错误弹窗（按钮文案"确定"）。
-func (a *App) showError(err error) {
-	d := dialog.NewError(err, a.mainW)
-	d.SetDismissText("确定")
-	a.withDialogTheme(d)
-	d.Show()
-}
+func (a *App) showError(err error) { a.showErrorIn(a.mainW, err) }
 
 // showConfirm 确认弹窗（确定 / 取消）。
 func (a *App) showConfirm(title, content string, cb func(bool)) {
-	d := dialog.NewConfirm(title, content, cb, a.mainW)
+	a.showConfirmIn(a.mainW, title, content, cb)
+}
+
+// showInfoIn 在指定窗口弹信息框。
+func (a *App) showInfoIn(parent fyne.Window, title, content string) {
+	d := dialog.NewInformation(title, content, parent)
+	d.SetDismissText("确定")
+	a.withDialogTheme(d)
+	d.Show()
+}
+
+// showErrorIn 在指定窗口弹错误框。
+func (a *App) showErrorIn(parent fyne.Window, err error) {
+	d := dialog.NewError(err, parent)
+	d.SetDismissText("确定")
+	a.withDialogTheme(d)
+	d.Show()
+}
+
+// showConfirmIn 在指定窗口弹确认框（确定 / 取消）。
+func (a *App) showConfirmIn(parent fyne.Window, title, content string, cb func(bool)) {
+	d := dialog.NewConfirm(title, content, cb, parent)
 	d.SetConfirmText("确定")
 	d.SetDismissText("取消")
 	a.withDialogTheme(d)
