@@ -24,7 +24,7 @@ declare class SipPhoneSDK {
     updateUrl?: string;
     /** 更新站点上的应用 ID，默认 'mti-sip-phone' */
     appId?: string;
-    /** 查询间隔毫秒，默认 30 分钟（钳制到 60 秒 ~ 24 小时） */
+    /** 查询间隔毫秒，默认 5 分钟（钳制到 60 秒 ~ 24 小时） */
     updateInterval?: number;
     /** 发布通道（如 beta），默认站点默认通道 */
     updateChannel?: string;

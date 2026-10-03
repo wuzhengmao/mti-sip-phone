@@ -343,7 +343,8 @@
     url: wsBase,
     autoReconnect: true,
     updateUrl: $('updSite').value.trim(),
-    appId: $('updAppId').value.trim() || 'mti-sip-phone'
+    appId: $('updAppId').value.trim() || 'mti-sip-phone',
+    updateInterval: 60 * 1000 // 测试页查得勤一点：1 分钟一次（SDK 默认 5 分钟）
   });
 
   var currentCall = null; // { callId, direction, state }
