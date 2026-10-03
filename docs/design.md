@@ -127,8 +127,8 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 
 ### 4.3 `internal/sip`（信令层）
 
-- **职责**：注册（Digest、expires×0.7 续注册、失败指数退避、STUN 就绪后立即重注册）、呼出/呼入、保持（re-INVITE）、DTMF 发送、媒体引擎的创建与移交。
-- **关键文件**：`phone.go`（全部信令与竞态处理）、`phone_video.go`（视频协商/摄像头联动）。
+- **职责**：注册（Digest、expires×0.7 续注册、失败指数退避、STUN 就绪后立即重注册、**休眠唤醒/网络切换看护**）、呼出/呼入、保持（re-INVITE）、DTMF 发送、媒体引擎的创建与移交。
+- **关键文件**：`phone.go`（全部信令与竞态处理）、`phone_video.go`（视频协商/摄像头联动）、`netwatch.go`（注册看护：墙钟跳变 + 出向地址巡检 → 立即重注册，见 REQ-CALL-009）。
 - **注意**：**挂断竞态处理（603 先于 ctx cancel、CANCEL 与 2xx 竞态补 ACK+BYE、保持 re-INVITE 的 ACK 必须复用自己的 From/CallID/CSeq）是历史 bug 的结晶，勿"简化"**。
 
 ### 4.4 `internal/media`（媒体引擎）
@@ -220,6 +220,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 | 视频窗口/回显/旋转镜像 | `internal/ui/ui_video.go` + `internal/media/video_engine.go` |
 | 更新提示窗 | `internal/ui/ui_update.go` + `internal/updater/*` |
 | 注册/呼叫/保持信令 | `internal/sip/phone.go`（先读 CLAUDE.md 的 sipgo 陷阱） |
+| 休眠/切网后恢复注册 | `internal/sip/netwatch.go`（墙钟跳变用 `UnixNano` 差，勿改回 `time.Sub`） |
 | SDP / 编解码协商 | `internal/media/sdp.go` + `engine.go`（`codecPT`、`activePT`、`SDPDirectionFor`） |
 | 抖动缓冲/延迟 | `internal/media/jitter.go`（注意播放缓冲封顶规则） |
 | 音频设备 / 提示音 / 按键音 | `internal/audio/manager.go`、`backend_malgo.go`、`tone.go` |

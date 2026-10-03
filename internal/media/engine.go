@@ -116,6 +116,9 @@ type Engine struct {
 	// lastTrimLog 播放缓冲截断日志限频（避免刷屏）
 	lastTrimLog time.Time
 
+	// probe 媒体诊断探针（SIP_PHONE_AUDIODUMP=1 时非 nil，见 debug_probe.go）
+	probe *mediaProbe
+
 	stop chan struct{}
 	wg   sync.WaitGroup
 
@@ -152,6 +155,7 @@ func NewEngine(localIP string) (*Engine, error) {
 		stop:      make(chan struct{}),
 	}
 	e.activePT.Store(uint32(e.codec.PayloadType()))
+	e.probe = newMediaProbe(e.localPort)
 	e.rtcp = newRTCPSession(rtcpConn, e)
 	logx.Logger().Debug("媒体引擎已创建", "codec", e.codec.Name(),
 		"支持", codecSummary(), "localPort", e.localPort, "rtcpPort", e.localPort+1)
@@ -168,7 +172,11 @@ func (e *Engine) payloadType() uint8 { return uint8(e.activePT.Load()) }
 // PayloadType 线上使用的音频负载类型号（answer 必须复用它，RFC 3264）。
 func (e *Engine) PayloadType() uint8 { return e.payloadType() }
 
-// bindRTPRTCP 绑定一对连续 UDP 端口（RTP 与 RTCP）。
+// bindRTPRTCP 绑定一对连续 UDP 端口（RTP 与 RTCP），音频与视频各绑一对。
+//
+// RFC 3550 约定 **RTP 用偶数端口、RTCP = RTP + 1**：服务端/网关普遍按这个
+// 约定配对（奇数 RTP 会被判为不规范，个别实现直接不予互通），所以随机端口
+// 命中奇数时重选，直到拿到偶数端口对。
 func bindRTPRTCP(ip string) (*net.UDPConn, *net.UDPConn, error) {
 	ipAddr := net.ParseIP(ip)
 	for i := 0; i < 50; i++ {
@@ -177,9 +185,9 @@ func bindRTPRTCP(ip string) (*net.UDPConn, *net.UDPConn, error) {
 			return nil, nil, err
 		}
 		port := c1.LocalAddr().(*net.UDPAddr).Port
-		if port >= 65535 {
+		if port >= 65535 || port%2 != 0 {
 			_ = c1.Close()
-			continue
+			continue // 奇数端口不合 RFC 3550 约定（>=65535 也无从再取 +1），重选
 		}
 		c2, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ipAddr, Port: port + 1})
 		if err != nil {
@@ -188,7 +196,7 @@ func bindRTPRTCP(ip string) (*net.UDPConn, *net.UDPConn, error) {
 		}
 		return c1, c2, nil
 	}
-	return nil, nil, fmt.Errorf("绑定 RTP/RTCP 连续端口失败")
+	return nil, nil, fmt.Errorf("绑定 RTP/RTCP 端口对失败（RTP 需为偶数端口）")
 }
 
 // LocalPort 本地 RTP 端口（用于 SDP）。
@@ -242,6 +250,7 @@ func (e *Engine) Start() {
 	e.wg.Add(1)
 	go e.recvLoop()
 	e.rtcp.start()
+	e.probe.start(e) // 诊断探针（未启用时为 nil，零开销）
 	// NAT 打洞：向对端 RTP 地址发送静音帧，让 NAT 建立端口映射。
 	// 对称 NAT 下对端发来的媒体包（如回铃音）必须先有出向包放行，
 	// 否则 rx=0（回铃音听不到——bug 修复）。
@@ -290,6 +299,9 @@ func (e *Engine) recvLoop() {
 		}
 
 		e.rxPackets.Add(1)
+		if e.probe != nil {
+			e.probe.addPkt()
+		}
 		// 首个外来包日志（Info 级，排查用）：确认对端 RTP 是否
 		// 到达本机——若从未打印则对端媒体包从未到达（网络/对方未发送）
 		if e.rxPackets.Load() == 1 {
@@ -351,6 +363,9 @@ func (e *Engine) playPush(ssrc uint32, seq uint16, frame []int16) {
 		// 乱序 / 过期包：丢弃
 		return
 	}
+	if e.probe != nil {
+		e.probe.writeRx(frame) // 诊断：真正进入播放缓冲的音频样本
+	}
 	// 序号回绕（65535 → 0）：扩展序号 +1（RTCP 报告用）
 	if seq < e.lastSeq {
 		e.extSeq++
@@ -383,7 +398,8 @@ func (e *Engine) playPush(ssrc uint32, seq uint16, frame []int16) {
 			e.lastTrimLog = time.Now()
 			logx.Logger().Warn("播放缓冲超深已截断（声音延迟被压回目标值）",
 				"丢弃样本", dropped, "当前深度ms", e.ring.Depth()*1000/8000,
-				"累计丢弃", e.ring.Trimmed())
+				"累计丢弃", e.ring.Trimmed(),
+				"切点能量比", fmt.Sprintf("%.2f", e.ring.CutRatio()))
 		}
 	}
 }
@@ -408,10 +424,16 @@ func (e *Engine) fillLoss(n, samples int) {
 			if f == nil {
 				break
 			}
+			if e.probe != nil {
+				e.probe.writeFill(len(f))
+			}
 			e.ring.Write(f)
 		}
 	}
 	if rest := n - used; rest > 0 {
+		if e.probe != nil {
+			e.probe.writeFill(rest * samples)
+		}
 		e.ring.Write(make([]int16, rest*samples))
 	}
 }
@@ -535,6 +557,10 @@ func (e *Engine) ReadPlayback(buf []int16) int {
 	}
 	for i := n; i < len(buf); i++ {
 		buf[i] = 0
+	}
+	if e.probe != nil {
+		e.probe.addRead(len(buf), n)
+		e.probe.writePlay(buf) // 诊断：设备实际拿到的样本（含补的静音）
 	}
 	return len(buf)
 }
@@ -694,6 +720,7 @@ func (e *Engine) Stats() (rx, lost, tx uint64) {
 
 // Close 释放引擎：发 RTCP BYE、停收发循环、关端口。
 func (e *Engine) Close() {
+	e.probe.close()
 	e.rtcp.sendBye()
 	select {
 	case <-e.stop:

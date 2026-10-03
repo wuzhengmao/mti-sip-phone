@@ -199,3 +199,24 @@ func TestPeerDTMFPT(t *testing.T) {
 		t.Errorf("未声明 telephone-event 时 PT = %d，期望 0", got)
 	}
 }
+
+// TestBindRTPRTCPEvenPort RFC 3550 约定：RTP 用偶数值端口、RTCP = RTP + 1
+// （服务端/网关按此配对，奇数 RTP 会被判为不规范）。
+func TestBindRTPRTCPEvenPort(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		c1, c2, err := bindRTPRTCP("127.0.0.1")
+		if err != nil {
+			t.Fatalf("绑定 RTP/RTCP 端口对失败: %v", err)
+		}
+		p1 := c1.LocalAddr().(*net.UDPAddr).Port
+		p2 := c2.LocalAddr().(*net.UDPAddr).Port
+		_ = c1.Close()
+		_ = c2.Close()
+		if p1%2 != 0 {
+			t.Fatalf("RTP 端口必须为偶数，实际 %d", p1)
+		}
+		if p2 != p1+1 {
+			t.Fatalf("RTCP 端口应为 RTP+1，实际 %d（RTP %d）", p2, p1)
+		}
+	}
+}

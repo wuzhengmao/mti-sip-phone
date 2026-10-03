@@ -638,18 +638,49 @@ func (a *App) OnEstablished(callID string) {
 
 // OnTerminated 通话结束。
 func (a *App) OnTerminated(callID, reason string) {
-	if a.updateCall(callID, func(c *Call) { c.State = CallTerminated }) {
-		logx.Logger().Info("通话结束", "callId", callID, "reason", reason)
-		a.publishCall("call.terminated", callID, "reason", reason)
+	var missed bool
+	if !a.updateCall(callID, func(c *Call) {
+		missed = missedOnEnd(c, reason)
+		c.State = CallTerminated
+	}) {
+		return
 	}
+	logx.Logger().Info("通话结束", "callId", callID, "reason", reason, "missed", missed)
+	a.publishCall("call.terminated", callID, "reason", reason, "missed", missed)
 }
 
 // OnFailed 呼叫失败。
 func (a *App) OnFailed(callID, reason string) {
-	if a.updateCall(callID, func(c *Call) { c.State = CallTerminated }) {
-		logx.Logger().Info("呼叫失败", "callId", callID, "reason", reason)
-		a.publishCall("call.failed", callID, "reason", reason)
+	var missed bool
+	if !a.updateCall(callID, func(c *Call) {
+		missed = missedOnEnd(c, reason)
+		c.State = CallTerminated
+	}) {
+		return
 	}
+	logx.Logger().Info("呼叫失败", "callId", callID, "reason", reason, "missed", missed)
+	a.publishCall("call.failed", callID, "reason", reason, "missed", missed)
+}
+
+// isHandledLocally 结束原因是否属于「本端当场处理」：振铃中拒接（603，
+// sip 层 reason=rejected）与本端挂断（local_hangup）都算用户已处理，
+// 不算未接来电（REQ-UI-010：用户当场看到并处理了，不该再弹桌面通知）。
+func isHandledLocally(reason string) bool {
+	switch reason {
+	case "rejected", "local_hangup":
+		return true
+	}
+	return false
+}
+
+// missedOnEnd 是否未接来电：呼入 + 结束前仍在振铃（从未接通）+ 非本端当场处理。
+//
+// ⚠️ 必须在 updateCall 的回调内调用：① 与状态更新同一临界区，不会与并发的
+// OnEstablished 交错；② a.calls 从不删除已结束通话、sip 层也可能对同一通话
+// 二次上报结束，用 State == CallRinging 判定天然幂等（第二次进来时状态已是
+// CallTerminated），用 "!= CallEstablished" 则会重复判未接、重复弹通知。
+func missedOnEnd(c *Call, reason string) bool {
+	return c.Direction == "incoming" && c.State == CallRinging && !isHandledLocally(reason)
 }
 
 // OnRegisterState 注册状态变化。

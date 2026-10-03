@@ -52,7 +52,7 @@ func startTestStunServer(t *testing.T) string {
 // TestStunDiscover STUN 探测：返回源地址映射。
 func TestStunDiscover(t *testing.T) {
 	addr := startTestStunServer(t)
-	ip, err := stunDiscover(addr)
+	ip, err := stunDiscoverCtx(context.Background(), addr)
 	if err != nil {
 		t.Fatalf("STUN 探测失败: %v", err)
 	}

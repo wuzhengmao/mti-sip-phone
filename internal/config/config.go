@@ -20,6 +20,7 @@ type Account struct {
 	Port        int    `json:"port"`        // SIP 服务器端口，默认 5060
 	Expires     int    `json:"expires"`     // 注册到期时间（秒），默认 300（REQ-ACC-018）
 	RPort       bool   `json:"rport"`       // 启用 rport（NAT 穿透），默认 true（REQ-ACC-016）
+	ChkOpt      bool   `json:"optchk"`      // 启用服务端心跳检测：注册的 User-Agent 带 optchk，服务端据此发 OPTIONS，默认 true（REQ-ACC-020）
 	STUNEnabled bool   `json:"stunEnabled"` // 启用 STUN 公网地址探测（REQ-ACC-017）
 	STUNServer  string `json:"stunServer"`  // STUN 服务器地址，默认 stun.l.google.com:19302
 	Proxy       string `json:"proxy"`       // 出站 SIP 代理（host:port，可选，REQ-ACC-019）
@@ -101,6 +102,7 @@ func Default() *Config {
 			Port:       5060,
 			Expires:    300,
 			RPort:      true,
+			ChkOpt:     true,
 			STUNServer: "stun.l.google.com:19302",
 			Transport:  "udp",
 		},

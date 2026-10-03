@@ -110,6 +110,7 @@ func (b *malgoBackend) Start(micID, speakerID string, engine *media.Engine) erro
 	micBuf := make([]int16, maxCallbackFrames)
 
 	onFrames := func(output, input []byte, frameCount uint32) {
+		diagStat(frameCount)
 		if frameCount > maxCallbackFrames {
 			frameCount = maxCallbackFrames
 		}
@@ -140,6 +141,17 @@ func (b *malgoBackend) Start(micID, speakerID string, engine *media.Engine) erro
 		return fmt.Errorf("启动音频设备失败: %w", err)
 	}
 	b.device = device
+	// 设备实际形态（排查音频问题的第一手线索）：内部采样率/格式与请求不一致
+	// 说明走了 miniaudio 的重采样路径，播放缓冲的消费速率可能受影响。
+	logx.Logger().Info("音频设备已打开",
+		"请求采样率", deviceConfig.SampleRate,
+		"采样率", device.SampleRate(),
+		"播放内部采样率", device.PlaybackInternalSampleRate(),
+		"采集内部采样率", device.CaptureInternalSampleRate(),
+		"播放格式", device.PlaybackFormat(),
+		"采集格式", device.CaptureFormat(),
+		"播放声道", device.PlaybackChannels(),
+		"采集声道", device.CaptureChannels())
 	return nil
 }
 
