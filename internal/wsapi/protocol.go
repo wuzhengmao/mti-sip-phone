@@ -47,6 +47,7 @@ const (
 	MethodMuteMic           = "call.muteMic"         // 麦克风开关（纯本地，REQ-UI-023）
 	MethodMuteSpeaker       = "call.muteSpeaker"     // 扬声器开关（纯本地，REQ-UI-023）
 	MethodSetVideo          = "call.setVideo"        // 视频总开关（纯本地，REQ-VIDEO-008）
+	MethodDTMF              = "call.dtmf"            // 发送 DTMF（RFC 4733，REQ-CALL-006）
 	MethodGetState          = "system.getState"      // 查询状态
 	MethodSetAutoAnswer     = "system.setAutoAnswer" // 自动接听开关（桌面按钮与网页共用一份）
 	MethodNotifyUpdate      = "system.notifyUpdate"  // 前端告知新版本

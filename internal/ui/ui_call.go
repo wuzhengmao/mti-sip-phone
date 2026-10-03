@@ -59,6 +59,14 @@ func (a *App) buildCallPanelIfNeeded() {
 			_ = a.core.Hangup(a.activeCallID)
 		}
 	})
+	// 通话面板上也支持敲键盘数字：向对端发 DTMF + 本机回显按键音
+	//（REQ-CALL-006 / REQ-UI-029）。与主窗体同理，只有"没有控件获得焦点"时
+	// 才会走到 canvas 回调（面板上没有输入框，正常都走这里）。
+	w.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
+		if isDialDigit(ev.Name) {
+			a.onKeypadDigit(string(ev.Name))
+		}
+	})
 
 	a.callNameLabel = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	a.callStateLabel = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{})
@@ -442,14 +450,16 @@ var (
 // 由它决定），主窗体呼叫按钮固定 36。
 type compactButton struct {
 	widget.BaseWidget
-	bg    *canvas.Rectangle
-	icon  *canvas.Image
-	label *canvas.Text // 可选文字
-	onTap func()
+	bg       *canvas.Rectangle
+	icon     *canvas.Image
+	label    *canvas.Text // 可选文字
+	onTap    func()
+	baseBg   color.NRGBA // 正常态背景色（禁用时置灰，恢复时还原）
+	disabled bool
 }
 
 func newCompactButton(iconRes fyne.Resource, bgColor color.NRGBA, size float32, onTap func()) *compactButton {
-	b := &compactButton{onTap: onTap}
+	b := &compactButton{onTap: onTap, baseBg: bgColor}
 	b.bg = canvas.NewRectangle(bgColor)
 	b.bg.CornerRadius = 6
 	b.bg.SetMinSize(fyne.NewSize(size, size))
@@ -535,8 +545,31 @@ func (b *compactButton) SetMinSize(w, h float32) {
 }
 
 func (b *compactButton) Tapped(*fyne.PointEvent) {
-	if b.onTap != nil {
-		b.onTap()
+	if b.disabled || b.onTap == nil {
+		return
+	}
+	b.onTap()
+}
+
+// Disable / Enable / Disabled 让紧凑按钮也能参与"通话中禁用主窗体控件"那套
+// 状态管理（widget.Button 自带，这里是自绘按钮，得自己实现：拦点击 + 背景置灰）。
+func (b *compactButton) Disable() { b.setDisabled(true) }
+
+// Enable 恢复可点击与正常背景。
+func (b *compactButton) Enable() { b.setDisabled(false) }
+
+// Disabled 当前是否禁用。
+func (b *compactButton) Disabled() bool { return b.disabled }
+
+func (b *compactButton) setDisabled(v bool) {
+	b.disabled = v
+	if b.bg != nil {
+		if v {
+			b.bg.FillColor = colorSwitchGray
+		} else {
+			b.bg.FillColor = b.baseBg
+		}
+		b.bg.Refresh()
 	}
 }
 

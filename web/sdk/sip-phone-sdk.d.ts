@@ -86,6 +86,9 @@ declare class SipPhoneSDK {
   /** 扬声器开关（纯本地动作，继续接收） */
   muteSpeaker(callId: string, muted: boolean): Promise<{ callId: string }>;
 
+  /** 发送 DTMF（RFC 4733，通话接通后有效）；digit 为单个字符：0-9 * # A-D */
+  sendDTMF(callId: string, digit: string): Promise<{ callId: string }>;
+
   /** 视频总开关（纯本地动作，REQ-VIDEO-008）；状态见 call.video 事件 */
   setVideo(callId: string, enabled: boolean): Promise<{ callId: string }>;
 

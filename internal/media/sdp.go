@@ -307,3 +307,27 @@ func MirrorDirection(dir string) string {
 		return "sendrecv"
 	}
 }
+
+// peerDTMFPT 从对端 SDP 里取 telephone-event 的负载类型号（0 = 没声明）。
+//
+// 只在音频段内找：**收到**对端 DTMF 时按对端声明的号识别，而**发送**恒用本端
+// 声明的 telephoneEventPT（101）——两个方向各按各自 SDP 说的来（同 activePT）。
+func peerDTMFPT(body []byte) uint8 {
+	text := strings.ReplaceAll(string(body), "\r\n", "\n")
+	inAudio := false
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "m="):
+			inAudio = strings.HasPrefix(line, "m=audio ")
+		case inAudio && strings.HasPrefix(line, "a=rtpmap:"):
+			fields := strings.Fields(strings.TrimPrefix(line, "a=rtpmap:")) // "<pt> telephone-event/8000"
+			if len(fields) >= 2 && strings.HasPrefix(fields[1], "telephone-event/") {
+				if pt, err := strconv.Atoi(fields[0]); err == nil && pt >= 0 && pt <= 127 {
+					return uint8(pt)
+				}
+			}
+		}
+	}
+	return 0
+}

@@ -5,7 +5,9 @@ import (
 	"math"
 	"testing"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/widget"
 
 	"mti-sip-phone/internal/core"
 )
@@ -186,7 +188,7 @@ func TestOnVideoWebEvent(t *testing.T) {
 
 // TestVideoFitSize 视频窗口尺寸规则（用户指定）：**在固定上限 640×640 内等比
 // 放到最大**——小于 640 的流也放大到窗口（小流不再开小窗），超过的等比缩小
-//（不按屏幕大小算）。
+// （不按屏幕大小算）。
 func TestVideoFitSize(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -255,6 +257,67 @@ func TestTrayRegisteredState(t *testing.T) {
 		}
 		if a.regState != s.state {
 			t.Errorf("状态 %q 未记录，regState = %q", s.state, a.regState)
+		}
+	}
+}
+
+// TestDialEntryTypingIsSilent 在号码输入框里输入数字**不回显按键音、也不发
+// DTMF**（用户明确要求）：按键音只属于"点号码盘"与"未聚焦时在主窗体敲数字"。
+// 这条测试锁住这个约定，防止有人再往输入框上挂按键音钩子。
+func TestDialEntryTypingIsSilent(t *testing.T) {
+	test.NewApp()
+	a := &App{}
+	a.dialSelect = widget.NewSelectEntry(nil)
+	tones := 0
+	a.onKeyTone = func(string) { tones++ }
+
+	a.dialSelect.SetText("1") // 输入框里敲（含程序化设置）
+	a.dialSelect.SetText("10086")
+	a.dialSelect.SetText("")
+	if tones != 0 {
+		t.Fatalf("输入框文本变化触发了 %d 次按键音，期望 0 次", tones)
+	}
+
+	// 号码盘按键 / 未聚焦时敲数字：响
+	a.onKeypadDigit("5")
+	a.onKeypadDigit("#")
+	if tones != 2 {
+		t.Fatalf("号码盘按键后按键音次数为 %d，期望 2", tones)
+	}
+}
+
+// TestIsDialChar 只有 0-9 / * / # 算拨号键（REQ-UI-024/026）。
+func TestIsDialChar(t *testing.T) {
+	for _, c := range []string{"0", "5", "9", "*", "#"} {
+		if !isDialChar(c) {
+			t.Errorf("%q 应算拨号键", c)
+		}
+	}
+	for _, c := range []string{"", "a", "+", "12", "A"} {
+		if isDialChar(c) {
+			t.Errorf("%q 不该算拨号键", c)
+		}
+	}
+	if !isDialDigit(fyne.KeyName("7")) || isDialDigit(fyne.KeyName("Backspace")) {
+		t.Error("isDialDigit 对按键名的判断不对")
+	}
+}
+
+// TestShouldShowMainAfterCall 通话结束时的主窗体显示规则（REQ-UI-030，用户定的）：
+// 通话前打开的 → 一律显示（通话中开关过也显示）；通话前没开的 → 看通话中的最后状态。
+func TestShouldShowMainAfterCall(t *testing.T) {
+	cases := []struct {
+		wasVisible, stillShown, want bool
+	}{
+		{wasVisible: true, stillShown: true, want: true},    // 前开、没关
+		{wasVisible: true, stillShown: false, want: true},   // 前开、通话中自己关了 → 仍显示
+		{wasVisible: false, stillShown: true, want: true},   // 前没开、通话中打开没关 → 保持
+		{wasVisible: false, stillShown: false, want: false}, // 前没开、关了（或没开过）
+	}
+	for _, c := range cases {
+		if got := shouldShowMainAfterCall(c.wasVisible, c.stillShown); got != c.want {
+			t.Errorf("shouldShowMainAfterCall(%v, %v) = %v，期望 %v",
+				c.wasVisible, c.stillShown, got, c.want)
 		}
 	}
 }

@@ -3,6 +3,8 @@ package media
 import (
 	"net"
 	"testing"
+
+	"github.com/pion/rtp"
 )
 
 // newTestEngine 创建测试用引擎（不启动收发循环）。
@@ -137,5 +139,63 @@ func TestFeedMicAccumulates(t *testing.T) {
 	_, _, tx = e.Stats()
 	if tx != 2 {
 		t.Fatalf("补足后应共发 2 帧，实际 %d", tx)
+	}
+}
+
+// TestDTMFDigitMapping RFC 4733 事件码 ↔ 拨号字符（0-9=0-9，10=*，11=#，12-15=A-D）。
+func TestDTMFDigitMapping(t *testing.T) {
+	want := map[byte]string{0: "0", 5: "5", 9: "9", 10: "*", 11: "#", 12: "A", 15: "D"}
+	for code, digit := range want {
+		got, ok := dtmfDigit(code)
+		if !ok || got != digit {
+			t.Errorf("事件码 %d → %q（ok=%v），期望 %q", code, got, ok, digit)
+		}
+	}
+	if _, ok := dtmfDigit(16); ok {
+		t.Error("事件码 16 不该映射出字符")
+	}
+}
+
+// TestHandleDTMFEvent 收到对端 telephone-event：解出数字并回调一次；
+// 同一个事件的冗余重传（事件码 + 时间戳相同）只通知一次。
+func TestHandleDTMFEvent(t *testing.T) {
+	e := newTestEngine(t)
+	var got []string
+	e.SetDTMFListener(func(digit string) { got = append(got, digit) })
+	e.dtmfPT.Store(101)
+
+	// 事件码 5（'5'）的三次冗余重传：只通知一次
+	for i := 0; i < 3; i++ {
+		e.handleDTMFEvent(rtp.Packet{Header: rtp.Header{PayloadType: 101, Timestamp: 1000}, Payload: []byte{5, 0x0A}})
+	}
+	// 同一个数字再按一次：时间戳不同 → 是**新事件**，再通知一次
+	e.handleDTMFEvent(rtp.Packet{Header: rtp.Header{PayloadType: 101, Timestamp: 2000}, Payload: []byte{5, 0x0A}})
+	// '*'（事件码 10）
+	e.handleDTMFEvent(rtp.Packet{Header: rtp.Header{PayloadType: 101, Timestamp: 3000}, Payload: []byte{10, 0x0A}})
+	// 空负载 / 未知事件码：忽略
+	e.handleDTMFEvent(rtp.Packet{Header: rtp.Header{PayloadType: 101, Timestamp: 4000}})
+	e.handleDTMFEvent(rtp.Packet{Header: rtp.Header{PayloadType: 101, Timestamp: 5000}, Payload: []byte{99}})
+
+	if len(got) != 3 || got[0] != "5" || got[1] != "5" || got[2] != "*" {
+		t.Fatalf("回调序列为 %v，期望 [5 5 *]", got)
+	}
+}
+
+// TestPeerDTMFPT 从对端 SDP 的音频段取 telephone-event 的负载类型号。
+func TestPeerDTMFPT(t *testing.T) {
+	sdp := "v=0\r\nm=audio 4000 RTP/AVP 8 101\r\n" +
+		"a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\n" +
+		"m=video 4002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
+	if got := peerDTMFPT([]byte(sdp)); got != 101 {
+		t.Errorf("telephone-event PT = %d，期望 101", got)
+	}
+	// 换个号也对
+	sdp2 := "v=0\r\nm=audio 4000 RTP/AVP 0 97\r\na=rtpmap:97 telephone-event/8000\r\n"
+	if got := peerDTMFPT([]byte(sdp2)); got != 97 {
+		t.Errorf("telephone-event PT = %d，期望 97", got)
+	}
+	// 没声明 → 0
+	if got := peerDTMFPT([]byte("v=0\r\nm=audio 4000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n")); got != 0 {
+		t.Errorf("未声明 telephone-event 时 PT = %d，期望 0", got)
 	}
 }

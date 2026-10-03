@@ -151,16 +151,22 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		}
 		resp = okMessage(msg.ID, map[string]string{"callId": callID})
 
-	case MethodAnswer, MethodHangup, MethodReject, MethodMute, MethodMuteMic, MethodMuteSpeaker, MethodSetVideo:
+	case MethodAnswer, MethodHangup, MethodReject, MethodMute, MethodMuteMic, MethodMuteSpeaker, MethodSetVideo, MethodDTMF:
 		var p struct {
 			CallID  string `json:"callId"`
 			Code    int    `json:"code"`
 			Muted   bool   `json:"muted"`
 			Video   bool   `json:"video"`   // 仅 call.answer：true = 视频接听（REQ-VIDEO-004）
 			Enabled bool   `json:"enabled"` // 仅 call.setVideo：视频总开关（REQ-VIDEO-008）
+			Digit   string `json:"digit"`   // 仅 call.dtmf：一个 DTMF 字符（0-9 * # A-D）
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil || p.CallID == "" {
 			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 callId"))
+			break
+		}
+		if msg.Method == MethodDTMF && len(p.Digit) != 1 {
+			resp = errMessage(msg.ID, CodeInvalidParams,
+				fmt.Errorf("digit 必须是单个字符（0-9 * # A-D）"))
 			break
 		}
 		var err error
@@ -183,6 +189,8 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 			err = s.app.MuteSpeaker(p.CallID, p.Muted)
 		case MethodSetVideo:
 			err = s.app.SetVideoEnabled(p.CallID, p.Enabled)
+		case MethodDTMF:
+			err = s.app.SendDTMF(p.CallID, p.Digit)
 		}
 		if err != nil {
 			resp = errMessage(msg.ID, codeOf(err), err)

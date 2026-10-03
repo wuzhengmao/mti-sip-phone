@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +25,9 @@ import (
 // 用于验证 WS 层方法分发与事件转发链路（真实信令流程由 internal/sip 集成测试覆盖）。
 type stubTel struct {
 	app *core.App
+
+	mu   sync.Mutex // 记录发给电话层的 DTMF，供测试断言（handler 在自己的 goroutine 里跑）
+	dtmf []string
 }
 
 func (s *stubTel) Register(ctx context.Context, acc config.Account) error { return nil }
@@ -46,11 +51,23 @@ func (s *stubTel) Reject(callID string, code int) error        { return nil }
 func (s *stubTel) Mute(callID string, muted bool) error        { return nil }
 func (s *stubTel) MuteMic(callID string, muted bool) error     { return nil }
 func (s *stubTel) MuteSpeaker(callID string, muted bool) error { return nil }
-func (s *stubTel) SendDTMF(callID, digit string) error         { return nil }
-func (s *stubTel) SetAutoAnswer(enabled bool) error            { return nil }
-func (s *stubTel) SetRPort(enabled bool) error                 { return nil }
-func (s *stubTel) SetMicrophone(deviceID string) error         { return nil }
-func (s *stubTel) SetSpeaker(deviceID string) error            { return nil }
+func (s *stubTel) SendDTMF(callID, digit string) error {
+	s.mu.Lock()
+	s.dtmf = append(s.dtmf, digit)
+	s.mu.Unlock()
+	return nil
+}
+
+// dtmfDigits 已记录的 DTMF 序列（副本）。
+func (s *stubTel) dtmfDigits() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.dtmf...)
+}
+func (s *stubTel) SetAutoAnswer(enabled bool) error    { return nil }
+func (s *stubTel) SetRPort(enabled bool) error         { return nil }
+func (s *stubTel) SetMicrophone(deviceID string) error { return nil }
+func (s *stubTel) SetSpeaker(deviceID string) error    { return nil }
 func (s *stubTel) AudioDevices() ([]core.AudioDevice, []core.AudioDevice) {
 	return nil, nil
 }
@@ -77,6 +94,13 @@ func (s *stubTel) CameraSupported() bool                        { return false }
 // 更新器指向临时目录下的假 exe 路径（只做参数校验与状态机，不触发下载）。
 func newTestServer(t *testing.T) (*httptest.Server, *core.App) {
 	t.Helper()
+	ts, app, _ := newTestServerAll(t)
+	return ts, app
+}
+
+// newTestServerAll 同 newTestServer，另返回电话桩供断言（如 DTMF 收到什么）。
+func newTestServerAll(t *testing.T) (*httptest.Server, *core.App, *stubTel) {
+	t.Helper()
 	cfg := config.Default()
 
 	bus := core.NewBus()
@@ -92,7 +116,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *core.App) {
 	srv := New(app)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts, app
+	return ts, app, tel
 }
 
 // dialWS 建立测试 WS 连接（无 token 鉴权）。
@@ -374,6 +398,42 @@ func TestMuteMicSpeakerFlow(t *testing.T) {
 	call := ev.Data.(map[string]any)["call"].(map[string]any)
 	if call["speakerMuted"] != true || call["micMuted"] != true {
 		t.Fatalf("call.audio 事件状态不符: %+v", call)
+	}
+}
+
+// TestDTMFFlow 网页经 call.dtmf 让软电话发 DTMF（REQ-WS-014）：digit 透传到电话层，
+// 参数缺失或 digit 不是单字符报 invalid_params。
+func TestDTMFFlow(t *testing.T) {
+	ts, _, tel := newTestServerAll(t)
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("1"), Method: "call.dial",
+		Params: json.RawMessage(`{"target":"1001"}`)})
+	msg, _ := waitResponseAndEvent(t, conn, "call.dialing")
+	callID := msg.Data.(map[string]any)["callId"].(string)
+	waitEvent(t, conn, "call.established")
+
+	for i, digit := range []string{"5", "#", "A"} {
+		sendRequest(t, conn, Message{ID: json.RawMessage(strconv.Itoa(i + 2)), Method: MethodDTMF,
+			Params: json.RawMessage(`{"callId":"` + callID + `","digit":"` + digit + `"}`)})
+		resp := waitResponse(t, conn)
+		if resp.OK == nil || !*resp.OK {
+			t.Fatalf("发送 DTMF %q 应成功，收到: %+v（错误: %+v）", digit, resp, resp.Error)
+		}
+	}
+	if got := tel.dtmfDigits(); len(got) != 3 || got[0] != "5" || got[1] != "#" || got[2] != "A" {
+		t.Fatalf("电话层收到的 DTMF 序列为 %v，期望 [5 # A]", got)
+	}
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("9"), Method: MethodDTMF,
+		Params: json.RawMessage(`{"callId":"` + callID + `","digit":"55"}`)})
+	resp := waitResponse(t, conn)
+	if resp.OK == nil || *resp.OK {
+		t.Fatalf("多位 digit 应报错，收到: %+v", resp)
+	}
+	if resp.Error == nil || resp.Error.Code != CodeInvalidParams {
+		t.Fatalf("错误码应为 invalid_params，收到: %+v", resp.Error)
 	}
 }
 

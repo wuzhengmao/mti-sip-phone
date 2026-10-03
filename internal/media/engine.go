@@ -71,6 +71,17 @@ type Engine struct {
 	// 静态 PT 8/0，两种取值恰好相同，故此前未暴露。
 	activePT atomic.Uint32
 
+	// dtmfPT 对端 SDP 里 telephone-event 的负载类型号（0 = 对端没声明）。
+	// 收到对端 DTMF 时按这个号识别——**发送**方向恒用本端声明的
+	// telephoneEventPT，两者可以不同（同 activePT 的方向性）。
+	dtmfPT atomic.Uint32
+	// dtmfIn 收到对端 DTMF 时的回调（audio.Manager 在 AttachEngine 时注入）：
+	// 对端发的是**事件包不是音频**，本机要自己按标准发声，否则用户什么都听不到。
+	dtmfIn atomic.Pointer[func(digit string)]
+	// lastDTMF 上一次处理的 (事件码<<32 | RTP时间戳)：事件包会冗余重传，
+	// 同一个事件只在首次到达时通知一次。
+	lastDTMF atomic.Uint64
+
 	conn      *net.UDPConn
 	rtcp      *rtcpSession
 	remoteMu  sync.RWMutex
@@ -203,6 +214,9 @@ func (e *Engine) SetMicMuted(muted bool) { e.micMuted.Store(muted) }
 // SetPlayMuted 扬声器静音：纯本地停止/恢复播放，接收侧不受影响。
 func (e *Engine) SetPlayMuted(muted bool) { e.playMuted.Store(muted) }
 
+// PlayMuted 扬声器是否静音（音频层据此决定要不要播"收到对端 DTMF"的按键音）。
+func (e *Engine) PlayMuted() bool { return e.playMuted.Load() }
+
 // SetRemoteHold 远端保持：对端 re-INVITE 声明只发不收（sendonly）或
 // 完全停发（inactive）时，本端停止发送媒体。
 func (e *Engine) SetRemoteHold(hold bool) { e.holdTx.Store(hold) }
@@ -291,7 +305,13 @@ func (e *Engine) recvLoop() {
 		lastSeq = pkt.SequenceNumber
 		hasLast = true
 
-		// 仅处理协商的负载类型；telephone-event（DTMF）后续版本支持
+		// 对端的 DTMF（RFC 4733 telephone-event）：这不是音频，是事件包，
+		// 必须由本机**自己发声**（真机也是这么做的），否则用户听不到
+		if pt := uint8(e.dtmfPT.Load()); pt != 0 && pkt.PayloadType == pt {
+			e.handleDTMFEvent(pkt)
+			continue
+		}
+		// 仅处理协商的音频负载类型（其余如 comfort-noise 一律忽略）
 		e.codecMu.RLock()
 		codec := e.codec
 		e.codecMu.RUnlock()
@@ -605,6 +625,51 @@ func (e *Engine) SendDTMF(digit string) {
 	}()
 }
 
+// SetDTMFListener 注册"收到对端 DTMF"的回调（本机据此播放按键音）。
+// 由音频层在 AttachEngine 时注入；nil 表示不发声。
+func (e *Engine) SetDTMFListener(fn func(digit string)) {
+	if fn == nil {
+		e.dtmfIn.Store(nil)
+		return
+	}
+	e.dtmfIn.Store(&fn)
+}
+
+// handleDTMFEvent 处理收到的 telephone-event 包：解出事件码、去重（同一事件
+// 的冗余包只通知一次），再回调给音频层发声。
+func (e *Engine) handleDTMFEvent(pkt rtp.Packet) {
+	if len(pkt.Payload) < 1 {
+		return
+	}
+	digit, ok := dtmfDigit(pkt.Payload[0])
+	if !ok {
+		return
+	}
+	key := uint64(pkt.Payload[0])<<32 | uint64(pkt.Timestamp)
+	if e.lastDTMF.Swap(key) == key {
+		return // 冗余重传的同一个事件
+	}
+	if fn := e.dtmfIn.Load(); fn != nil {
+		logx.Logger().Debug("收到对端 DTMF", "digit", digit, "ts", pkt.Timestamp)
+		(*fn)(digit)
+	}
+}
+
+// dtmfDigit 把 RFC 4733 事件码映射回拨号字符（0-9 → 0-9，10 → *，11 → #，12-15 → A-D）。
+func dtmfDigit(code byte) (string, bool) {
+	switch {
+	case code <= 9:
+		return string(rune('0' + code)), true
+	case code == 10:
+		return "*", true
+	case code == 11:
+		return "#", true
+	case code >= 12 && code <= 15:
+		return string(rune('A' + code - 12)), true
+	}
+	return "", false
+}
+
 // dtmfEventCode 将拨号字符映射为 RFC 4733 事件码。
 func dtmfEventCode(digit string) (byte, bool) {
 	if len(digit) == 1 && digit[0] >= '0' && digit[0] <= '9' {
@@ -720,6 +785,7 @@ func (e *Engine) SDPAnswerWithDirection(offer []byte, dir string) (string, error
 	e.codecMu.Unlock()
 	// answerer：线上用**对端**的负载类型号（RFC 3264）
 	e.activePT.Store(uint32(peerPT))
+	e.dtmfPT.Store(uint32(peerDTMFPT(offer))) // 对端 DTMF 用他们自己声明的号
 	// 编解码器换了（对端号 + 新编码）：复位其内部状态
 	resetCodec(codec)
 	e.setRemote(remote, rtcpPort)
@@ -739,6 +805,7 @@ func (e *Engine) SDPApplyAnswer(answer []byte) error {
 	e.codecMu.Unlock()
 	// offerer：answer 里的号取自本端 offer，即为本端号
 	e.activePT.Store(uint32(pt))
+	e.dtmfPT.Store(uint32(peerDTMFPT(answer)))
 	// 编解码器换了（183 早期媒体 → 200 可能换编码）：复位其内部状态
 	resetCodec(codec)
 	e.setRemote(remote, rtcpPort)

@@ -304,6 +304,16 @@
     }
 
     /**
+     * 发送 DTMF（RFC 4733 telephone-event，通话接通后有效，REQ-CALL-006）。
+     * @param {string} callId
+     * @param {string} digit 单个字符：0-9 * # A-D
+     * @returns {Promise<{callId: string}>}
+     */
+    sendDTMF(callId, digit) {
+      return this._request('call.dtmf', { callId: callId, digit: String(digit) });
+    }
+
+    /**
      * 视频总开关（纯本地动作，不发 SIP 信令，REQ-VIDEO-008）：
      * 关闭 = 不显示远端视频、不推送本地视频、视频窗口关闭；状态见 call.video 事件。
      * @param {string} callId
