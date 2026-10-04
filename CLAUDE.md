@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.7**（dev 开发中；1.0.6 含拨号按键音与 DTMF 收发、通话中主窗体、架构设计文档，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
+当前版本 **1.0.8**（dev 开发中；1.0.7 含未接来电桌面通知、休眠/网络切换后自动恢复注册、服务端心跳检测，并修复第一声回铃音断续（真因是日志轮转的 Windows 删除顺序缺陷）、SIP 信令日志重复、RTP/RTCP 端口配对，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
 真实环境：OpenSIPS 2.4.11（10.168.4.40:15060，账号 2999），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
 
@@ -26,7 +26,7 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 ```bash
 # 构建脚本按目标打印本次能力（如 CGO+音频+视频，缺库时标出无视频/无Opus）；视频/Opus 取决于
 # 第三方静态库是否已生成（见下），缺哪个就降级为哪个没有。
-# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.7-rc），
+# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.8-rc），
 # 正式构建用 SIP_PHONE_RELEASE=1（发布脚本会设）；不经脚本的 go build/go run 是基础版本号。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO）
@@ -69,9 +69,9 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 `/docs/upload`、`/docs/api`）。本仓库侧的发布入口：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.7-rc），不上传
+./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.8-rc），不上传
 ./scripts/release.sh --pre             # 预发布：真实上传（站点标记为预发布）
-./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.7
+./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.8
 # Windows 用 scripts/release.bat（同样的参数，内部走 git-bash）
 ```
 
@@ -133,7 +133,11 @@ cmd/sip-phone/main.go   入口：命令行/单实例/协议注册/开机自启/�
 internal/
   config/     JSON 配置加载与保存（密码 AES-256-GCM 加密、原子写入）
   logx/       slog 日志：滚动+gzip 归档、信令跟踪 TraceSIP（自动脱敏）
-  core/       应用核心：状态机、事件总线（发布-订阅）、Telephony 抽象接口
+  core/       应用核心：状态机、事件总线（发布-订阅）、Telephony 抽象接口。
+              calllog.go 定义通话记录接口与采集点（REQ-CALL-007），实现在
+              internal/calllog：单 worker FIFO 队列串行执行全部 SQL、
+              call_id 主键幂等、启动清扫上次遗留的"进行中"记录
+  calllog/    通话记录 SQLite 存储（纯 Go 驱动 modernc.org/sqlite，无 CGO）
   sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理；
               netwatch.go 为注册看护：休眠唤醒/网络切换后立即重新注册，REQ-CALL-009）
   media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus 编解码、播放环形缓冲、SDP 协商
@@ -281,8 +285,9 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **交流、文档、注释、提交信息、界面文案一律中文**。
 - **Git 工作流**：开发在分支上进行（工作分支 dev，master 为收口分支）；**会话中修改的代码不得自动提交**——提交与 push 必须经用户人工确认后执行，且**不自动合并到 master**（合并 master 需用户明确指示）。
 - **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
-- 版本 1.0.7 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
-- 弹窗按钮文案「确定/取消」。
+- 版本 1.0.8 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
+- 弹窗按钮文案「确定/取消」；**弹窗的 parent 必须是当前可见的窗口**——Fyne 把对话框画在父窗口的画布上，主窗体隐藏到托盘时弹在主窗体上用户根本看不见。默认走 `a.dialogParent()`（主窗体不可见且通话记录窗口开着就用它），从记录窗口发起的用 `showXxxIn(a.historyW, …)`；**永远不要传 nil**（dialog 的 parent 为 nil 直接 panic）。
+- **通话记录（REQ-CALL-007）的写入口径**：开始/接通/结束三个时刻在 `core.App` 里**直接入队**（不订阅事件总线——总线容量 64、满即丢，通话记录不能建立在会丢事件的东西上），且**先写记录再 `publishCall`**（界面收到 `call.terminated` 会立刻查库刷新，顺序反了就查不到新记录）。同一通话重复上报结束的幂等由存储层的 `ended_at=0` 条件兜住，**不要**在核心层再加"是否首次结束"的状态。库里时间戳 0 表示"未接通/进行中"（0 与 `time.Time{}` 的互转只在 `internal/calllog` 的 `toMillis/fromMillis` 里做，别把 1970 年漏到界面）。
 - 需求变更同步更新 docs/requirements.md 与 changelog.md。
 - 单通话限制：呼叫/振铃/通话中禁止新呼出（返回错误）；新来电直接 486 USER_BUSY。
 - WS 端口可配置（默认 8765），被占用自动 +1 并保存；无 token 鉴权（仅回环）。
@@ -595,4 +600,51 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **构建脚本：cmd 的 `set` 里 `\t`/`\v` 会被 Python 等工具写成真正的控制字符**，
   表现为 `third_party\video` 变成 `third_party<VT>ideo`，且 `if not exist` 静默判假。
   改 `build.bat` 后务必 `grep | cat -A` 确认。
+- **紧凑列表要自绘文本，别用 `widget.Label`**：本项目主题把
+  `SizeNameInnerPadding` 提到 12（给拨号盘大按键用，见 `theme.go`），而
+  `widget.Label` 的 MinSize 是「文字高 + 2×InnerPadding」——
+  **12px 文字的一行标签就有 43px 高**，两行 86px。通话记录行高 46px 却塞两行，
+  一开始就表现为**两行文字直接叠在一起**（渲染截图里一眼可见）。行内文本因此
+  用自绘的 `plainText`（`internal/ui/widgets.go`，基于 `canvas.Text`，没有内边距）
+  + 按可用像素宽度截断补省略号（`Resize` 时才知道分到多宽，`canvas.Text` 自己
+  不会截断，不处理会画到相邻控件上）。同一个坑适用于任何"一行要放多个标签"的
+  紧凑布局。**按钮别自己照着画**：先试 Fyne 的
+  `widget.Button`（`Importance` 选档：`DangerImportance` = 主题错误红）。自绘
+  很容易画歪——踩过的坑：文字忘了加粗（Fyne 按钮用的是 `RichTextStyleStrong`）、
+  圆角取错尺寸项（按钮是 `SizeNameButtonRadius`）、没有悬浮反馈、用
+  `container.NewBorder` 拼内边距被 borderLayout 额外加 `theme.Padding()` 导致
+  上下不居中。**但有一个例外要有心理准备**：Fyne 的 `widget.Button.Cursor()`
+  返回 `DefaultCursor`（箭头），而本项目的自绘按钮（`compactButton` 等）都是
+  手型；要手型只能自绘、或在按钮上叠一层透明的 `Cursorable` 覆盖层（指针取
+  "指针下最深的光标对象"）。
+  内页顶栏统一用 `pageTopBar`（返回图标 + 标题），
+  配置页与通话记录页共用一个样式。
+- **SVG 图标里不要用 `<g transform>`**：Fyne 的 SVG 渲染器（fyne-io/oksvg）
+  不认这个变换，**整张图会渲染成空白**——同一批图标里，单 `<path>` 的（垃圾桶、
+  清空、原有的一堆）都正常，只有带 `<g transform="translate(...) scale(...)">`
+  的方向图标全白，排查时很容易误判成"图标文件没打包"或"颜色不对"。
+  需要组合图形（如通话记录的方向图标 = 话机/摄像头 + 箭头）就把**每个图元各出
+  一张 SVG，再用两个 `canvas.Image` 叠放**（见 `ui_history.go` 的
+  `historyDirIconLayout`）。
+- **通话记录列表的手势与滚动加载都在"列表容器"这一层做**
+  （`internal/ui/ui_history.go` 的 `historyListView`）：
+  Fyne 取**指针下最深的匹配对象**（`driver.FindObjectAtPositionMatching` 走完整棵树、
+  后匹配的覆盖先匹配的），行本身与行内按钮都不是 `Draggable`，所以整片列表区域的
+  按下/拖动都会落到实现了 `Draggable`/`desktop.Mouseable` 的容器上，而且事件坐标
+  是相对该容器的——换算行号只需 `y / 行高`，**不需要知道滚动偏移**（这点很关键：
+  `widget.List` 不导出滚动偏移，行号映射做不了，所以这里用
+  `container.NewVScroll` + 自定行布局，而不是 `widget.List`）。
+  - 修饰键（Shift）只有 `desktop.Mouseable` 的 `MouseEvent.Modifier` 有，
+    `fyne.PointEvent` **不带修饰键**——所以 Shift 多选必须实现 `Mouseable`。
+  - 拖动结束后驱动仍会调一次拖动对象的 `MouseUp`（在 `DragEnd` **之前**），
+    用 `dragging` 标志挡掉，否则拖完还会当成一次单击。
+  - 滚动加载用 `container.Scroll.OnScrolled`（`widget.List` 把这个回调内部占掉了，
+    没有等价物）；一屏没填满时没有滚动事件，加载完要**再主动判一次**是否该继续加载。
+  - 选中集合按 `call_id` 存，不按行号（重新加载、筛选、删除都会让行号整体重排）。
+- **Fyne 的测试驱动里 `fyne.Do` 是"内联执行"的**（`test/driver.go`：测试都在单线程跑，
+  `DoFromGoroutine` 直接调 `f()`），于是后台 goroutine 的 `fyne.Do(刷新界面)` 会和测试
+  主线程并发跑同一棵控件树，**表现是字体整形库随机 panic**（`go-text/typesetting`
+  的 `index out of range`，每次崩的字符串都不一样）。所以涉及后台加载的界面
+  （如通话记录窗口）**不要**写成渲染测试；纯文案/逻辑函数照常测。真实驱动下
+  `fyne.Do` 会投递到主循环，不存在这个问题。
 - **rtp_rx.wav**：根目录与 internal/sip/ 下的抓包调试产物，已被 .gitignore 忽略，勿误提交。

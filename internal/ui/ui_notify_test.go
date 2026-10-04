@@ -58,8 +58,8 @@ func TestMissedNotificationTextSanitized(t *testing.T) {
 	}
 }
 
-// TestFormatRingDuration 振铃时长文案。
-func TestFormatRingDuration(t *testing.T) {
+// TestFormatDurationCN 时长文案（未接通知的振铃时长与通话记录共用）。
+func TestFormatDurationCN(t *testing.T) {
 	cases := []struct {
 		d    time.Duration
 		want string
@@ -69,9 +69,12 @@ func TestFormatRingDuration(t *testing.T) {
 		{59 * time.Second, "59 秒"},
 		{time.Minute, "1 分 0 秒"},
 		{2*time.Minute + 5*time.Second, "2 分 5 秒"},
+		{59*time.Minute + 59*time.Second, "59 分 59 秒"},
+		{time.Hour, "1 小时 0 分"},
+		{65*time.Minute + 3*time.Second, "1 小时 5 分"}, // 不出现「65 分 3 秒」
 	}
 	for _, tc := range cases {
-		if got := formatRingDuration(tc.d); got != tc.want {
+		if got := formatDurationCN(tc.d); got != tc.want {
 			t.Fatalf("%v 应格式化为 %q，实际 %q", tc.d, tc.want, got)
 		}
 	}

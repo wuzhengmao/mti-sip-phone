@@ -121,7 +121,39 @@ var (
 	IconPauseWhite = fyne.NewStaticResource("pause-white.svg", []byte(mediaIconSVG("#ffffff", "pause")))
 	// IconReplayWhite 白色恢复箭头（取消保持按钮）。
 	IconReplayWhite = fyne.NewStaticResource("replay-white.svg", []byte(mediaIconSVG("#ffffff", "replay")))
+
+	// ---- 通话记录行方向图标（REQ-UI-031）----
+	// 两个图元分开出图、由 ui_history.go 叠放合成（不能用 SVG 的 <g transform>）：
+	// 话机为主体，箭头贴右上角（↗ 呼出 / ↙ 呼入）。颜色表示结果：
+	// 绿=已接通、红=未接通。
+	// IconVideoMark 视频通话标记（第一行号码右边的小摄像头）：这里给的填充色
+	// 会被 theme.NewColoredResource 换成主题前景色，与行内文字同色。
+	IconVideoMark = fyne.NewStaticResource("video-mark.svg", []byte(videoIconSVG("#1a1a1a", false)))
+	// IconArrowOutGreen/Red 呼出箭头（↗）；IconArrowInGreen/Red 呼入箭头（↙）。
+	IconArrowOutGreen = fyne.NewStaticResource("arrow-out-green.svg", []byte(arrowIconSVG("#43a047", false)))
+	IconArrowOutRed   = fyne.NewStaticResource("arrow-out-red.svg", []byte(arrowIconSVG("#e53935", false)))
+	IconArrowInGreen  = fyne.NewStaticResource("arrow-in-green.svg", []byte(arrowIconSVG("#43a047", true)))
+	IconArrowInRed    = fyne.NewStaticResource("arrow-in-red.svg", []byte(arrowIconSVG("#e53935", true)))
 )
+
+// arrowIconSVG 通话记录行的方向箭头（REQ-UI-031）：↗ 呼出 / ↙ 呼入。
+//
+// 形状参考常见的"去电/来电"图标：**粗箭头**（三角箭头 + 粗杆），
+// 不是 Material 的细线箭头。杆与三角头在斜边上正好接合（杆的右上角落在
+// 三角的斜边上），合成一个整体。
+//
+// 注意：**不要把基图形与箭头用 SVG 的 <g transform> 拼在一个文件里**——
+// Fyne 的 SVG 渲染器不认这个变换，结果是整张图空白（实测）。两个图元在
+// ui_history.go 里用两个 canvas.Image 叠放合成。
+func arrowIconSVG(colour string, incoming bool) string {
+	path := `M22 2 L12 2 L22 12 Z M19 9 L9 19 L6 16 L16 6 Z` // ↗ 呼出（三角头 10×10）
+	if incoming {
+		path = `M2 22 L12 22 L2 12 Z M5 15 L15 5 L18 8 L8 18 Z` // ↙ 呼入（180° 旋转）
+	}
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<path fill="` + colour + `" d="` + path + `"/>
+</svg>`
+}
 
 // mediaIconSVG 播放控制图标（Material Design play/stop/pause/replay path）。
 func mediaIconSVG(color, kind string) string {

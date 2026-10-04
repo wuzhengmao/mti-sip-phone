@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"mti-sip-phone/internal/config"
 	"mti-sip-phone/internal/logx"
@@ -83,6 +84,7 @@ type App struct {
 	cfgPath string
 	tel     Telephony
 	upd     Updater // 自动更新能力（nil = 未接入）
+	callLog CallLog // 通话记录存储（nil = 不记录，见 calllog.go）
 	bus     *Bus
 
 	mu         sync.RWMutex
@@ -236,6 +238,15 @@ func (a *App) Dial(ctx context.Context, target string) (string, error) {
 		Direction: "outgoing",
 		Remote:    target,
 		State:     CallRinging,
+	})
+	// 通话记录（REQ-CALL-007）：必须在 addRecentDial（会同步写 config.json）
+	// 与 publishCall 之前入队——前者是与结束事件抢时间的最大窗口，后者是
+	// 界面收到事件后立刻查库刷新能看到这条记录的前提。
+	a.logStart(CallRecord{
+		CallID:    callID,
+		Direction: "outgoing",
+		Remote:    target,
+		StartedAt: time.Now(),
 	})
 	a.addRecentDial(target)
 	// 发布"呼出中"事件：GUI 进入呼叫状态（通话面板），WS 客户端
@@ -494,6 +505,13 @@ func (a *App) DialVideo(ctx context.Context, target string) (string, error) {
 		State:     CallRinging,
 		HasVideo:  true,
 	})
+	a.logStart(CallRecord{
+		CallID:    callID,
+		Direction: "outgoing",
+		Remote:    target,
+		StartedAt: time.Now(),
+		HasVideo:  true,
+	})
 	a.addRecentDial(target)
 	a.publishCall("call.dialing", callID)
 	// 视频呼叫拨出即开摄像头/回显（sip 侧），其首个状态可能早于本次登记到达，
@@ -594,6 +612,15 @@ func (a *App) OnIncoming(callID, remote, remoteName string, hasVideo bool) {
 		State:      CallRinging,
 		HasVideo:   hasVideo,
 	})
+	// 通话记录（REQ-CALL-007）：来电的起点即振铃开始时刻
+	a.logStart(CallRecord{
+		CallID:     callID,
+		Direction:  "incoming",
+		Remote:     remote,
+		RemoteName: remoteName,
+		StartedAt:  time.Now(),
+		HasVideo:   hasVideo,
+	})
 	logx.Logger().Info("收到来电", "callId", callID, "remote", remote, "hasVideo", hasVideo)
 	a.publishCall("call.incoming", callID)
 }
@@ -632,6 +659,7 @@ func (a *App) OnRinging(callID string, earlyMedia bool) {
 func (a *App) OnEstablished(callID string) {
 	if a.updateCall(callID, func(c *Call) { c.State = CallEstablished }) {
 		logx.Logger().Info("通话建立", "callId", callID)
+		a.logAnswered(callID) // 通话记录：接通时刻（先写记录再发事件）
 		a.publishCall("call.established", callID)
 	}
 }
@@ -646,6 +674,7 @@ func (a *App) OnTerminated(callID, reason string) {
 		return
 	}
 	logx.Logger().Info("通话结束", "callId", callID, "reason", reason, "missed", missed)
+	a.logFinish(callID, reason, missed) // 通话记录：先写记录再发事件
 	a.publishCall("call.terminated", callID, "reason", reason, "missed", missed)
 }
 
@@ -659,6 +688,7 @@ func (a *App) OnFailed(callID, reason string) {
 		return
 	}
 	logx.Logger().Info("呼叫失败", "callId", callID, "reason", reason, "missed", missed)
+	a.logFinish(callID, reason, missed) // 通话记录：先写记录再发事件
 	a.publishCall("call.failed", callID, "reason", reason, "missed", missed)
 }
 
