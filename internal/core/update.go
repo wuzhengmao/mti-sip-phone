@@ -1,6 +1,15 @@
 package core
 
-import "errors"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+	"time"
+
+	"mti-sip-phone/internal/config"
+)
 
 // UpdateInfo 前端告知的新版本信息（WS system.notifyUpdate 的参数）。
 type UpdateInfo struct {
@@ -57,6 +66,10 @@ type Updater interface {
 	Apply() error
 	// Status 返回当前更新状态快照。
 	Status() UpdateStatus
+	// SetUpdateConfig 下发更新站点配置（空 URL = 不检查），REQ-UPD-017。
+	SetUpdateConfig(site SiteConfigSnapshot)
+	// CheckNow 立即查询一次更新站点（界面「立即检查」用）。
+	CheckNow(ctx context.Context) (CheckResult, error)
 }
 
 // SetUpdater 注入自动更新能力（启动前调用，nil 表示未接入）。
@@ -102,4 +115,98 @@ func (a *App) UpdateStatus() UpdateStatus {
 		return UpdateStatus{Phase: UpdateIdle}
 	}
 	return a.upd.Status()
+}
+
+// ---------------------------------------------------------------------------
+// 更新站点配置（REQ-UPD-017）：软电话自己按周期查询
+// ---------------------------------------------------------------------------
+
+// SiteConfigSnapshot 查询站点配置快照（core 与 updater 之间的传参类型）。
+type SiteConfigSnapshot struct {
+	URL        string
+	AppID      string
+	Interval   time.Duration
+	Prerelease bool
+}
+
+// SetUpdateConfig 保存并应用自动更新配置（配置页与 WS system.setUpdateConfig 共用）。
+// 落盘后立即下发给查询器（配了站点就立刻生效并查一次），并广播
+// system.updateConfig 供桌面与网页同步。
+func (a *App) SetUpdateConfig(cfg config.UpdateConfig) error {
+	cfg.URL = strings.TrimSpace(cfg.URL)
+	cfg.AppID = strings.TrimSpace(cfg.AppID)
+	if cfg.URL != "" {
+		if u, err := url.Parse(cfg.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("%w：更新站点必须是 http/https 地址", ErrUpdateInvalid)
+		}
+	}
+	if cfg.AppID == "" {
+		cfg.AppID = "mti-sip-phone"
+	}
+	cfg.IntervalMins = config.ClampUpdateIntervalMins(cfg.IntervalMins)
+
+	a.mu.Lock()
+	a.cfg.Update = cfg
+	a.mu.Unlock()
+
+	if a.cfgPath != "" {
+		if err := a.cfg.Save(a.cfgPath); err != nil {
+			return fmt.Errorf("保存配置失败: %w", err)
+		}
+	}
+	if a.upd != nil {
+		a.upd.SetUpdateConfig(SiteConfigSnapshot{
+			URL:        cfg.URL,
+			AppID:      cfg.AppID,
+			Interval:   cfg.Interval(),
+			Prerelease: cfg.Prerelease,
+		})
+	}
+	a.bus.Publish("system.updateConfig", cfg)
+	return nil
+}
+
+// UpdateConfig 当前更新配置快照。
+func (a *App) UpdateConfig() config.UpdateConfig {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.Update
+}
+
+// CheckUpdateNow 立即查询一次更新站点（界面「立即检查」用）。
+// 未配置站点时返回 Skipped 结果；未接入更新能力时返回 ErrUpdateUnavailable。
+func (a *App) CheckUpdateNow(ctx context.Context) (CheckResult, error) {
+	if a.upd == nil {
+		return CheckResult{}, ErrUpdateUnavailable
+	}
+	return a.upd.CheckNow(ctx)
+}
+
+// CheckResult 一次查询的结果（界面提示用）。
+type CheckResult struct {
+	Skipped       bool
+	UpToDate      bool
+	LatestVersion string
+	Notified      bool
+	Reason        string
+	Err           error
+}
+
+// Text 结果的中文描述（界面提示用）。
+func (r CheckResult) Text() string {
+	switch {
+	case r.Skipped:
+		return "未配置更新站点，未检查"
+	case r.Err != nil:
+		return "检查失败：" + r.Err.Error()
+	case r.Notified:
+		return "发现新版本 v" + r.LatestVersion + "，请在提示窗中确认更新"
+	case r.Reason == "not_newer":
+		return "已是最新版本"
+	case r.Reason == "already_notified":
+		return "已是最新版本（v" + r.LatestVersion + " 已提示过）"
+	case r.Reason == "no_download":
+		return "站点没有本平台的安装包"
+	}
+	return "已是最新版本"
 }

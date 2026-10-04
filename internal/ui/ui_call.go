@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"errors"
 	"fmt"
+	"image"
 	"image/color"
 	"math"
 	"time"
@@ -111,11 +111,14 @@ func (a *App) buildCallPanelIfNeeded() {
 		}
 	})
 
-	// 扬声器开关（REQ-UI-023）：默认开=蓝底白图标，关=灰底红图标
-	a.speakerBtn = newCompactButton(IconSpeakerOn, colorHoldBlue, callPanelButtonSize, a.toggleSpeaker)
+	// 扬声器开关（REQ-UI-023）+ 音量（REQ-MEDIA-006）：
+	// **滚轮**调节音量、底色横向填充，0% 即禁用（等同「关」）。
+	a.speakerBtn = newLevelButton(IconSpeakerOn, callPanelButtonSize,
+		func(steps int, pos fyne.Position) { a.onCallWheel(false, steps, pos) }, a.toggleSpeaker)
 
-	// 麦克风开关（REQ-UI-023）
-	a.micBtn = newCompactButton(IconMicOn, colorHoldBlue, callPanelButtonSize, a.toggleMic)
+	// 麦克风开关（REQ-UI-023）+ 增益（REQ-MEDIA-006）
+	a.micBtn = newLevelButton(IconMicOn, callPanelButtonSize,
+		func(steps int, pos fyne.Position) { a.onCallWheel(true, steps, pos) }, a.toggleMic)
 
 	// 视频接听（REQ-VIDEO-004）：来电含视频时显示在「接听」左侧
 	a.videoAnswerBtn = newCompactButton(IconVideoAnswer, colorSuccessGreen, callPanelButtonSize, func() {
@@ -283,6 +286,12 @@ func (a *App) rebuildCallRows(mode int) {
 		a.applySessionAudioState()
 		a.applyVideoButton()
 	}
+
+	// 音量按钮的外观每次都按会话内记忆刷新（REQ-MEDIA-006）：面板首次创建时
+	// 靠它把填充条画出来（新按钮的 level 默认 0），网页改过开关后重开面板
+	// 也能立刻对上。
+	a.applySpeakerButton()
+	a.applyMicButton()
 
 	// 三行纵向排列（行距 panelRowGap）、整体在窗口内纵向居中；四周 4px 窗口留白
 	// 固定行高：第一行（只有号码/名称）与有按钮的行高度一致，整体才不会"跳"；
@@ -485,6 +494,12 @@ var (
 	colorTransformGray = color.NRGBA{R: 0x44, G: 0x48, B: 0x4f, A: 0xf2} // 旋转/镜像未生效（深灰，压在画面上）
 	colorIconBlack     = color.NRGBA{R: 0x1a, G: 0x1a, B: 0x1a, A: 0xff} // 呼叫按钮文字（固定黑）
 	colorIconWhite     = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff} // 挂断态文字（红底白字）
+	// colorLevelTrack 音量按钮未填充部分的底色（REQ-MEDIA-006）：比填充色深，
+	// 白色开图标压在轨道与填充条上都看得清（用浅灰做轨道的话图标会"消失"）。
+	colorLevelTrack = color.NRGBA{R: 0x3a, G: 0x3f, B: 0x46, A: 0xff}
+	// colorLevelBoost 增益段（麦克风 100%→200%）的橙色：叠在蓝色之上，
+	// 200% 时整块橙（用户要求：上调时蓝色上再覆盖成橙色）。
+	colorLevelBoost = color.NRGBA{R: 0xf5, G: 0x7c, B: 0x00, A: 0xff}
 )
 
 // compactButton 通话面板紧凑按钮（REQ-UI-025 修订）：默认 36×36
@@ -503,6 +518,15 @@ type compactButton struct {
 	onTap    func()
 	baseBg   color.NRGBA // 正常态背景色（禁用时置灰，恢复时还原）
 	disabled bool
+
+	// ---- 音量按钮（REQ-MEDIA-006；普通按钮这些字段为 nil）----
+	// sweep 圆周填充层：按钮外观不变，只是底色按"从正上方顺时针"的角度填充
+	//（见 sweepImage）。level 蓝色部分比例 0–1，boost 橙色（增益）部分 0–1。
+	sweep *canvas.Raster
+	level float32
+	boost float32
+	// scroll 滚轮中继（只有音量按钮有，见 scrollRelay）
+	scroll *scrollRelay
 }
 
 func newCompactButton(iconRes fyne.Resource, bgColor color.NRGBA, size float32, onTap func()) *compactButton {
@@ -517,6 +541,134 @@ func newCompactButton(iconRes fyne.Resource, bgColor color.NRGBA, size float32, 
 	b.icon.SetMinSize(fyne.NewSize(iconSize, iconSize))
 	b.ExtendBaseWidget(b)
 	return b
+}
+
+// newLevelButton 带「圆周填充底色」的紧凑按钮（通话面板的扬声器/麦克风，
+// REQ-MEDIA-006）：按钮外观不变，只是底色从**正上方**起按 level(0–1) **顺时针**
+// 扫过（12→3→6→9）；未填充部分是深灰轨道色。鼠标滚轮悬停其上可调值
+// （onScroll 收到的是**格数**，已按 wheelNotch 折算）。
+func newLevelButton(iconRes fyne.Resource, size float32, onScroll func(steps int, pos fyne.Position), onTap func()) *compactButton {
+	b := newCompactButton(iconRes, colorLevelTrack, size, onTap)
+	b.sweep = canvas.NewRaster(b.sweepImage)
+	b.sweep.ScaleMode = canvas.ImageScaleSmooth
+	b.scroll = newScrollRelay(onScroll)
+	return b
+}
+
+// sweepCorner 圆周填充层的圆角半径（与按钮底色一致，满格时才完全重合）。
+const sweepCorner = 6
+
+// sweepImage 逐像素画"从正上方顺时针"的底色填充（REQ-MEDIA-006）：
+// 蓝色部分（level，0–1）打底，**橙色增益部分（boost，0–1）叠在蓝色之上**
+// ——麦克风 100% 时满蓝，100%→200% 再顺时针压一层橙，200% 时整块橙。
+//
+// 为什么用 Raster 而不是 canvas.Arc：Arc 画的是圆/扇形，满格时是个**圆**，
+// 方形按钮的四个角会露出轨道色（而按钮外观要求不变）。Fyne 没有"把图形裁剪到
+// 圆角矩形"的能力，于是这里逐像素自己判定：圆角矩形之内、且落在扫过角度内的
+// 像素填填充色，其余透明（透出下面的轨道色）。36×36 的小图 + 3×3 超采样，
+// 开销可忽略；像素坐标是设备像素（驱动按 DPI 放大后调用），所以按比例换算。
+func (b *compactButton) sweepImage(w, h int) image.Image {
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	if w <= 0 || h <= 0 || (b.level <= 0 && b.boost <= 0) {
+		return img
+	}
+	dipW, dipH := b.Size().Width, b.Size().Height
+	if dipW <= 0 || dipH <= 0 {
+		dipW, dipH = float32(w), float32(h)
+	}
+	scale := float64(w) / float64(dipW)
+	radius := sweepCorner * scale
+	blueDeg := float64(b.level) * 360
+	boostDeg := float64(b.boost) * 360
+	cx, cy := float64(w)/2, float64(h)/2
+
+	const ss = 3 // 每个像素 3×3 超采样，抹掉角度边界与圆角的锯齿
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			blueCover, boostCover := 0, 0
+			for sy := 0; sy < ss; sy++ {
+				for sx := 0; sx < ss; sx++ {
+					px := float64(x) + (float64(sx)+0.5)/ss
+					py := float64(y) + (float64(sy)+0.5)/ss
+					if !inRoundRect(px, py, float64(w), float64(h), radius) {
+						continue
+					}
+					// 相对圆心的角度：正上方 0°，顺时针为正（atan2(右, 上)）
+					deg := math.Atan2(px-cx, cy-py) * 180 / math.Pi
+					if deg < 0 {
+						deg += 360
+					}
+					if deg <= blueDeg {
+						blueCover++
+					}
+					if deg <= boostDeg {
+						boostCover++
+					}
+				}
+			}
+			if blueCover == 0 {
+				continue
+			}
+			// 橙色只叠在蓝色之上（两者同起点、同方向，boost 段必在 blue 段内），
+			// 边界像素按覆盖率在蓝橙之间插值
+			col := colorHoldBlue
+			if boostCover > 0 {
+				t := float64(boostCover) / float64(blueCover)
+				col = color.NRGBA{
+					R: uint8(float64(colorHoldBlue.R)*(1-t) + float64(colorLevelBoost.R)*t + 0.5),
+					G: uint8(float64(colorHoldBlue.G)*(1-t) + float64(colorLevelBoost.G)*t + 0.5),
+					B: uint8(float64(colorHoldBlue.B)*(1-t) + float64(colorLevelBoost.B)*t + 0.5),
+				}
+			}
+			img.SetNRGBA(x, y, color.NRGBA{R: col.R, G: col.G, B: col.B,
+				A: uint8(blueCover * 255 / (ss * ss))})
+		}
+	}
+	return img
+}
+
+// inRoundRect 点 (x,y) 是否落在 w×h、圆角半径 r 的圆角矩形内。
+func inRoundRect(x, y, w, h, r float64) bool {
+	if x < 0 || y < 0 || x >= w || y >= h {
+		return false
+	}
+	// 把点钳到"内矩形"上：角上距离圆心 > r 的在圆角之外
+	nx := math.Min(math.Max(x, r), w-r)
+	ny := math.Min(math.Max(y, r), h-r)
+	dx, dy := x-nx, y-ny
+	return dx*dx+dy*dy <= r*r
+}
+
+// scrollRelay 透明的滚轮中继（REQ-MEDIA-006）：**只**实现 fyne.Scrollable 并
+// 把滚轮折算成格数转发出去，不实现 Tappable / Hoverable，所以点击照常落到下层
+// 的按钮上。
+//
+// 为什么不把 Scrolled 直接加在 compactButton 上：Fyne 的滚轮分发（glfw 驱动的
+// processMouseScrolled）只把事件交给指针下**最深的一个** Scrollable，**不冒泡**
+// ——而 compactButton 到处都是（通话记录页/通信录页的行内「呼叫」「视频呼叫」
+// 按钮就在可滚动列表里），指针停在那些按钮上滚轮会被吞掉、列表不滚。中继只挂在
+// 音量按钮上，别处零影响。
+type scrollRelay struct {
+	canvas.Rectangle
+	onScroll func(steps int, pos fyne.Position)
+	acc      float32 // 未满一格的滚动余量
+}
+
+func newScrollRelay(onScroll func(steps int, pos fyne.Position)) *scrollRelay {
+	r := &scrollRelay{onScroll: onScroll}
+	r.FillColor = color.Transparent
+	return r
+}
+
+// Scrolled 实现 fyne.Scrollable：把滚动量折算成格数（见 wheelSteps），
+// 并把指针的绝对坐标一并带给回调（百分比提示要显示在指针附近）。
+func (r *scrollRelay) Scrolled(ev *fyne.ScrollEvent) {
+	if r.onScroll == nil {
+		return
+	}
+	if steps := wheelSteps(&r.acc, ev.Scrolled.DY); steps != 0 {
+		r.onScroll(steps, ev.AbsolutePosition)
+	}
 }
 
 // newCompactTextButton 带文字的紧凑按钮（主窗体呼叫按钮用）：
@@ -544,6 +696,12 @@ func newCompactTextOnlyButton(text string, bgColor, labelColor color.NRGBA, onTa
 }
 
 func (b *compactButton) CreateRenderer() fyne.WidgetRenderer {
+	if b.sweep != nil {
+		// 音量按钮：轨道（bg）+ 圆周填充层 + 图标 +
+		// 滚轮中继（必须排在**最后**：命中测试取遍历里最后一个匹配者）
+		return widget.NewSimpleRenderer(container.NewStack(b.bg, b.sweep,
+			container.NewCenter(b.icon), b.scroll))
+	}
 	if b.label != nil && b.icon != nil {
 		return widget.NewSimpleRenderer(container.NewStack(b.bg,
 			container.NewCenter(container.NewHBox(
@@ -554,6 +712,71 @@ func (b *compactButton) CreateRenderer() fyne.WidgetRenderer {
 			container.NewBorder(padRect(3), padRect(3), padRect(8), padRect(8), b.label)))
 	}
 	return widget.NewSimpleRenderer(container.NewStack(b.bg, container.NewCenter(b.icon)))
+}
+
+// SetTrack 更新未填充部分的底色（音量按钮：0% 用浅灰=禁用样式，非 0 用深灰轨道）。
+func (b *compactButton) SetTrack(c color.NRGBA) {
+	b.baseBg = c
+	b.SetBg(c)
+}
+
+// SetLevel 更新蓝色填充比例（0–1），不叠增益橙（扬声器用）。
+func (b *compactButton) SetLevel(level float32) { b.SetLevels(level, 0) }
+
+// SetLevels 更新圆周填充（0–1）：level 蓝色部分、boost 橙色增益部分
+// （叠在蓝色之上，麦克风 100%→200% 的那一段）。
+// （`Raster.Refresh` 会让驱动丢掉缓存纹理、重新调用生成器，见 gl 的 freeTexture。）
+func (b *compactButton) SetLevels(level, boost float32) {
+	if b.sweep == nil {
+		return
+	}
+	level = clampLevel(level)
+	boost = clampLevel(boost)
+	if b.level == level && b.boost == boost {
+		return
+	}
+	b.level, b.boost = level, boost
+	b.sweep.Refresh()
+}
+
+// clampLevel 把填充比例夹取到 0–1。
+func clampLevel(v float32) float32 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// wheelNotch 一格滚轮在 Fyne 里对应的滚动量（见 wheelSteps）。
+const wheelNotch = 25
+
+// maxWheelSteps 单个滚轮事件最多折算几步（**别去掉**）：Fyne 在 |yoff| ≥ 10 时会
+// 把滚动量乘 125（scroll_speed_default.go 的 scrollAccelerateRate），一次事件就
+// 可能是上万——不设上限的话音量会"瞬间到底"，用户完全没法微调。超出的部分直接
+// 丢弃（不留在余量里，否则后续每格都会继续狂掉）。
+const maxWheelSteps = 4
+
+// wheelSteps 把滚动量折算成格数：累计到 acc 上，满一格算一步，余数留存到
+// 下一次（触摸板的小量滚动会逐步累积，普通滚轮一格恰好一步）。纯函数，可单测。
+func wheelSteps(acc *float32, dy float32) int {
+	*acc += dy
+	steps := int(*acc / wheelNotch)
+	if steps > maxWheelSteps || steps < -maxWheelSteps {
+		// 异常大的一次滚动：只走上限那么多步，余量清掉——若把它留在
+		// 累计值里，之后每个事件都会继续按上限狂掉，音量直接到底。
+		*acc = 0
+		if steps > 0 {
+			return maxWheelSteps
+		}
+		return -maxWheelSteps
+	}
+	if steps != 0 {
+		*acc -= float32(steps) * wheelNotch
+	}
+	return steps
 }
 
 // SetIcon 更新图标（纯文字按钮忽略）。
@@ -701,76 +924,8 @@ func padRect(s float32) fyne.CanvasObject {
 	return r
 }
 
-// toggleSpeaker 扬声器开关切换（REQ-UI-023）。
-// 引擎存在则立即生效（呼叫状态 183 早期媒体下即可屏蔽回铃音）；
-// 引擎未建立（呼入振铃/呼出 180 阶段）时 ErrCallNotFound 静默忽略，
-// 状态在通话建立时由 applySessionAudioState 统一下发。
-func (a *App) toggleSpeaker() {
-	a.speakerOn = !a.speakerOn
-	a.applySpeakerButton()
-	if a.activeCallID != "" {
-		if err := a.core.MuteSpeaker(a.activeCallID, !a.speakerOn); err != nil && !errors.Is(err, core.ErrCallNotFound) {
-			logx.Logger().Warn("扬声器切换失败", "err", err)
-		}
-	}
-}
-
-// toggleMic 麦克风开关切换（REQ-UI-023）。下发时机同 toggleSpeaker。
-func (a *App) toggleMic() {
-	a.micOn = !a.micOn
-	a.applyMicButton()
-	if a.activeCallID != "" {
-		if err := a.core.MuteMic(a.activeCallID, !a.micOn); err != nil && !errors.Is(err, core.ErrCallNotFound) {
-			logx.Logger().Warn("麦克风切换失败", "err", err)
-		}
-	}
-}
-
-// applySessionAudioState 把会话内记忆的扬声器/麦克风状态应用到当前通话。
-// 通话结束后引擎随之销毁，新通话建立时重新下发（状态本身不重置）。
-// 引擎尚未创建（呼入振铃）时静默跳过，接通后再次调用即可生效。
-func (a *App) applySessionAudioState() {
-	if a.activeCallID == "" {
-		return
-	}
-	if err := a.core.MuteSpeaker(a.activeCallID, !a.speakerOn); err != nil && !errors.Is(err, core.ErrCallNotFound) {
-		logx.Logger().Warn("应用扬声器状态失败", "err", err)
-	}
-	if err := a.core.MuteMic(a.activeCallID, !a.micOn); err != nil && !errors.Is(err, core.ErrCallNotFound) {
-		logx.Logger().Warn("应用麦克风状态失败", "err", err)
-	}
-}
-
-// applySpeakerButton 按开关状态更新扬声器按钮外观（REQ-UI-023 修订）：
-// 开 = 蓝色底 + 白色图标；关 = 灰色底 + 红色图标。
-func (a *App) applySpeakerButton() {
-	if a.speakerBtn == nil {
-		return
-	}
-	if a.speakerOn {
-		a.speakerBtn.SetIcon(IconSpeakerOn)
-		a.speakerBtn.SetBg(colorHoldBlue)
-	} else {
-		a.speakerBtn.SetIcon(IconSpeakerOff)
-		a.speakerBtn.SetBg(colorSwitchGray)
-	}
-	a.speakerBtn.Refresh()
-}
-
-// applyMicButton 按开关状态更新麦克风按钮外观（同扬声器：开蓝底白图标、关灰底红图标）。
-func (a *App) applyMicButton() {
-	if a.micBtn == nil {
-		return
-	}
-	if a.micOn {
-		a.micBtn.SetIcon(IconMicOn)
-		a.micBtn.SetBg(colorHoldBlue)
-	} else {
-		a.micBtn.SetIcon(IconMicOff)
-		a.micBtn.SetBg(colorSwitchGray)
-	}
-	a.micBtn.Refresh()
-}
+// toggleSpeaker / toggleMic / applySpeakerButton / applyMicButton /
+// applySessionAudioState 与音量（REQ-MEDIA-006）一起放在 ui_call_volume.go。
 
 // setHoldButton 保持状态变化时更新保持按钮外观与状态文案。
 func (a *App) setHoldButton(muted bool) {
@@ -835,6 +990,7 @@ func (a *App) restoreIdle() {
 	a.stopTimer()
 	a.stopRingShake()
 	a.setHoldButton(false)
+	a.hideLevelTip() // 收起可能还挂着的音量百分比数字（面板要收起来了）
 	a.activeCallID = ""
 	a.activeCall = nil
 	a.setCallUI(uiIdle, nil)

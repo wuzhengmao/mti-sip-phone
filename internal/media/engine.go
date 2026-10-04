@@ -101,6 +101,15 @@ type Engine struct {
 	playMuted atomic.Bool // 扬声器静音（纯本地，停止播放但继续接收）
 	keepalive atomic.Bool // 早期媒体阶段持续发送静音保活（NAT 打洞）
 
+	// 音量控制（REQ-MEDIA-006）：采集侧增益与播放侧音量，纯本地。
+	//
+	// **存的是「百分比 − 100」的偏移量（-100…+100），不是 float32 的位模式**：
+	// 零值必须等于 100%（单位增益）。若直接存 float 位模式，未设置过的引擎
+	// 读回来是 +0.0 —— 也就是"静音"，会被误读成禁用。偏移量让零值天然等于
+	// 100%，显式的 0% 则存 -100，两者不会混淆。
+	micGainOff atomic.Int32 // 麦克风增益偏移（-100…+100 → 0–200%）
+	playVolOff atomic.Int32 // 扬声器音量偏移（-100…0 → 0–100%）
+
 	// 播放缓冲：样本粒度环形缓冲 + 序号跟踪
 	playMu   sync.Mutex
 	ring     *playRing
@@ -224,6 +233,42 @@ func (e *Engine) SetPlayMuted(muted bool) { e.playMuted.Store(muted) }
 
 // PlayMuted 扬声器是否静音（音频层据此决定要不要播"收到对端 DTMF"的按键音）。
 func (e *Engine) PlayMuted() bool { return e.playMuted.Load() }
+
+// SetMicGain 麦克风增益（纯本地，REQ-MEDIA-006）：1 = 原始电平，0–2
+//（界面显示 0–200%），超出范围会被夹取。
+// 0 与静音的差别只在于"发不发包"：界面把 0% 表达为 SetMicMuted(true)，
+// 增益本身不必（也不该）用 0 表达禁用。
+func (e *Engine) SetMicGain(gain float32) {
+	e.micGainOff.Store(int32(clampPercent(gain*100)) - 100)
+}
+
+// MicGain 当前麦克风增益（1 = 原始电平）。
+func (e *Engine) MicGain() float32 { return float32(e.micGainOff.Load()+100) / 100 }
+
+// SetSpeakerVolume 扬声器音量（纯本地，REQ-MEDIA-006）：1 = 原始电平，0–1
+//（界面显示 0–100%），超出范围会被夹取。
+func (e *Engine) SetSpeakerVolume(vol float32) {
+	off := int32(clampPercent(vol*100)) - 100
+	if off > 0 {
+		off = 0
+	}
+	e.playVolOff.Store(off)
+}
+
+// SpeakerVolume 当前扬声器音量（1 = 原始电平）。
+func (e *Engine) SpeakerVolume() float32 { return float32(e.playVolOff.Load()+100) / 100 }
+
+// clampPercent 把百分比夹取到 0–200（增益上限 200%）。
+func clampPercent(p float32) int {
+	v := int(p + 0.5) // 四舍五入，避免 0.999… 掉档
+	if v < 0 {
+		return 0
+	}
+	if v > 200 {
+		return 200
+	}
+	return v
+}
 
 // SetRemoteHold 远端保持：对端 re-INVITE 声明只发不收（sendonly）或
 // 完全停发（inactive）时，本端停止发送媒体。
@@ -465,8 +510,16 @@ func (e *Engine) FeedMic(pcm []int16) {
 		e.micBuf = e.micBuf[:0]
 		return
 	}
-	// 累积并按帧长发送
+	// 累积并按帧长发送。麦克风增益只作用在**本次新追加的那段**上（既有余量
+	// 早已缩放过了），也**不改调用方传入的缓冲**。
+	start := len(e.micBuf)
 	e.micBuf = append(e.micBuf, pcm...)
+	applyGain(e.micBuf[start:], e.MicGain())
+	if e.probe != nil {
+		// 诊断：落盘"实际送编码器的采集样本"（含增益），与 rx/play 两份 WAV 一起
+		// 就能看出增益有没有生效、是不是已经削波
+		e.probe.writeMic(e.micBuf[start:])
+	}
 	fs := codec.FrameSize()
 	for len(e.micBuf) >= fs {
 		payload, err := codec.Encode(e.micBuf[:fs])
@@ -477,6 +530,26 @@ func (e *Engine) FeedMic(pcm []int16) {
 		}
 		e.sendPacket(codec, payload)
 		e.micBuf = e.micBuf[fs:]
+	}
+}
+
+// applyGain 就地把样本乘以增益 g，并削波到 int16 范围（REQ-MEDIA-006：
+// 麦克风增益可到 200%，放大后必须削波，否则 int16 回绕会把响音变成爆音）。
+// g == 1 直接返回——默认路径零开销。
+func applyGain(buf []int16, g float32) {
+	if g == 1 || len(buf) == 0 {
+		return
+	}
+	for i, s := range buf {
+		v := float32(s) * g
+		switch {
+		case v > 32767:
+			buf[i] = 32767
+		case v < -32768:
+			buf[i] = -32768
+		default:
+			buf[i] = int16(v)
+		}
 	}
 }
 
@@ -548,12 +621,16 @@ func (e *Engine) setRemote(addr *net.UDPAddr, rtcpPort int) {
 // 接受任意长度（音频回调帧长不一定等于 20ms），由音频设备层周期调用。
 // 扬声器静音时输出全零，但仍消费缓冲——取消静音后从当前流位置继续，
 // 不会回放静音期间的旧数据。
+// 扬声器音量（REQ-MEDIA-006）在这里生效：诊断探针随后记录的就是
+// "设备实际拿到的样本"（含音量）。
 func (e *Engine) ReadPlayback(buf []int16) int {
 	e.playMu.Lock()
 	n := e.ring.Read(buf)
 	e.playMu.Unlock()
 	if e.playMuted.Load() {
 		n = 0
+	} else {
+		applyGain(buf[:n], e.SpeakerVolume())
 	}
 	for i := n; i < len(buf); i++ {
 		buf[i] = 0

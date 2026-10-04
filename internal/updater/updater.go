@@ -1,8 +1,8 @@
-// Package updater 实现自动更新：接收业务前端经 WS 告知的新版本信息，
-// 由用户在界面上确认后下载（可选 sha256 与可执行文件魔数校验）、替换
-// 当前可执行文件并重启。软电话自身不查询更新服务器——"有没有更高版本"
-// 由前端应用裁决（网页端 SDK 定时查询更新站点，见 web/sdk），本包只在
-// 版本可比时拒绝降级：预发布低于同号正式版（开发构建版本号带 -rc，
+// Package updater 实现自动更新：**软电话自己**按配置的周期查询更新站点
+// （见 checker.go，REQ-UPD-017），查到更高版本后经界面提示用户，由用户确认后
+// 下载（可选 sha256 与可执行文件魔数校验）、替换当前可执行文件并重启；
+// 业务前端仍可经 WS 强制推送某个版本（`system.notifyUpdate` + force）。
+// 版本比较在可比时拒绝降级：预发布低于同号正式版（开发构建版本号带 -rc，
 // 正式版发布时数字相同也必须能通知更新，规则见 version.go）。
 //
 // 状态变化经 core.Bus 发布 "system.update" 事件（UI 渲染、WS 转发给网页）。
@@ -58,6 +58,15 @@ type Updater struct {
 
 	lastPublish  time.Time
 	lastProgress float64
+
+	// ---- 更新站点查询（checker.go，REQ-UPD-017）----
+	// 单独一把锁：轮询 goroutine 读写站点配置与去重键，与上面的下载状态机无关
+	//（两者只在 Notify 处交汇，Notify 自己取 mu）。
+	checkMu      sync.Mutex
+	site         core.SiteConfigSnapshot
+	lastNotified string        // 已告知过的「版本|sha256」（同一版本不反复弹窗）
+	checkOnce    sync.Once     // Start 只起一个轮询 goroutine
+	checkKick    chan struct{} // 催一次检查（容量 1，非阻塞投递）
 }
 
 // New 创建 Updater。

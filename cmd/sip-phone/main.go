@@ -157,9 +157,10 @@ func main() {
 	}
 	defer closeContacts()
 
-	// 自动更新（REQ-UPD-*）：业务前端经 WS 告知新版本，用户在界面上确认后
-	// 下载、替换当前可执行文件并重启。Cleanup 清理上次更新的残留文件，
-	// 必须放在单实例锁之后（避免删到另一实例正在使用的文件）。
+	// 自动更新（REQ-UPD-*）：**软电话自己**按配置的周期查询更新站点
+	//（REQ-UPD-017，配了站点才查），查到新版本提示用户，用户确认后才下载、
+	// 替换当前可执行文件并重启；业务前端仍可经 WS 强制推送。Cleanup 清理上次
+	// 更新的残留文件，必须放在单实例锁之后（避免删到另一实例正在使用的文件）。
 	upd := updater.New(updater.Options{
 		Bus:     bus,
 		ExePath: exePath,
@@ -168,6 +169,14 @@ func main() {
 	})
 	upd.Cleanup()
 	app.SetUpdater(upd)
+	// 下发配置里的更新站点（空 = 不检查）并启动轮询；headless 模式同样生效
+	upd.SetUpdateConfig(core.SiteConfigSnapshot{
+		URL:        cfg.Update.URL,
+		AppID:      cfg.Update.AppID,
+		Interval:   cfg.Update.Interval(),
+		Prerelease: cfg.Update.Prerelease,
+	})
+	upd.Start(ctx)
 
 	// 音频管理器：设备枚举与选择（REQ-MEDIA-002）。
 	// 后端初始化在后台进行（音频服务不可达时 miniaudio 会长时间阻塞），

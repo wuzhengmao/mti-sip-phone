@@ -6,8 +6,8 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.9**（dev 开发中；1.0.8 含通话记录（本地 SQLite、主窗体内记录页）、
-配置页顶栏与记录页统一，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
+当前版本 **1.0.10**（dev 开发中；1.0.9 含通信录（本地 SQLite、拼音搜索、CSV/JSON
+导入导出、与通话记录/通话面板联动），已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
 真实环境：OpenSIPS 2.4.11（10.168.4.40:15060，账号 2999），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
 
@@ -27,7 +27,7 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 ```bash
 # 构建脚本按目标打印本次能力（如 CGO+音频+视频，缺库时标出无视频/无Opus）；视频/Opus 取决于
 # 第三方静态库是否已生成（见下），缺哪个就降级为哪个没有。
-# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.9-rc），
+# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.10-rc），
 # 正式构建用 SIP_PHONE_RELEASE=1（发布脚本会设）；不经脚本的 go build/go run 是基础版本号。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO）
@@ -57,9 +57,10 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 
 # 音频/媒体排查（可选，默认关闭、零开销）：设 SIP_PHONE_AUDIODUMP=1 启动，
 # 每通电话在日志里每秒输出一行【诊断】（收包/写入/读出样本、播放回调次数、
-# 缓冲深度、累计截断），并把"网络收到的声音"与"实际播放的声音"分别落成
-# 日志目录下的 rx-<RTP端口>.wav / play-<RTP端口>.wav——两者一比就知道
-# 问题出在收、还是出在播。分析：python tools/wavscan.py <wav>
+# 缓冲深度、累计截断、采集峰值/采集RMS/麦克风增益%），并把"网络收到的声音"、
+# "实际播放的声音"与"送编码器的采集声音（含麦克风增益）"分别落成日志目录下的
+# rx-<RTP端口>.wav / play-<RTP端口>.wav / mic-<RTP端口>.wav——三者一比就知道
+# 问题出在收、播、还是麦克风。分析：python tools/wavscan.py <wav>
 ```
 
 测试页地址：`http://127.0.0.1:<WS端口>/`（默认 8765，占用自动 +1 并保存配置）。
@@ -70,9 +71,9 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 `/docs/upload`、`/docs/api`）。本仓库侧的发布入口：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.9-rc），不上传
+./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.10-rc），不上传
 ./scripts/release.sh --pre             # 预发布：真实上传（站点标记为预发布）
-./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.9
+./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.10
 # Windows 用 scripts/release.bat（同样的参数，内部走 git-bash）
 ```
 
@@ -162,7 +163,8 @@ internal/
   autostart/  开机自启（Windows HKCU Run / Linux XDG autostart，其他平台 no-op）
 web/
   test.html   测试页面（内嵌进二进制，右列事件日志）
-  sdk/        JS SDK（sip-phone-sdk.js + .d.ts，无 token；含定时查询更新站点）
+  sdk/        JS SDK（sip-phone-sdk.js + .d.ts，无 token；更新只保留强制推送
+              notifyUpdate，查询在软电话侧）
 release/      发布到更新站点的配置与元数据：release.conf（站点/应用 ID/令牌）、
               app.json（应用级元数据，经站点 metadata 接口写入）、icon.svg（图标，经 icon 接口写入）
 scripts/      第三方库构建（build-video-libs.*、build-audio-lib.*）与一键发布（release.sh/.bat）
@@ -183,7 +185,7 @@ main（组装）
 ```
 
 - **事件流单向**：sip 层 → `p.sink`（core.App 回调：OnIncoming/OnRinging/OnEstablished/OnFailed/OnTerminated）→ 事件总线 → UI 与 WS 订阅者。
-- **自动更新**：业务前端（网页）经 WS `system.notifyUpdate` 告知新版本（软电话自身不查更新服务器）→ `internal/updater` 校验并发布 `system.update` 事件 → UI 弹右下角提示窗 + 主窗体提示行 → **用户点击后**才下载、替换 exe 并重启（WS 不能触发下载/重启）。下载/替换的进度与失败原因同样经总线事件到 UI 与网页。网页侧「有没有更高版本」由 **JS SDK 定时查询更新站点**得到（`updateUrl` 在网页初始化 SDK 时告知，见 `web/sdk/sip-phone-sdk.js` 的 `checkUpdate`/`update.check`），软电话只负责提示与安装。`system.notifyUpdate` 另带可选 `force`（**强制推送**，跳过版本高低检查，测试页「推送更新」按钮用）——SDK 的定时查询**不带**它，自动更新仍按版本比较走。
+- **自动更新**：**软电话自己**按配置的周期查更新站点（`internal/updater/checker.go`，配置见 `config.Update`：站点/应用 ID/周期/预览版，配置页可改、网页可经 WS `system.setUpdateConfig` 写，REQ-UPD-017/018）→ 查到更高版本经 `updater.Notify` 校验并发布 `system.update` 事件 → UI 弹右下角提示窗 + 主窗体提示行 → **用户点击后**才下载、替换 exe 并重启（WS 不能触发下载/重启）。下载/替换的进度与失败原因同样经总线事件到 UI 与网页。业务前端仍可经 WS `system.notifyUpdate` **强制推送**某个版本（`force` 跳过版本高低检查，测试页「推送」按钮用，REQ-UPD-019）；SDK 不再查询站点。
 - **media.Engine 与音频设备解耦**：音频回调调用 `FeedMic`（任意帧长，内部按 20ms 帧累积发送）/ `ReadPlayback`（任意帧长，内部从样本环形缓冲取）。
 - **播放缓冲**（media/jitter.go）：样本粒度环形缓冲 8 秒容量；RTP 按序号处理——乱序/过期丢弃、丢包填静音（PLC 用静音而非循环旧帧）、SSRC 切换或序号大跳变（>2 秒）重置缓冲（183 早期媒体 → 200 新媒体流的关键）。
 - **保持语义**：本端保持发 re-INVITE（offer `a=sendonly`，恢复 `a=sendrecv`）；对端 re-INVITE 按方向镜像应答（对端 `recvonly` → 本端 `sendonly` 且停止发送）。
@@ -288,7 +290,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **交流、文档、注释、提交信息、界面文案一律中文**。
 - **Git 工作流**：开发在分支上进行（工作分支 dev，master 为收口分支）；**会话中修改的代码不得自动提交**——提交与 push 必须经用户人工确认后执行，且**不自动合并到 master**（合并 master 需用户明确指示）。
 - **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
-- 版本 1.0.9 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
+- 版本 1.0.10 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
 - 弹窗按钮文案「确定/取消」；**弹窗的 parent 必须是当前可见的窗口**——Fyne 把对话框画在父窗口的画布上，主窗体隐藏到托盘时弹在主窗体上用户根本看不见。默认走 `a.dialogParent()`（主窗体不可见且通话记录窗口开着就用它），从记录窗口发起的用 `showXxxIn(a.historyW, …)`；**永远不要传 nil**（dialog 的 parent 为 nil 直接 panic）。
 - **通话记录（REQ-CALL-007）的写入口径**：开始/接通/结束三个时刻在 `core.App` 里**直接入队**（不订阅事件总线——总线容量 64、满即丢，通话记录不能建立在会丢事件的东西上），且**先写记录再 `publishCall`**（界面收到 `call.terminated` 会立刻查库刷新，顺序反了就查不到新记录）。同一通话重复上报结束的幂等由存储层的 `ended_at=0` 条件兜住，**不要**在核心层再加"是否首次结束"的状态。库里时间戳 0 表示"未接通/进行中"（0 与 `time.Time{}` 的互转只在 `internal/calllog` 的 `toMillis/fromMillis` 里做，别把 1970 年漏到界面）。
 - **通信录（REQ-CONTACT-*）的查找走内存快照，不要逐行查库**：启动时把全量联系人载入 `core.App` 的内存快照（`contactMap` 号码 → 条目 + `contactList` 全量），通话记录行/通话面板/视频窗口标题/WS 事件负载的查找都是 O(1) 读内存。写操作统一走 `App.mutateContacts`——**"写存储 + 重建快照"必须整体串行**（`contactWriteMu`），否则两个并发写入方（界面 + 多个 WS 连接）可能让先写的快照后于后写的完成，把旧数据当最新发布出去。`core.Call.Contact` 是**发布事件时即时解析**的（不在 upsert 时就地写 `a.calls` ——那会和 State() 的读路径构成数据竞争）。
@@ -503,6 +505,50 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   一次性垫高；垫高后深度**只增不减**（读多少写多少），表现为"通话越久延迟越大、
   有几秒"。早先容量给到 8 秒，等于允许累积 8 秒延迟。截断时会打
   `播放缓冲超深已截断` 的 Warn（限频 10s），这是排查延迟的第一线索。
+- **音量/增益（REQ-MEDIA-006）**：通话面板扬声器/麦克风按钮**滚轮即调音量**，
+  0% = 禁用（等同「关」，走 `SetMicMuted`/`SetPlayMuted` 静音标志，**不**下发增益 0
+  ——否则别处单独解除静音会得到"没有提示的静音"）。引擎里增益/音量存的是
+  **「百分比 − 100」的整数偏移**（`micGainOff`/`playVolOff`）而不是 float32 位模式：
+  零值必须等于 100% 单位增益，存位模式时零值恰好是 +0.0（静音）会被误读。
+  界面侧同理按**百分比整数**存（`levelState`，0.05 累加 20 次不再等于 1.0）。
+  滚轮事件走 `fyne.Scrollable`，但**一格不是 1**——桌面驱动把 yoff 放大成 25
+  （`scroll_speed_default.go`），触摸板是连续小量，所以按「累计 DY ÷ 25 取整、
+  余数留存」（`wheelSteps`）折算，别写成"一个事件一步"；`|yoff| ≥ 10` 时驱动还会
+  乘 125，**单事件步数必须夹取**（`maxWheelSteps`），否则一次滚动就到底。
+  按钮底色是**圆周填充**（`compactButton.sweepImage`）：**100% 满蓝**，麦克风
+  100%→200% 的增益段在蓝色之上再叠一层**橙色**（`colorLevelBoost`，200% 整块橙）
+  ——所以 levelState 的 `level()` 只管"是否满格"，画底色用 `blueLevel()`/`boostLevel()`。
+  从正上方起顺时针扫过，
+  用 `canvas.Raster` 逐像素画——**Fyne 没有"裁剪到圆角矩形"的能力**，`canvas.Arc`
+  满格时是个圆、方形按钮的四个角会露出轨道色，所以这里自己按角度+圆角矩形判定。
+  Raster 的生成器拿到的是**设备像素**尺寸（`textureScale`），按 `Size()` 换算比例；
+  改 level 后 `Raster.Refresh()` 会让驱动丢掉缓存纹理重新生成（gl 的 `freeTexture`）。
+- **滚轮监听不能挂在 `compactButton` 上**：Fyne 的滚轮分发只把事件交给指针下
+  **最深的一个** `Scrollable` 且**不冒泡**（glfw 驱动 `processMouseScrolled` →
+  `driver.FindObjectAtPositionMatching`），而 `compactButton` 到处都是——通话记录页/
+  通信录页的行内「呼叫」按钮就在可滚动列表里，挂上去会把列表的滚轮吞掉。
+  音量按钮挂的是透明中继 `scrollRelay`（只实现 `Scrollable`，不实现
+  Tappable/Hoverable，排在 Stack 最后），别处零影响。
+- **`core.Call` 的 `micGain`/`speakerVolume` 是百分比、且是"恢复值"**：0 表示禁用，
+  禁用期间字段保留解禁后回到的音量，当前是否禁用看 `micMuted`/`speakerMuted`；
+  新通话在 `upsertCall` 里默认 100（0 有专有含义，不能靠零值）。`upsertCall` 是
+  **整份覆盖**，只在通话创建时调用，后续状态一律走 `updateCall`。
+- **自动更新：查询在软电话、网页只写配置 + 强制推送（REQ-UPD-017~019）**。软电话按
+  `config.Update`（站点/应用 ID/周期/预览版）自己定时查 `GET {站点}/api/v1/apps/{应用}/check`
+  （`internal/updater/checker.go`，**不带 channel**，用站点默认通道），查到更高版本走
+  `updater.Notify` 同一条链路提示用户。几个坑：① **首次检查要在启动后立即做**，代码里
+  用 `first` 标志把首轮 wait 置 0——否则填完站点要干等一个周期；② 首次检查往往**早于界面
+  订阅事件**，`system.update` 收不到、同版本又被 `lastNotified` 去重挡掉，界面就永远不弹窗
+  ——所以 `ui.Run` 在订阅后要**补取一次 `UpdateStatus()`**；③ 查询结果**不要把站点返回的
+  os/arch 塞回 `UpdateInfo`**（站点给的是 `x64/x86`，`Notify` 按 `GOARCH` 严格比对会拒绝）；
+  ④ 去重键是「版本|sha256」，改配置时清空。网页侧：`system.setUpdateConfig`（字段可选）
+  写配置、`system.notifyUpdate` 强制推送，SDK **不再查询站点**（`notifyUpdate` 恒带 force）。
+- **`call.audio` 事件必须合并发布**（`internal/core/audio.go` 的 `audioPublisher`）：
+  滚轮/拖滑块一秒能触发十几下，逐条广播会把事件总线（容量 64、满即丢）刷爆、把
+  通话状态事件挤掉，也会把网页日志刷屏。合并口径 =「首次立即发 + 窗口内最多补发
+  一条（150ms）」，最后一次改动一定会发出去。另外：**静音状态没变就不要调
+  `MuteMic`/`MuteSpeaker`**（它们在 core 里会发布事件），0% 的禁用由
+  `SetMicGain/SetSpeakerVolume` 内部处理。
 - **Opus：RTP 时钟率 48000 与 PCM 帧长 160 不是一回事**。内部 PCM 管线恒为 8kHz
   （设备、播放缓冲、提示音都是 8k），所以编码器/解码器以 `Fs=8000` 创建——窄带工作，
   不需要重采样，对端发宽带/全带包也能解码（libopus 内部降到 8k 输出）。但 SDP 的
@@ -658,4 +704,14 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   的 `index out of range`，每次崩的字符串都不一样）。所以涉及后台加载的界面
   （如通话记录窗口）**不要**写成渲染测试；纯文案/逻辑函数照常测。真实驱动下
   `fyne.Do` 会投递到主循环，不存在这个问题。
+- **改完内嵌网页 / JS SDK 后，用无头 Edge 跑一遍页面查运行期错误**：`web/test.html` 与 SDK
+  是**内嵌进二进制**的（改完必须重新构建 + 重启，否则页面还是旧的——踩过：SDK 改坏后页面报
+  `Uncaught TypeError: this._startHeartbeat is not a function`，本地文件已修好却没重建，
+  看页面仍旧报错）。验证命令（Edge 在 Win11 自带，路径见下）：
+  `"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --headless=new --disable-gpu
+  --enable-logging=stderr --v=1 --virtual-time-budget=6000 --dump-dom http://127.0.0.1:8765/`
+  → `grep -i uncaught` 看有没有 JS 运行期错误，`--dump-dom` 里能看到 JS 填出来的内容
+  （如「当前版本：1.0.10-rc（windows/amd64）」）说明 SDK 连上并跑通了。改 SDK 时另外用脚本
+  对一遍「`this.xxx()` 调用是否都有定义」——**大段删代码时最容易连带删掉无关方法**
+  （这次就是删更新查询时把 `_emit` / `_startHeartbeat` 一起删了，页面直接白屏）。
 - **rtp_rx.wav**：根目录与 internal/sip/ 下的抓包调试产物，已被 .gitignore 忽略，勿误提交。

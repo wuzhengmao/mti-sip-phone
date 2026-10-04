@@ -38,6 +38,22 @@ import (
 	"mti-sip-phone/internal/sip"
 )
 
+// themeColorNRGBA 取一个主题色并转成 color.NRGBA（自绘控件用；
+// 主题色是 color.Color，自绘的 compactButton 等只收 NRGBA）。
+func themeColorNRGBA(name fyne.ThemeColorName) color.NRGBA {
+	app := fyne.CurrentApp()
+	if app == nil {
+		return color.NRGBA{R: 0xcc, G: 0xcc, B: 0xcc, A: 0xff}
+	}
+	th := app.Settings().Theme()
+	r, g, b, a := th.Color(name, app.Settings().ThemeVariant()).RGBA()
+	return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
+}
+
+// primaryUpdateSite 项目官方更新站点（配置页「使用主站点」按钮一键填入用）。
+// 配置里**不默认填**：更新站点留空 = 不自动检查更新（REQ-UPD-017）。
+const primaryUpdateSite = "https://update.wuzm219.cn"
+
 // App GUI 应用：组装 Fyne 窗口与托盘，订阅核心事件驱动界面。
 type App struct {
 	core      *core.App
@@ -106,6 +122,13 @@ type App struct {
 	logDirLabel       *widget.Label
 	wsPortEntry       *widget.Entry // 本地 WS 监听端口（默认 8765，修改后重启生效）
 
+	// 自动更新（REQ-UPD-017）：软电话自己按周期查更新站点
+	updSiteEntry      *widget.Entry // 更新站点地址，空 = 不检查
+	updAppIDEntry     *widget.Entry // 应用 ID
+	updIntervalEntry  *widget.Entry // 检查周期（分钟）
+	updPrereleaseChk  *widget.Check // 是否接受预览版
+	updStatusLabel    *widget.Label // 最近一次检查结果/说明
+
 	// 通话面板控件（呼叫/振铃/通话三态共用）
 	callName       *callNameBox // 对端号码/名称（含 ★ 与备注悬停，REQ-UI-037）
 	callStateLabel *plainText   // 自绘单行文本（widget.Label 在本主题下带 12px 内边距，会与名称行错位）
@@ -137,10 +160,13 @@ type App struct {
 	trayRegistered bool
 	autoAnswer     bool // 自动接听开关
 
-	// 扬声器/麦克风开关（REQ-UI-023）：会话内记忆——通话面板再次弹出时
-	// 沿用上次状态；不持久化，应用重启后恢复默认都打开。
-	speakerOn bool
-	micOn     bool
+	// 扬声器音量 / 麦克风增益（REQ-UI-023 / REQ-MEDIA-006）：会话内记忆——
+	// 通话面板再次弹出时沿用上次的值；不持久化，应用重启后恢复默认 100%。
+	// 0% 即"禁用"，等同原来开关的「关」。见 ui_call_volume.go。
+	speakerLevel levelState
+	micLevel     levelState
+	pctTimer     *time.Timer // 百分比数字的隐藏定时器（滚动时重置）
+	pctGen       uint64      // 百分比数字的世代号（作废已触发但还没执行的旧回调）
 
 	// 主窗口可见性跟踪（Fyne 无 Visible() 查询，自行维护）：
 	// mainShown 当前是否显示；mainWasVisible 通话前是否可见
@@ -228,8 +254,10 @@ func New(c *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath strin
 		onRestart: onRestart,
 		fyne:      app.NewWithID("com.mti.sip-phone"),
 		regState:  "unregistered",
-		speakerOn: true, // 扬声器默认开（REQ-UI-023）
-		micOn:     true, // 麦克风默认开（REQ-UI-023）
+		// 扬声器/麦克风默认 100%（REQ-UI-023 / REQ-MEDIA-006，会话内记忆，
+		// 不持久化：重启回默认开）
+		speakerLevel: newLevelState(speakerMaxPercent),
+		micLevel:     newLevelState(micMaxPercent),
 		// 视频：默认开（会话内记忆，不持久化）
 		videoOn:   true,
 		previewOn: true,
@@ -609,6 +637,47 @@ func (a *App) buildSettingsPage() {
 		a.autoStartCheck,
 	)
 
+	// ---- 自动更新（REQ-UPD-017）----
+	// 软电话自己按周期查询更新站点；站点**留空 = 不检查**，所以不默认填写
+	//（「使用主站点」按钮一键填入官方地址）。网页也可经 WS
+	// system.setUpdateConfig 写这份配置（业务前端统一管理更新策略）。
+	a.updSiteEntry = newFormEntry()
+	// 「使用主站点」：**小按钮**（自绘 compact 按钮——Fyne 标准按钮高度跟随主题
+	// 内边距，在表单里显得过大），与「更新站点」标签同一排、右对齐；输入框仍是
+	// 与其他输入项一样的整行长度
+	updSiteBtn := newCompactTextOnlyButton("使用主站点",
+		themeColorNRGBA(theme.ColorNameButton), themeColorNRGBA(theme.ColorNameForeground),
+		func() { a.updSiteEntry.SetText(primaryUpdateSite) })
+	updSiteBtn.label.TextSize = 12 // 比表单正文小一号，"小按钮"
+	border := themeColorNRGBA(theme.ColorNameInputBorder)
+	updSiteBtn.bg.StrokeColor = &border
+	updSiteBtn.bg.StrokeWidth = 1
+	// 行内布局用 panelRowLayout（首元素靠左、其余靠右且**保持自然尺寸**）：
+	// container.NewBorder 会把右侧子项拉满行高，小按钮会被撑大
+	updSiteItem := container.NewVBox(
+		container.New(panelRowLayout{}, widget.NewLabel("更新站点"), updSiteBtn),
+		container.NewHScroll(a.updSiteEntry),
+	)
+	a.updAppIDEntry = newFormEntry()
+	a.updIntervalEntry = newFormEntry()
+	a.updIntervalEntry.SetPlaceHolder("1–1440，默认 5")
+	a.updPrereleaseChk = widget.NewCheck("接受预览版", nil)
+	a.updStatusLabel = widget.NewLabel("")
+	a.updStatusLabel.Wrapping = fyne.TextWrapWord
+
+	updSaveBtn := widget.NewButtonWithIcon("保存并检查", theme.ConfirmIcon(), a.saveUpdateConfig)
+	updCheckBtn := widget.NewButton("立即检查", a.checkUpdateNow)
+
+	updateCard := container.NewVBox(
+		widget.NewLabelWithStyle("自动更新", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		updSiteItem,
+		formItem("应用 ID", a.updAppIDEntry),
+		formItem("检查周期（分钟）", a.updIntervalEntry),
+		a.updPrereleaseChk,
+		container.NewHBox(updCheckBtn, updSaveBtn),
+		a.updStatusLabel,
+	)
+
 	// ---- 网页接入（WS 服务端口，无 token 鉴权）----
 	a.wsPortEntry = newFormEntry()
 	a.wsPortEntry.SetText(strconv.Itoa(a.cfg.WS.Port))
@@ -623,13 +692,15 @@ func (a *App) buildSettingsPage() {
 
 	// 滚动容器容纳全部设置项；右侧留 16px 空白避免滚动条遮住输入框
 	// 「常规」（开机自动启动）置于最上方
+	// 自动更新卡片放在**最下面**（更新配置是偶尔改一次的东西，不占前面的位置）
 	scrollContent := container.NewVBox(
 		generalCard, widget.NewSeparator(),
 		accCard, widget.NewSeparator(),
 		audioCard, widget.NewSeparator(),
 		videoCard, widget.NewSeparator(),
 		logCard, widget.NewSeparator(),
-		wsCard,
+		wsCard, widget.NewSeparator(),
+		updateCard,
 	)
 	// 右侧 14px 精确空隙（滚动条悬浮区），与左侧 padding 对称
 	rightGap := canvas.NewRectangle(color.Transparent)
@@ -654,8 +725,82 @@ func (a *App) buildSettingsPage() {
 	// 回填当前配置
 	a.loadAccountIntoForm()
 	a.loadLogConfigIntoForm()
+	a.loadUpdateConfigIntoForm()
 	a.refreshDevices()
 	a.refreshCameras()
+}
+
+// loadUpdateConfigIntoForm 把自动更新配置回填到表单（REQ-UPD-017）。
+func (a *App) loadUpdateConfigIntoForm() {
+	if a.updSiteEntry == nil {
+		return
+	}
+	a.loadingForm = true
+	defer func() { a.loadingForm = false }()
+	cfg := a.cfg.Update
+	a.updSiteEntry.SetText(cfg.URL)
+	a.updAppIDEntry.SetText(cfg.AppID)
+	a.updIntervalEntry.SetText(strconv.Itoa(config.ClampUpdateIntervalMins(cfg.IntervalMins)))
+	a.updPrereleaseChk.SetChecked(cfg.Prerelease)
+	a.setUpdateStatusText("")
+}
+
+// setUpdateStatusText 设置"自动更新"卡片底部的状态文字（空 = 只显示说明）。
+func (a *App) setUpdateStatusText(s string) {
+	if a.updStatusLabel == nil {
+		return
+	}
+	if s == "" && a.cfg.Update.Enabled() {
+		s = fmt.Sprintf("已配置：每 %d 分钟检查一次",
+			config.ClampUpdateIntervalMins(a.cfg.Update.IntervalMins))
+	}
+	a.updStatusLabel.SetText(s)
+}
+
+// saveUpdateConfig 保存自动更新配置并立即检查一次（配了站点才会查）。
+// 校验口径与 WS 侧一致（core.SetUpdateConfig 里做），这里只做输入框层面的回填。
+func (a *App) saveUpdateConfig() {
+	if a.loadingForm {
+		return
+	}
+	site := strings.TrimSpace(a.updSiteEntry.Text)
+	appID := strings.TrimSpace(a.updAppIDEntry.Text)
+	interval, err := strconv.Atoi(strings.TrimSpace(a.updIntervalEntry.Text))
+	if err != nil || interval <= 0 {
+		interval = config.ClampUpdateIntervalMins(a.cfg.Update.IntervalMins)
+	}
+	cfg := config.UpdateConfig{
+		URL:          site,
+		AppID:        appID,
+		IntervalMins: interval,
+		Prerelease:   a.updPrereleaseChk.Checked,
+	}
+	if err := a.core.SetUpdateConfig(cfg); err != nil {
+		a.showError(err)
+		return
+	}
+	// 回到钳制后的真实值（周期越界时给用户看见实际生效值）
+	a.loadUpdateConfigIntoForm()
+	if site == "" {
+		a.setUpdateStatusText("已保存：更新站点为空，不自动检查")
+	} else {
+		a.checkUpdateNow()
+	}
+}
+
+// checkUpdateNow 立即检查一次更新（后台 goroutine 里发请求，结果回主线程显示）。
+func (a *App) checkUpdateNow() {
+	a.setUpdateStatusText("正在检查更新…")
+	go func() {
+		res, err := a.core.CheckUpdateNow(context.Background())
+		fyne.Do(func() {
+			if err != nil {
+				a.setUpdateStatusText("检查失败：" + err.Error())
+				return
+			}
+			a.setUpdateStatusText(res.Text())
+		})
+	}()
 }
 
 // newFormEntry 表单输入框：关闭自身滚动（滚轮事件传递给外层 VScroll）。
@@ -698,10 +843,12 @@ func (a *App) showSettings() {
 		a.showInfo("提示", "通话中无法进入设置")
 		return
 	}
-	// 每次进入时刷新 WS 端口显示（端口可能在启动时被自动 +1 调整）
+	// 每次进入时刷新 WS 端口显示（端口可能在启动时被自动 +1 调整），
+	// 自动更新配置同样刷新（网页可能刚用 system.setUpdateConfig 改过）
 	if a.wsPortEntry != nil {
 		a.wsPortEntry.SetText(strconv.Itoa(a.cfg.WS.Port))
 	}
+	a.loadUpdateConfigIntoForm()
 	a.hideTip() // 切页时收起备注提示（指针可能没离开行）
 	a.mainContent.Objects[0] = a.settingsPage
 	a.mainContent.Refresh()
@@ -1136,6 +1283,12 @@ func (a *App) subscribeEvents() {
 	//"网页在看画面，桌面视频窗口却也打开了"（用户实测）。旋转/镜像状态同理。
 	a.webVideoOn = a.core.WebVideoState().Active
 	a.applyVideoTransforms(a.core.VideoTransforms())
+	// 更新状态同理（REQ-UPD-017）：软电话启动后**立即**查一次更新站点，
+	// 那次检查往往在界面订阅事件之前就完成——事件收不到，用户就永远看不到
+	// 提示（同版本的重复检查还会被去重挡掉）。订阅后补取一次当前状态。
+	if st := a.core.UpdateStatus(); st.Phase != core.UpdateIdle {
+		a.onUpdateStatus(st)
+	}
 	go func() {
 		for ev := range sub {
 			fyne.Do(func() { a.onEvent(ev) })
@@ -1150,6 +1303,12 @@ func (a *App) onEvent(ev core.Event) {
 		if st, ok := ev.Data.(core.UpdateStatus); ok {
 			a.onUpdateStatus(st)
 		}
+	case "system.updateConfig":
+		// 自动更新配置变化（本机保存或网页写入）：回填配置页表单（REQ-UPD-018）
+		if _, ok := ev.Data.(config.UpdateConfig); ok {
+			a.loadUpdateConfigIntoForm()
+		}
+
 	case "system.autoAnswer":
 		// 自动接听开关变化（本地按钮点击或网页 system.setAutoAnswer 设置）
 		if st, ok := ev.Data.(core.AutoAnswerState); ok {
@@ -1348,13 +1507,11 @@ func (a *App) onEvent(ev core.Event) {
 
 	case "call.audio":
 		// 麦克风/扬声器开关变化（REQ-UI-023）：桌面按钮与网页控制共用一份状态，
-		// 网页改了也要同步本机面板的按钮外观与"会话内记忆"。
+		// 网页改了也要同步本机面板的按钮外观与"会话内记忆"（0% ↔ 上次非零值，
+		// 幂等——本机自己滚轮触发的调节也会收到这条事件，不能把刚调的值冲掉）。
 		if callID, call := callData(ev.Data); call != nil && callID == a.activeCallID {
 			a.activeCall = call
-			a.micOn = !call.MicMuted
-			a.speakerOn = !call.SpeakerMuted
-			a.applyMicButton()
-			a.applySpeakerButton()
+			a.syncAudioButtonsFromEvent(call)
 		}
 	}
 }

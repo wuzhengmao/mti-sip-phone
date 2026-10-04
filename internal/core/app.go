@@ -44,6 +44,12 @@ type Call struct {
 	// 桌面通话面板与网页控制共用同一份状态，变更时发 call.audio 事件）。
 	MicMuted     bool `json:"micMuted"`
 	SpeakerMuted bool `json:"speakerMuted"`
+
+	// MicGain / SpeakerVolume 麦克风增益与扬声器音量（百分比，REQ-MEDIA-006）：
+	// 麦克风 0–200、扬声器 0–100，**0 表示禁用**（同 MicMuted/SpeakerMuted）。
+	// 禁用时这里保留"恢复值"（解禁后回到的音量），是否禁用看上面两个标志。
+	MicGain       int `json:"micGain"`
+	SpeakerVolume int `json:"speakerVolume"`
 	// HasVideo 本次通话涉及视频（呼入时对端 offer 含视频段；呼出时本端发起了视频呼叫）。
 	HasVideo bool `json:"hasVideo"`
 	// Video 视频状态快照（未协商成功时为零值）。
@@ -73,6 +79,9 @@ type State struct {
 	AutoAnswer bool `json:"autoAnswer"`
 	// Video 显示用的旋转/镜像（远端 + 本地回显），网页连上就能拿到并与桌面同步
 	Video VideoTransforms `json:"video"`
+	// UpdateConfig 自动更新配置（站点/应用 ID/周期/预览版，REQ-UPD-017）：
+	// 网页连上就能拿到当前值，也可用 system.setUpdateConfig 改写
+	UpdateConfig config.UpdateConfig `json:"updateConfig"`
 }
 
 // 常见错误，供接口层映射为错误码。
@@ -113,6 +122,9 @@ type App struct {
 	// autoAnswer 自动接听开关（桌面按钮与网页开关共用一份，
 	// 变更后广播 system.autoAnswer，见 SetAutoAnswer）
 	autoAnswer bool
+
+	// audioPub 音量/增益事件的合并发布（REQ-MEDIA-006，见 audio.go）
+	audioPub audioPublisher
 }
 
 // AutoAnswerState 自动接听开关状态（system.autoAnswer 事件负载）。
@@ -216,8 +228,9 @@ func (a *App) State() State {
 		Register:   a.reg,
 		Calls:      make([]Call, 0, len(a.callOrder)),
 		Update:     upd,
-		Video:      a.videoTx,
-		AutoAnswer: a.autoAnswer,
+		Video:        a.videoTx,
+		AutoAnswer:   a.autoAnswer,
+		UpdateConfig: a.cfg.Update,
 	}
 	for _, id := range a.callOrder {
 		c := *a.calls[id]
@@ -480,6 +493,8 @@ func (a *App) MuteSpeaker(callID string, muted bool) error {
 	}
 	return nil
 }
+
+// SetMicGain / SetSpeakerVolume 见 audio.go（REQ-MEDIA-006）。
 
 // ---------------------------------------------------------------------------
 // 视频（REQ-VIDEO-*）
@@ -788,6 +803,14 @@ func (a *App) upsertCall(c *Call) {
 	a.mu.Lock()
 	if _, ok := a.calls[c.ID]; !ok {
 		a.callOrder = append(a.callOrder, c.ID)
+		// 新通话的音量/增益默认 100%（0 在这两个字段里表示"禁用"，不能靠零值默认；
+		// 界面在通话建立时会按会话内记忆再下发一次真实值）
+		if c.MicGain == 0 {
+			c.MicGain = 100
+		}
+		if c.SpeakerVolume == 0 {
+			c.SpeakerVolume = 100
+		}
 	}
 	if st, ok := a.pendingVideo[c.ID]; ok {
 		c.Video = st

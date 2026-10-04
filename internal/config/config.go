@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // Account SIP 账户配置。
@@ -79,6 +81,48 @@ type UIConfig struct {
 	CallAlwaysOnTop     bool `json:"callAlwaysOnTop"`     // 通话面板置顶
 }
 
+// 更新检查周期的取值范围（分钟）：1 分钟 ~ 24 小时。
+// 与旧版网页 SDK 的钳制口径一致（60 秒 ~ 24 小时）。
+const (
+	UpdateIntervalMinMins = 1
+	UpdateIntervalMaxMins = 24 * 60
+)
+
+// UpdateConfig 自动更新配置（REQ-UPD-017，查询由软电话自己发起）。
+//
+// 软电话**不查更新服务器**的旧约定已作废：配了 URL 就按周期查
+// `GET {URL}/api/v1/apps/{AppID}/check`（不带 channel，站点用应用默认通道），
+// 查到更高版本照旧走「提示 → 用户确认 → 下载替换重启」。
+// 网页可以经 WS `system.setUpdateConfig` 写这份配置（业务前端统一管理更新策略）。
+type UpdateConfig struct {
+	URL          string `json:"url"`             // 更新站点地址，空 = 不自动检查
+	AppID        string `json:"appId"`           // 应用 ID，默认 mti-sip-phone
+	IntervalMins int    `json:"intervalMinutes"` // 检查周期（分钟），默认 5，钳制 1–1440
+	Prerelease   bool   `json:"prerelease"`      // 是否接受预览版，默认 false
+}
+
+// ClampUpdateIntervalMins 把检查周期钳制到合法范围（越界取边界，<=0 取默认 5）。
+func ClampUpdateIntervalMins(m int) int {
+	if m <= 0 {
+		return 5
+	}
+	if m < UpdateIntervalMinMins {
+		return UpdateIntervalMinMins
+	}
+	if m > UpdateIntervalMaxMins {
+		return UpdateIntervalMaxMins
+	}
+	return m
+}
+
+// Interval 检查周期（time.Duration）。
+func (u UpdateConfig) Interval() time.Duration {
+	return time.Duration(ClampUpdateIntervalMins(u.IntervalMins)) * time.Minute
+}
+
+// Enabled 是否配置了更新站点（空 = 不自动检查）。
+func (u UpdateConfig) Enabled() bool { return strings.TrimSpace(u.URL) != "" }
+
 // Config 应用配置。
 type Config struct {
 	Version    int         `json:"version"` // 配置结构版本
@@ -88,14 +132,15 @@ type Config struct {
 	Audio      AudioConfig `json:"audio"`
 	Video      VideoConfig `json:"video"`
 	UI         UIConfig    `json:"ui"`
-	AutoStart  bool        `json:"autoStart"`  // 开机自动启动，默认 true
-	RecentDial []string    `json:"recentDial"` // 最近呼叫号码（去重，最多 5 个，供拨号下拉）
+	Update     UpdateConfig `json:"update"`
+	AutoStart  bool         `json:"autoStart"`  // 开机自动启动，默认 true
+	RecentDial []string     `json:"recentDial"` // 最近呼叫号码（去重，最多 5 个，供拨号下拉）
 }
 
 // Default 返回默认配置。
 func Default() *Config {
 	return &Config{
-		Version: 1,
+		Version:   1,
 		AutoStart: true,
 		Account: Account{
 			Enabled:    true,
@@ -124,6 +169,11 @@ func Default() *Config {
 			IncomingAlwaysOnTop: true,
 			CallAlwaysOnTop:     true,
 		},
+		Update: UpdateConfig{
+			// URL 留空：默认不自动检查更新（配了站点才开始查，REQ-UPD-017）
+			AppID:        "mti-sip-phone",
+			IntervalMins: 5,
+		},
 	}
 }
 
@@ -144,11 +194,15 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("配置解析失败（JSON 格式错误）: %w", err)
 	}
-	// 兼容旧配置：无 autoStart 字段时按默认启用
+	// 兼容旧配置：无 autoStart 字段时按默认启用；无 update 段时整段取默认
+	//（旧配置根本没有这一段——不能因为零值就把 AppID 空着、周期当 0 用）
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err == nil {
 		if _, ok := raw["autoStart"]; !ok {
 			cfg.AutoStart = true
+		}
+		if _, ok := raw["update"]; !ok {
+			cfg.Update = Default().Update
 		}
 	}
 
@@ -180,6 +234,11 @@ func Load(path string) (*Config, error) {
 	if cfg.WS.Port == 0 {
 		cfg.WS.Port = 8765
 	}
+	// 自动更新：逐字段补零值 + 周期钳制（URL 空是合法值 = 不检查，不能补）
+	if cfg.Update.AppID == "" {
+		cfg.Update.AppID = "mti-sip-phone"
+	}
+	cfg.Update.IntervalMins = ClampUpdateIntervalMins(cfg.Update.IntervalMins)
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
 	}

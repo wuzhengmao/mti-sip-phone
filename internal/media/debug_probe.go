@@ -27,6 +27,7 @@ package media
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,7 @@ type mediaProbe struct {
 	port    int
 	rx      *wavDump
 	play    *wavDump
+	mic     *wavDump // 送编码器的采集样本（含麦克风增益，REQ-MEDIA-006）
 	startAt time.Time
 	second  int
 	rxAudio int64 // 窗口内：真实音频样本（帧解码结果）
@@ -55,6 +57,11 @@ type mediaProbe struct {
 	rdReq   int64 // 窗口内：回调请求的样本数
 	rdGot   int64 // 窗口内：实际从缓冲取到的样本数
 	rxPkts  int64 // 窗口内：收到的 RTP 包数
+	// 采集侧电平（判断"麦克风增益到底有没有生效/是不是已经削波"）：
+	// 窗口内的绝对峰值与均方根
+	micSamples int64
+	micPeak    int64
+	micSumSq   int64
 	// 累计量（通话结束时汇总一行）
 	totRx, totFill, totRead, totReq int64
 
@@ -80,6 +87,11 @@ func newMediaProbe(port int) *mediaProbe {
 	} else {
 		logx.Logger().Warn("诊断 WAV（play）创建失败", "err", err)
 	}
+	if w, err := newWavDump(filepath.Join(dir, fmt.Sprintf("mic-%d.wav", port))); err == nil {
+		p.mic = w
+	} else {
+		logx.Logger().Warn("诊断 WAV（mic）创建失败", "err", err)
+	}
 	logx.Logger().Info("【诊断】媒体探针已启用，WAV 输出到", "dir", dir, "rtpPort", port)
 	return p
 }
@@ -93,12 +105,14 @@ func cleanOldDumps(dir string, keepPort int) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		// 只动探针产物：rx-<端口>.wav / play-<端口>.wav
-		isDump := strings.HasPrefix(name, "rx-") || strings.HasPrefix(name, "play-")
+		// 只动探针产物：rx-/play-/mic-<端口>.wav
+		isDump := strings.HasPrefix(name, "rx-") || strings.HasPrefix(name, "play-") ||
+			strings.HasPrefix(name, "mic-")
 		if !isDump || !strings.HasSuffix(name, ".wav") {
 			continue
 		}
-		if name == fmt.Sprintf("rx-%d.wav", keepPort) || name == fmt.Sprintf("play-%d.wav", keepPort) {
+		if name == fmt.Sprintf("rx-%d.wav", keepPort) || name == fmt.Sprintf("play-%d.wav", keepPort) ||
+			name == fmt.Sprintf("mic-%d.wav", keepPort) {
 			continue
 		}
 		_ = os.Remove(filepath.Join(dir, name))
@@ -150,12 +164,25 @@ func (p *mediaProbe) report() {
 	rdReq := atomic.SwapInt64(&p.rdReq, 0)
 	rdGot := atomic.SwapInt64(&p.rdGot, 0)
 	rxPkts := atomic.SwapInt64(&p.rxPkts, 0)
+	micN := atomic.SwapInt64(&p.micSamples, 0)
+	micPeak := atomic.SwapInt64(&p.micPeak, 0)
+	micSumSq := atomic.SwapInt64(&p.micSumSq, 0)
 
 	depth, trim := 0, 0
 	if p.eng != nil {
 		p.eng.playMu.Lock()
 		depth, trim = p.eng.ring.Depth(), p.eng.ring.Trimmed()
 		p.eng.playMu.Unlock()
+	}
+	// 采集侧电平：峰值贴着 32767 说明已经削波（此时再增益也只会更糊，不会更响）；
+	// 峰值很低（<1000）说明话筒输入本身太小，增益才有效果。
+	micRMS := int64(0)
+	if micN > 0 {
+		micRMS = int64(math.Sqrt(float64(micSumSq) / float64(micN)))
+	}
+	gainPct := 0
+	if p.eng != nil {
+		gainPct = int(p.eng.MicGain()*100 + 0.5)
 	}
 	logx.Logger().Info("【诊断】媒体汇总",
 		"启动后ms", el.Milliseconds(),
@@ -166,7 +193,11 @@ func (p *mediaProbe) report() {
 		"回调请求样本/s", rdReq,
 		"实际读出样本/s", rdGot,
 		"深度", depth,
-		"累计截断", trim)
+		"累计截断", trim,
+		"采集样本/s", micN,
+		"采集峰值", micPeak,
+		"采集RMS", micRMS,
+		"麦克风增益%", gainPct)
 }
 
 // writeRx 记录并落盘真实音频样本（帧解码结果）。
@@ -208,6 +239,39 @@ func (p *mediaProbe) writePlay(s []int16) {
 		return
 	}
 	p.play.write(s)
+}
+
+// writeMic 记录并落盘**送编码器的采集样本**（已含麦克风增益，REQ-MEDIA-006），
+// 同时统计电平：和 rx/play 两份 WAV 一起就能判断"是采集端太小、还是增益没生效、
+// 还是已经削波"。
+func (p *mediaProbe) writeMic(s []int16) {
+	if p == nil || len(s) == 0 {
+		return
+	}
+	// 本次调用的局部统计（音频回调线程）；跨线程汇总走原子量——与 rx/play 的
+	// 计数同一套写法，别改成裸字段读写。
+	var peak, sumSq int64
+	for _, v := range s {
+		a := int64(v)
+		if a < 0 {
+			a = -a
+		}
+		if a > peak {
+			peak = a
+		}
+		sumSq += a * a
+	}
+	for {
+		old := atomic.LoadInt64(&p.micPeak)
+		if peak <= old || atomic.CompareAndSwapInt64(&p.micPeak, old, peak) {
+			break
+		}
+	}
+	atomic.AddInt64(&p.micSumSq, sumSq)
+	atomic.AddInt64(&p.micSamples, int64(len(s)))
+	if p.mic != nil {
+		p.mic.write(s)
+	}
 }
 
 func (p *mediaProbe) addPkt() {
