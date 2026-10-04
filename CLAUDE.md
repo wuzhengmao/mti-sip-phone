@@ -6,8 +6,8 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.10**（dev 开发中；1.0.9 含通信录（本地 SQLite、拼音搜索、CSV/JSON
-导入导出、与通话记录/通话面板联动），已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
+当前版本 **1.0.11**（dev 开发中；1.0.10 含音量控制（通话面板滚轮调节 + 圆周填充
+底色）与自动更新改为软电话自检（REQ-UPD-017~019），已发布并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
 真实环境：OpenSIPS 2.4.11（10.168.4.40:15060，账号 2999），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
 
@@ -27,7 +27,7 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 ```bash
 # 构建脚本按目标打印本次能力（如 CGO+音频+视频，缺库时标出无视频/无Opus）；视频/Opus 取决于
 # 第三方静态库是否已生成（见下），缺哪个就降级为哪个没有。
-# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.10-rc），
+# 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.11-rc），
 # 正式构建用 SIP_PHONE_RELEASE=1（发布脚本会设）；不经脚本的 go build/go run 是基础版本号。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO）
@@ -71,9 +71,9 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 `/docs/upload`、`/docs/api`）。本仓库侧的发布入口：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.10-rc），不上传
+./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.11-rc），不上传
 ./scripts/release.sh --pre             # 预发布：真实上传（站点标记为预发布）
-./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.10
+./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.11
 # Windows 用 scripts/release.bat（同样的参数，内部走 git-bash）
 ```
 
@@ -290,7 +290,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **交流、文档、注释、提交信息、界面文案一律中文**。
 - **Git 工作流**：开发在分支上进行（工作分支 dev，master 为收口分支）；**会话中修改的代码不得自动提交**——提交与 push 必须经用户人工确认后执行，且**不自动合并到 master**（合并 master 需用户明确指示）。
 - **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
-- 版本 1.0.10 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
+- 版本 1.0.11 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
 - 弹窗按钮文案「确定/取消」；**弹窗的 parent 必须是当前可见的窗口**——Fyne 把对话框画在父窗口的画布上，主窗体隐藏到托盘时弹在主窗体上用户根本看不见。默认走 `a.dialogParent()`（主窗体不可见且通话记录窗口开着就用它），从记录窗口发起的用 `showXxxIn(a.historyW, …)`；**永远不要传 nil**（dialog 的 parent 为 nil 直接 panic）。
 - **通话记录（REQ-CALL-007）的写入口径**：开始/接通/结束三个时刻在 `core.App` 里**直接入队**（不订阅事件总线——总线容量 64、满即丢，通话记录不能建立在会丢事件的东西上），且**先写记录再 `publishCall`**（界面收到 `call.terminated` 会立刻查库刷新，顺序反了就查不到新记录）。同一通话重复上报结束的幂等由存储层的 `ended_at=0` 条件兜住，**不要**在核心层再加"是否首次结束"的状态。库里时间戳 0 表示"未接通/进行中"（0 与 `time.Time{}` 的互转只在 `internal/calllog` 的 `toMillis/fromMillis` 里做，别把 1970 年漏到界面）。
 - **通信录（REQ-CONTACT-*）的查找走内存快照，不要逐行查库**：启动时把全量联系人载入 `core.App` 的内存快照（`contactMap` 号码 → 条目 + `contactList` 全量），通话记录行/通话面板/视频窗口标题/WS 事件负载的查找都是 O(1) 读内存。写操作统一走 `App.mutateContacts`——**"写存储 + 重建快照"必须整体串行**（`contactWriteMu`），否则两个并发写入方（界面 + 多个 WS 连接）可能让先写的快照后于后写的完成，把旧数据当最新发布出去。`core.Call.Contact` 是**发布事件时即时解析**的（不在 upsert 时就地写 `a.calls` ——那会和 State() 的读路径构成数据竞争）。
@@ -711,7 +711,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   `"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --headless=new --disable-gpu
   --enable-logging=stderr --v=1 --virtual-time-budget=6000 --dump-dom http://127.0.0.1:8765/`
   → `grep -i uncaught` 看有没有 JS 运行期错误，`--dump-dom` 里能看到 JS 填出来的内容
-  （如「当前版本：1.0.10-rc（windows/amd64）」）说明 SDK 连上并跑通了。改 SDK 时另外用脚本
+  （如「当前版本：1.0.11-rc（windows/amd64）」）说明 SDK 连上并跑通了。改 SDK 时另外用脚本
   对一遍「`this.xxx()` 调用是否都有定义」——**大段删代码时最容易连带删掉无关方法**
   （这次就是删更新查询时把 `_emit` / `_startHeartbeat` 一起删了，页面直接白屏）。
 - **rtp_rx.wav**：根目录与 internal/sip/ 下的抓包调试产物，已被 .gitignore 忽略，勿误提交。

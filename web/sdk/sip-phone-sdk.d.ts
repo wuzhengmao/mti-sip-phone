@@ -41,13 +41,14 @@ declare class SipPhoneSDK {
 
   /**
    * 订阅事件；'*' 订阅全部。
-   * 事件名：call.incoming / call.ringing / call.established / call.terminated /
-   *         call.failed / call.muted / call.audio（麦克风/扬声器开关）/
-   *         call.dialing / call.video / video.web /
-   *         register.state / system.state / system.update /
-   *         video.frame（订阅视频后逐帧推送）/ update.check /
-   *         connected / disconnected
-   * 注：SDK 本地事件（connected / disconnected / update.check）不会派发给 '*' 订阅者。
+   * 事件名：call.incoming / call.ringing / call.dialing / call.established /
+   *         call.terminated / call.failed / call.muted / call.audio（麦克风/扬声器开关）/
+   *         call.video / video.web / video.transform /
+   *         video.frame（订阅视频后逐帧推送）/
+   *         register.state / system.state / system.ready / system.update /
+   *         system.updateConfig / system.autoAnswer /
+   *         connected / disconnected（SDK 本地事件）
+   * 注：SDK 本地事件（connected / disconnected）不会派发给 '*' 订阅者。
    */
   on(event: string, fn: (data: any) => void): this;
 
