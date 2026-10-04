@@ -25,6 +25,7 @@ import (
 	"mti-sip-phone/internal/autostart"
 	"mti-sip-phone/internal/calllog"
 	"mti-sip-phone/internal/config"
+	"mti-sip-phone/internal/contacts"
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
 	"mti-sip-phone/internal/protocol"
@@ -144,6 +145,18 @@ func main() {
 	}
 	defer closeCallLog()
 
+	// 通信录（REQ-UI-032）：独立数据库文件（与通话记录分开，损坏互不影响）。
+	// 只要打不开就降级为"本次运行没有通信录"，不阻断启动；Close 幂等，
+	// 退出收尾与 defer 都会调（放在通话记录之后，退出时一并放掉）。
+	var closeContacts = func() {}
+	if store, err := contacts.Open(filepath.Join(cfgDir, "contacts.db")); err != nil {
+		logx.Logger().Warn("打开通信录数据库失败，本次运行没有通信录", "err", err)
+	} else {
+		app.SetContacts(store) // 内部立刻载入内存快照（第一通来电就能显示名字）
+		closeContacts = func() { _ = store.Close() }
+	}
+	defer closeContacts()
+
 	// 自动更新（REQ-UPD-*）：业务前端经 WS 告知新版本，用户在界面上确认后
 	// 下载、替换当前可执行文件并重启。Cleanup 清理上次更新的残留文件，
 	// 必须放在单实例锁之后（避免删到另一实例正在使用的文件）。
@@ -250,6 +263,7 @@ func main() {
 		stop()
 		shutdown(app, tel) // 退出前注销 SIP（REQ-ACC-009）
 		closeCallLog()     // 先放掉数据库，避免新进程启动时撞上旧库的写锁
+		closeContacts()
 		spawnNewProcessIfRequested(&restartRequested, exePath, releaseLock)
 		return
 	}
@@ -258,6 +272,7 @@ func main() {
 	logx.Logger().Info("收到退出信号，正在关闭")
 	shutdown(app, tel)
 	closeCallLog()
+	closeContacts()
 	spawnNewProcessIfRequested(&restartRequested, exePath, releaseLock)
 }
 

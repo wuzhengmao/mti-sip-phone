@@ -16,6 +16,15 @@
  *   const sdk = new SipPhoneSDK({ updateUrl: 'http://update.example.com' });
  *   sdk.on('update.check', (r) => console.log('更新查询', r));
  *
+ * 通信录（REQ-SDK-006）：网页端不做增删改查，只提供一键导入/导出；
+ * 一键路径走**本地 HTTP 接口**（`GET /api/contacts.csv` 与
+ * `POST /api/contacts/import`），没有 WS 的单条消息大小限制；
+ * 通话对象（call.contact）里带通信录信息，页面可直接显示名称/备注/常用：
+ *   await sdk.downloadContacts();       // 一键导出（浏览器下载 CSV，HTTP）
+ *   await sdk.importContactsFromFile(); // 一键导入（选 CSV 文件后合并，HTTP）
+ *   await sdk.exportContactsJSON();     // 导出 JSON（REST GET  /api/contacts）
+ *   await sdk.importContactsJSON(list); // 导入 JSON（REST POST /api/contacts，收数组或整个对象）
+ *
  * 视频（REQ-VIDEO-009）：
  *   await sdk.dialVideo('1001');                     // 视频呼叫
  *   await sdk.subscribeVideo({                       // 订阅并把画面渲染到 <video>
@@ -347,6 +356,190 @@
     }
 
     /**
+     * 导出通信录为 CSV 文本（表头「号码,名称,备注,常用」，带 UTF-8 BOM，
+     * Excel 打开不乱码，REQ-WS-015）。
+     * 网页端**不做**通信录的增删改查，只提供一键导入/导出。
+     * @returns {Promise<{csv: string, count: number}>}
+     */
+    exportContacts() {
+      return this._request('contact.export', {});
+    }
+
+    /**
+     * 一键导出：取回 CSV 后由浏览器存成文件（默认 contacts-YYYYMMDD.csv）。
+     * **走 HTTP 接口**（`GET /api/contacts.csv`）而不是 WS：CSV 是整份文本，
+     * 走 HTTP 没有单条消息大小限制，也能拿到明确的错误。依赖 DOM/Blob。
+     * @param {string} [filename] 另存的文件名
+     * @returns {Promise<{count: number, filename: string}>}
+     */
+    async downloadContacts(filename) {
+      const name = filename ||
+        ('contacts-' + new Date().toISOString().slice(0, 10).replace(/-/g, '') + '.csv');
+      if (typeof document === 'undefined' || typeof URL === 'undefined' || !URL.createObjectURL) {
+        const err = new Error('当前环境不支持浏览器下载');
+        err.code = 'unsupported';
+        throw err;
+      }
+      const res = await fetch(this.httpBase() + '/api/contacts.csv', { cache: 'no-store' });
+      if (!res.ok) {
+        const err = new Error('导出失败（HTTP ' + res.status + '）');
+        err.code = 'http_error';
+        throw err;
+      }
+      const blob = await res.blob();
+      const count = Number(res.headers.get('X-Contact-Count') || 0);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      return { count: count, filename: name };
+    }
+
+    /**
+     * 导入通信录 CSV：按号码去重——已存在的条目只覆盖号码/名称/备注，
+     * **常用标志只增不减**（本地已标就保持、本地没标而 CSV 标了就变常用）；
+     * 不存在的整条新增（常用标志取 CSV 里的值）。
+     * @param {string} csv CSV 文本（可带或不带表头）
+     * @returns {Promise<{added: number, updated: number, skipped: number, total: number}>}
+     */
+    importContacts(csv) {
+      return this._request('contact.import', { csv: String(csv == null ? '' : csv) });
+    }
+
+    /**
+     * 导出通信录为 **JSON**（REST：`GET /api/contacts`），返回
+     * `{count, contacts: [{number, name, note, starred}, ...]}`。
+     * 与 CSV 版（exportContacts / downloadContacts）的区别：这是给程序用的
+     * 结构化数据，网页可以直接 XHR 取来渲染，不用自己解析 CSV。
+     * @returns {Promise<{count: number, contacts: Array<{number: string, name: string,
+     *                    note: string, starred: boolean}>}>}
+     */
+    async exportContactsJSON() {
+      const res = await fetch(this.httpBase() + '/api/contacts', { cache: 'no-store' });
+      if (!res.ok) {
+        const err = new Error('导出失败（HTTP ' + res.status + '）');
+        err.code = 'http_error';
+        throw err;
+      }
+      return res.json();
+    }
+
+    /**
+     * 导入通信录 **JSON**（REST：`POST /api/contacts`）。请求体可以是
+     * `[{number,name,note,starred}, ...]` 裸数组，也可以是 exportContactsJSON()
+     * 返回的整个对象（导出→改→导入可直接回灌）。
+     * 合并语义与 CSV 导入一致：按号码去重，只覆盖号码/名称/备注，
+     * **常用标志只增不减**（本地已标就保持、本地没标而数据标了就变常用）。
+     * @param {Array|Object} contacts 联系人数组，或 {contacts: [...]} 对象
+     * @returns {Promise<{added: number, updated: number, skipped: number, total: number}>}
+     */
+    async importContactsJSON(contacts) {
+      const body = typeof contacts === 'string' ? contacts : JSON.stringify(contacts);
+      const res = await fetch(this.httpBase() + '/api/contacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: body
+      });
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (e) {
+        data = null;
+      }
+      if (!res.ok || !data) {
+        const msg = (data && data.error) || ('导入失败（HTTP ' + res.status + '）');
+        const err = new Error(msg);
+        err.code = 'http_error';
+        throw err;
+      }
+      return data;
+    }
+
+    /**
+     * 一键导入：弹系统文件选择框选 CSV，读出来交给软电话合并。
+     * **走 HTTP 接口**（POST /api/contacts/import，请求体即 CSV 文本）而不是 WS：
+     * 没有单条消息大小限制。依赖 DOM（浏览器环境接口）；用户取消时以
+     * code='cancelled' 拒绝。
+     * @returns {Promise<{added: number, updated: number, skipped: number,
+     *                    total: number, filename: string}>}
+     */
+    importContactsFromFile() {
+      return new Promise((resolve, reject) => {
+        if (typeof document === 'undefined') {
+          const err = new Error('当前环境不支持文件选择');
+          err.code = 'unsupported';
+          reject(err);
+          return;
+        }
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.csv,text/csv';
+        input.style.display = 'none';
+        let done = false;
+        const finish = (fn, arg) => {
+          if (done) return;
+          done = true;
+          if (input.parentNode) input.parentNode.removeChild(input);
+          fn(arg);
+        };
+        input.onchange = () => {
+          const file = input.files && input.files[0];
+          if (!file) {
+            finish(reject, Object.assign(new Error('未选择文件'), { code: 'cancelled' }));
+            return;
+          }
+          this.importContactsFile(file)
+            .then((res) => finish(resolve, Object.assign({ filename: file.name }, res)))
+            .catch((e) => finish(reject, e));
+        };
+        // 取消没有事件：窗口回到前台时若还没选到文件，按"已取消"收尾
+        // （选过文件时 input.files 非空，不会误判）
+        if (global.addEventListener) {
+          global.addEventListener('focus', () => {
+            setTimeout(() => {
+              if (!done && (!input.files || !input.files.length)) {
+                finish(reject, Object.assign(new Error('已取消'), { code: 'cancelled' }));
+              }
+            }, 500);
+          }, { once: true });
+        }
+        document.body.appendChild(input);
+        input.click();
+      });
+    }
+
+    /**
+     * 按 File 对象导入通信录（HTTP 直传，不经过 WS）。
+     * @param {File|Blob} file
+     * @returns {Promise<{added: number, updated: number, skipped: number, total: number}>}
+     */
+    async importContactsFile(file) {
+      const res = await fetch(this.httpBase() + '/api/contacts/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/csv; charset=utf-8' },
+        body: file
+      });
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (e) {
+        data = null;
+      }
+      if (!res.ok || !data) {
+        const msg = (data && data.error) || ('导入失败（HTTP ' + res.status + '）');
+        const err = new Error(msg);
+        err.code = 'http_error';
+        throw err;
+      }
+      return data;
+    }
+
+    /**
      * 告知软电话有新版本可用（自动更新）。软电话只提示用户，
      * 由用户在软电话界面上确认后才会下载、替换并重启。
      * @param {{version: string, url: string, sha256?: string, notes?: string,
@@ -672,6 +865,22 @@
     }
 
     /** 内部：发送请求并等待响应 */
+    /**
+     * 内部：由 WS 地址推导 HTTP 基址。
+     *
+     * **不能直接取 `new URL(ws://…).origin`**：对非 http(s) 协议，origin 的
+     * 序列化会把 scheme 原样带上（得到 "ws://127.0.0.1:8765"），拿它去 fetch
+     * 会直接报 "Failed to fetch"（fetch 不支持 ws 协议）。必须换成 http/https。
+     */
+    httpBase() {
+      try {
+        const u = new URL(this.url);
+        return (u.protocol === 'wss:' ? 'https://' : 'http://') + u.host;
+      } catch (e) {
+        return 'http://127.0.0.1:8765';
+      }
+    }
+
     _request(method, params) {
       if (!this._connected) {
         return Promise.reject(new Error('尚未连接软电话'));

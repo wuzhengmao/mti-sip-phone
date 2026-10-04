@@ -68,9 +68,18 @@ func (a *App) buildCallPanelIfNeeded() {
 		}
 	})
 
-	a.callNameLabel = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	a.callStateLabel = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{})
-	a.callTimerLabel = widget.NewLabelWithStyle("00:00", fyne.TextAlignLeading, fyne.TextStyle{})
+	// 对端名称：自绘控件（号码 + 通信录名称 + ★ + 备注悬停，REQ-UI-037）。
+	// 面板是固定 260px 宽的无边框窗口，widget.Label 在本项目主题下还带
+	// 12px 内边距（MinSize 高 43px），所以用 plainText 系列自绘。
+	a.callTip = newTooltipLayer()
+	a.callName = newCallNameBox(a.callTip)
+	// 状态/时长用**自绘单行文本**（不是 widget.Label）：本项目主题把
+	// SizeNameInnerPadding 提到 12，widget.Label 的 MinSize 是"文字 + 上下各 12"
+	// （高 43px），与第一行的自绘名称（高 19px、左边缘 0）既对不齐左边缘、
+	// 也让每行高度不一致（用户实测"第一行和第二行左边没对齐、第一行高度变小"）。
+	textSize := fyne.CurrentApp().Settings().Theme().Size(theme.SizeNameText)
+	a.callStateLabel = newPlainText("", textSize, theme.ForegroundColor(), false)
+	a.callTimerLabel = newPlainText("00:00", textSize, theme.ForegroundColor(), false)
 
 	// 紧凑按钮（尺寸取平台常量，REQ-UI-025 修订）：fyne Button 跟随主题
 	// 内边距高达 48px，用自定义 compactButton 缩小面板按钮
@@ -128,7 +137,9 @@ func (a *App) buildCallPanelIfNeeded() {
 	//（REQ-UI-025 修订）；内容层为 Border（窗口
 	// 内容会撑满画布，Border 的中心区→网格→三行等分填满窗口）
 	a.callRows = container.NewStack()
-	w.SetContent(a.callRows)
+	// 顶层再叠一个提示图层（备注悬停用，见 ui_tooltip.go）：提示只是绘制在
+	// 最上层、不参与命中测试，所以不会挡住面板上的按钮
+	w.SetContent(container.NewStack(a.callRows, a.callTip))
 	// 关闭画布内边距：四周留白由 rebuildCallRows 统一控制，
 	// 避免与主题 padding 叠加导致视觉不一致（REQ-UI-025 修订）
 	w.SetPadded(false)
@@ -235,7 +246,7 @@ func (a *App) rebuildCallRows(mode int) {
 	}
 	a.callRows.Objects = nil
 
-	row1 := container.New(panelRowLayout{}, a.callNameLabel)
+	row1 := container.New(panelRowLayout{}, a.callName)
 	row2 := container.New(panelRowLayout{}, a.callStateLabel, a.hangupBtn)
 	// 视频开关**只在本次通话确实协商了视频时**才出现（纯音频通话放一个点了
 	// 没反应的按钮没有意义）。
@@ -274,8 +285,12 @@ func (a *App) rebuildCallRows(mode int) {
 	}
 
 	// 三行纵向排列（行距 panelRowGap）、整体在窗口内纵向居中；四周 4px 窗口留白
-	rows := container.New(panelRowsLayout{}, row1, row2, row3)
-	border := container.NewBorder(padRect(4), padRect(4), padRect(4), padRect(4), rows)
+	// 固定行高：第一行（只有号码/名称）与有按钮的行高度一致，整体才不会"跳"；
+	// gapAfterFirst=4 → 第 2、3 行整体比第一行多下移 4px（用户要求，分两次各 2px 调出来的）
+	rows := container.New(panelRowsLayout{rowHeight: callPanelRowHeight, gapAfterFirst: 4}, row1, row2, row3)
+	// 左内边距 6：三行文字比原先整体右移 2px（用户要求）。右侧仍是 4，
+	// 所以右对齐的按钮位置不受影响
+	border := container.NewBorder(padRect(4), padRect(4), padRect(6), padRect(4), rows)
 
 	// 振铃态：底色闪烁矩形与内容层平铺为兄弟（矩形撑满整个窗口，
 	// 必须放在内容层**下方**——在上方会盖住文字与按钮）
@@ -333,7 +348,7 @@ func (panelRowLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 		o.Move(fyne.NewPos(x, (size.Height-m.Height)/2))
 		x -= panelColGap
 	}
-	// 首元素靠左
+	// 首元素靠左（纵向居中：行高固定时文字才不会顶在上沿）
 	if o := objs[0]; o.Visible() {
 		m := o.MinSize()
 		o.Resize(m)
@@ -346,53 +361,84 @@ func (panelRowLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 // **替代 GridWithRows**：后者会把格子拉伸填满可用高度，格子高出内容的部分
 // 变成行间富余（实测行距 12px 而列距 4px，用户反馈行距偏大且不均匀），
 // 且其内部间距同样固定取 theme.Padding。
-type panelRowsLayout struct{}
+//
+// rowHeight > 0 时每行**固定这么高**（内容不足也占满）：通话面板三行里只有
+// 第二行有挂断按钮，若按内容高度排，没按钮的行会比有按钮的行矮一截，
+// 视觉上"第一行矮一截"（用户实测）。0 = 按内容高度（通信录/通话记录行用）。
+type panelRowsLayout struct {
+	rowHeight float32
+	// gapAfterFirst 第一行之后的**额外**行距：通话面板用它把第 2、3 行整体
+	// 再往下挪一点（用户要求，行距上疏下密反而不行——这里只是让第二行起更透气）。
+	gapAfterFirst float32
+}
 
-func (panelRowsLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+// gapBefore 第 rowIdx 行（按可见行数从 0 数）之前的行距。
+func (l panelRowsLayout) gapBefore(rowIdx int) float32 {
+	g := float32(panelRowGap)
+	if rowIdx == 1 {
+		g += l.gapAfterFirst
+	}
+	return g
+}
+
+func (l panelRowsLayout) rowHeightOf(o fyne.CanvasObject) float32 {
+	h := o.MinSize().Height
+	if l.rowHeight > h {
+		h = l.rowHeight
+	}
+	return h
+}
+
+func (l panelRowsLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
 	var sz fyne.Size
-	first := true
+	rowIdx := -1
 	for _, o := range objs {
 		if !o.Visible() {
 			continue
 		}
-		m := o.MinSize()
-		if !first {
-			sz.Height += panelRowGap
+		rowIdx++
+		if rowIdx > 0 {
+			sz.Height += l.gapBefore(rowIdx)
 		}
-		sz.Height += m.Height
-		sz.Width = fyne.Max(sz.Width, m.Width)
-		first = false
+		sz.Height += l.rowHeightOf(o)
+		sz.Width = fyne.Max(sz.Width, o.MinSize().Width)
 	}
 	return sz
 }
 
-func (panelRowsLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+func (l panelRowsLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	total := float32(0)
-	first := true
+	rowIdx := -1
 	for _, o := range objs {
 		if !o.Visible() {
 			continue
 		}
-		if !first {
-			total += panelRowGap
+		rowIdx++
+		if rowIdx > 0 {
+			total += l.gapBefore(rowIdx)
 		}
-		total += o.MinSize().Height
-		first = false
+		total += l.rowHeightOf(o)
 	}
 	y := (size.Height - total) / 2
 	if y < 0 {
 		y = 0
 	}
+	rowIdx = -1
 	for _, o := range objs {
 		if !o.Visible() {
 			continue
 		}
-		h := o.MinSize().Height
+		rowIdx++
+		h := l.rowHeightOf(o)
 		o.Resize(fyne.NewSize(size.Width, h))
 		o.Move(fyne.NewPos(0, y))
-		y += h + panelRowGap
+		y += h + l.gapBefore(rowIdx+1)
 	}
 }
+
+// callPanelRowHeight 通话面板的固定行高（= 按钮尺寸）：三行等高，行内内容
+// 由 panelRowLayout 纵向居中。
+const callPanelRowHeight = callPanelButtonSize
 
 type vPadLayout struct{ pad float32 }
 
@@ -791,7 +837,7 @@ func (a *App) restoreIdle() {
 	a.setHoldButton(false)
 	a.activeCallID = ""
 	a.activeCall = nil
-	a.setCallUI(uiIdle, "")
+	a.setCallUI(uiIdle, nil)
 }
 
 // showCallFailed 呼叫失败提示。按用户约定：通话面板关闭后若主窗口
@@ -841,6 +887,39 @@ func (a *App) withDialogTheme(d dialog.Dialog) {
 // 弹窗一律显示在**父窗口**上（Fyne 把对话框画在父窗口的画布上）：父窗口
 // 隐藏时弹窗用户根本看不见。本项目所有页面都在主窗体内，默认父窗口就是
 // 主窗体；需要指定时用下面带 In 的变体。**永远不要传 nil**（会 panic）。
+//
+// **不用 `dialog.NewInformation` / `NewError` / `NewConfirm`**：Fyne 2.8 的这三个
+// "文本对话框"会在右上角画一个**巨大的半透明图标水印**
+//（dialog/base.go 的 dialogLayout：定位到 size.Width-iconHeight+4, -4，
+// 尺寸按文字高度算），在本项目的小窗口里会压住标题、顶出边框，用户实测
+// 观感是"图标没显示对、高度还高得离谱"。所以统一用 NewCustom 自拼内容：
+// 标题栏 + 折行正文 + 按钮，尺寸由内容决定。
+
+// confirmIconSize 确认框里警告图标的尺寸。
+const confirmIconSize = 30
+
+// dialogTextIconMaxW 带图标（确认框）时正文的宽度上限。弹窗总宽 ≈ 正文 + 图标 30 +
+// 间距 6 + border 内边距 4 + 弹窗自身内边距 ≈ 正文 + 72：正文按 266 算出来接近满屏宽
+// （用户实测"太宽、左右撑满窗口"），收到 182 → 弹窗约 254（占主窗体 320 的 ~80%）。
+const dialogTextIconMaxW = 182
+
+// dialogTextMaxW 不带图标（信息/错误框）的正文宽度：刻意让**整个弹窗的宽度**与
+// 确认框一致——182 + 图标 30 + 间距 6 + border 内边距 4 = 222（两种弹窗看起来一样宽，
+// 用户要求）。弹窗画在父窗体画布上，主窗体只有 320px 宽。
+const dialogTextMaxW = dialogTextIconMaxW + confirmIconSize + 6 + 4
+
+// newDialogText 弹窗正文：按固定宽度折行的多行文本。
+//
+// 两个坑：① widget.Label 开了 Wrapping 后 **必须先 Resize 过一次**，
+// MinSize 才会报告"折行后的高度"（没折过时报的是单行高度，长文本会把弹窗
+// 高度算少）；② 它的 MinSize.Width 是"最长不可断词"的宽度（可能只有十几像素），
+// 直接当弹窗内容会把弹窗挤成一条窄柱，所以外面套 GridWrap 固定宽度。
+func newDialogText(text string, maxW float32) fyne.CanvasObject {
+	lbl := widget.NewLabel(text)
+	lbl.Wrapping = fyne.TextWrapWord
+	lbl.Resize(fyne.NewSize(maxW, 1)) // 先按目标宽度折一次
+	return container.NewGridWrap(fyne.NewSize(maxW, lbl.MinSize().Height), lbl)
+}
 
 // showInfo 信息弹窗（按钮文案"确定"，覆盖 Fyne 中文 locale 的"好"）。
 func (a *App) showInfo(title, content string) { a.showInfoIn(a.mainW, title, content) }
@@ -855,27 +934,153 @@ func (a *App) showConfirm(title, content string, cb func(bool)) {
 
 // showInfoIn 在指定窗口弹信息框。
 func (a *App) showInfoIn(parent fyne.Window, title, content string) {
-	d := dialog.NewInformation(title, content, parent)
-	d.SetDismissText("确定")
+	d := dialog.NewCustom(title, "确定", newDialogText(content, dialogTextMaxW), parent)
 	a.withDialogTheme(d)
 	d.Show()
 }
 
 // showErrorIn 在指定窗口弹错误框。
 func (a *App) showErrorIn(parent fyne.Window, err error) {
-	d := dialog.NewError(err, parent)
-	d.SetDismissText("确定")
+	if err == nil {
+		return
+	}
+	d := dialog.NewCustom("错误", "确定", newDialogText(err.Error(), dialogTextMaxW), parent)
 	a.withDialogTheme(d)
 	d.Show()
 }
 
 // showConfirmIn 在指定窗口弹确认框（确定 / 取消）。
+//
+// 正文左侧带一个**警告图标**：删除/清空这类操作不可恢复，给个醒目的提示
+// （用户要求）。图标用主题的 WarningIcon，随主题明暗变色。
 func (a *App) showConfirmIn(parent fyne.Window, title, content string, cb func(bool)) {
-	d := dialog.NewConfirm(title, content, cb, parent)
-	d.SetConfirmText("确定")
-	d.SetDismissText("取消")
+	icon := widget.NewIcon(theme.WarningIcon())
+	iconBox := container.NewGridWrap(fyne.NewSize(confirmIconSize, confirmIconSize), icon)
+	body := container.NewBorder(nil, nil,
+		container.New(padRightLayout{pad: 6}, iconBox), nil, newDialogText(content, dialogTextIconMaxW))
+	d := dialog.NewCustomWithoutButtons(title, body, parent)
+	ok := widget.NewButton("确定", func() {
+		d.Hide()
+		if cb != nil {
+			cb(true)
+		}
+	})
+	ok.Importance = widget.HighImportance // 主要动作（原 Fyne NewConfirm 的样式）
+	cancel := widget.NewButton("取消", func() {
+		d.Hide()
+		if cb != nil {
+			cb(false)
+		}
+	})
+	d.SetButtons([]fyne.CanvasObject{cancel, ok})
 	a.withDialogTheme(d)
 	d.Show()
+}
+
+// ---------------------------------------------------------------------------
+// 对端展示：通信录名称联动（REQ-UI-037）
+// ---------------------------------------------------------------------------
+
+// callNameMaxW 通话面板上对端名称的最大宽度（面板只有 260px 宽，同一行右边
+// 还要放接听/保持按钮，名字长了必须截断，不能把按钮挤出去）。
+const callNameMaxW = 190
+
+// callNameBox 通话面板行1的对端名称：号码 + 通信录名称 + ★（常用），
+// 名称上可悬停出备注提示（REQ-UI-037）。
+//
+// 自绘（不用 widget.Label）的原因：本项目主题把 SizeNameInnerPadding 提到 12，
+// widget.Label 的 MinSize 是"文字高 + 24"，会把面板撑变形；自绘也才好把 ★
+// 紧跟在名字后面（markAfterLayout）而不是被行布局推到最右边。
+type callNameBox struct {
+	widget.BaseWidget
+
+	note *hoverNote
+	star *canvas.Image
+	box  *fyne.Container
+}
+
+func newCallNameBox(tip *tooltipLayer) *callNameBox {
+	size := fyne.CurrentApp().Settings().Theme().Size(theme.SizeNameText)
+	b := &callNameBox{}
+	b.note = newHoverNote("", size, "", tip)
+	b.star = canvas.NewImageFromResource(IconStar)
+	b.star.FillMode = canvas.ImageFillContain
+	b.star.SetMinSize(fyne.NewSize(contactsStarSize, contactsStarSize))
+	b.star.Hide()
+	b.box = container.New(markAfterLayout{gap: 4}, b.note, b.star)
+	b.ExtendBaseWidget(b)
+	return b
+}
+
+func (b *callNameBox) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.box)
+}
+
+// MinSize 限制宽度：面板窄，长号码/长名字只能截断显示。
+func (b *callNameBox) MinSize() fyne.Size {
+	m := b.box.MinSize()
+	if m.Width > callNameMaxW {
+		m.Width = callNameMaxW
+	}
+	return m
+}
+
+// Set 更新对端展示：文本、是否常用（★）、备注（悬停提示）。
+func (b *callNameBox) Set(text string, starred bool, note string) {
+	b.note.SetText(text)
+	b.note.SetNote(note)
+	if starred {
+		b.star.Show()
+	} else {
+		b.star.Hide()
+	}
+	b.box.Refresh()
+	b.Refresh()
+}
+
+// contactFor 号码对应的通信录条目（核心层内存快照，O(1)，不碰数据库）。
+func (a *App) contactFor(remote string) (core.Contact, bool) {
+	if a.core == nil || remote == "" {
+		return core.Contact{}, false
+	}
+	return a.core.LookupContact(remote)
+}
+
+// callDisplay 对端展示文案（通话面板与视频窗口标题共用，REQ-UI-037）：
+//   - 命中通信录：号码在前、名称在后（用户要求"号码右边显示名称"）；
+//   - 未命中：沿用原行为（SIP 显示名优先，其次号码）。
+//
+// 同时返回是否常用（★）与备注（悬停提示用）。
+func (a *App) callDisplay(call *core.Call) (text string, starred bool, note string) {
+	if call == nil {
+		return "", false, ""
+	}
+	remote, sipName := call.Remote, call.RemoteName
+	if c, ok := a.contactFor(remote); ok {
+		name := c.Name
+		if name == "" {
+			name = sipName
+		}
+		switch {
+		case name == "" || name == remote:
+			text = remote
+		case remote == "":
+			text = name
+		default:
+			text = remote + " " + name
+		}
+		return text, c.Starred, c.Note
+	}
+	return callRemoteName(call), false, ""
+}
+
+// setCallName 更新通话面板的对端展示。
+func (a *App) setCallName(call *core.Call) {
+	if a.callName == nil {
+		return
+	}
+	text, starred, note := a.callDisplay(call)
+	a.callName.Set(text, starred, note)
 }
 
 // callRemoteName 通话对象的展示名称（显示名优先，其次号码）。

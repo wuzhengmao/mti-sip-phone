@@ -81,6 +81,7 @@ cmd/sip-phone/main.go            进程入口：命令行/单实例/协议注册
 | `Telephony` | `core/telephony.go` | `internal/sip.Phone` | 注册/呼叫/接听/挂断/保持/DTMF/静音/设备选择 |
 | `EventSink` | `core/telephony.go` | `core.App` 自己 | sip 层把"来电/振铃/接通/失败/结束"回调进核心 |
 | `CallLog` | `core/calllog.go` | `internal/calllog` | 通话记录落库（SQLite）；开始/接通/结束三个时刻由 `core.App` 直接入队，**不走事件总线**（总线满即丢） |
+| `ContactStore` | `core/contacts.go` | `internal/contacts` | 通信录落库（SQLite，独立 `contacts.db`）；主键是**规范化号码**，写操作一律「写库 + 重建内存快照」串行执行，界面与 WS 读内存快照（O(1)） |
 | `VideoSink` | `core/telephony.go` | `internal/ui` | 视频帧**直连**界面（不走事件总线，见 5.5） |
 | `Updater` | `core/update.go` | `internal/updater` | 自动更新状态机 |
 
@@ -161,7 +162,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 ### 4.8 `internal/ui`（Fyne 界面）
 
 - **职责**：主窗口（拨号盘 + 设置页）、**通话面板**（吸附右下角、不占任务栏）、**更新提示窗**（同样吸附右下角）、来电振铃动效、视频窗口与本地回显、托盘（图标颜色 = 注册状态）。
-- **关键文件**：`ui.go`（主窗口/拨号盘/设置/托盘/状态刷新）、`ui_call.go`（通话面板与紧凑按钮）、`ui_history.go`（通话记录页：与配置页一样切在主窗体内，紧凑双行列表 + 自绘文本 + 拖动/Shift 多选 + 滚动加载）、`ui_video.go`（视频窗口/回显/变换）、`ui_update.go`（更新提示窗）、`widgets.go`（内页共用：自绘单行文本 `plainText`、标准外观按钮 `plainButton`、统一顶栏 `pageTopBar`）、`theme.go`/`icons.go`/`statusdot.go`。
+- **关键文件**：`ui.go`（主窗口/拨号盘/设置/托盘/状态刷新）、`ui_call.go`（通话面板与紧凑按钮）、`ui_history.go`（通话记录页：与配置页一样切在主窗体内，紧凑双行列表 + 自绘文本 + 拖动/Shift 多选 + 滚动加载）、`ui_video.go`（视频窗口/回显/变换）、`ui_contacts.go`（通信录页：两个自绘 tab、拼音搜索、CSV 导入导出、右键批量操作）、`ui_tooltip.go`（备注悬停提示图层）、`ui_update.go`（更新提示窗）、`widgets.go`（内页共用：自绘单行文本 `plainText`、标准外观按钮 `plainButton`、统一顶栏 `pageTopBar`）、`theme.go`/`icons.go`/`statusdot.go`。
 - **平台拆分（重要）**：窗口控制按平台分文件——`topmost_windows.go`（Win32：窗口句柄定位、工具窗口样式、置顶、带前台）、`topmost_linux.go`（X11：`_MOTIF_WM_HINTS` 去装饰、`_NET_WM_STATE`、`_NET_WORKAREA`）、`topmost_other.go`（空实现）；另有 `folderdlg_*.go`、`glfw_linux.go`（Wayland/libdecor 规避）。**共享文件只调用平台函数，勿把某平台的逻辑写进共享文件**。
 
 ### 4.9 其它支撑包
@@ -170,6 +171,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 | --- | --- | --- |
 | `internal/video` | cgo 封装：FFmpeg 解码、OpenH264/libvpx/FFmpeg 编码、swscale；`camera_*.go` 按平台实现采集 | 静态库不入库（`scripts/build-video-libs.*` 生成）；`-tags video` 才编入 |
 | `internal/calllog` | 通话记录（REQ-CALL-007）的 SQLite 存储：`Start/MarkAnswered/Finish` 三个写入 + 分页查询/删除/清空 | **所有 SQL 排在单 worker 的 FIFO 队列上串行执行**：SIP 线程只做一次 channel send（永不阻塞信令），界面的查询排在写之后（读己之写）；`call_id` 主键 + `Finish` 带 `ended_at=0` 条件保证幂等（SIP 层会重复上报结束）；启动时把上次遗留的"进行中"记录清扫为「已中断」 |
+| `internal/contacts` | 通信录（REQ-CONTACT-001）的 SQLite 存储：全量快照、新增/修改（号码可改，撞号报错）、批量设常用、删除、清空、按号码合并导入 | 与 calllog 同一套单 worker 串行骨架，但**没有异步入队**（写入全部来自界面/WS，不是信令线程）；去重判断与写入在同一事务；导入时常用标志**只增不减**（本地 or 导入） |
 | `internal/config` | JSON 配置读写（原子写入）、密码 AES-256-GCM 加密 | 明文密码不落盘、只在内存 |
 | `internal/logx` | slog 日志：分级、滚动 + gzip 归档、`TraceSIP` 信令跟踪（自动脱敏） | 日志里不得出现密码/摘要 |
 | `internal/protocol` | `sip://` 解析与系统协议注册 | Windows 注册表实现单独文件（导入 x/sys/windows 会破坏交叉编译） |
@@ -222,6 +224,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 | 视频窗口/回显/旋转镜像 | `internal/ui/ui_video.go` + `internal/media/video_engine.go` |
 | 更新提示窗 | `internal/ui/ui_update.go` + `internal/updater/*` |
 | 通话记录（列表窗口 / 落库） | `internal/ui/ui_history.go` + `internal/calllog/calllog.go` + `internal/core/calllog.go`（采集点在 `core/app.go` 的 Dial/OnIncoming/OnEstablished/OnTerminated/OnFailed，**先写记录再发事件**） |
+| 通信录（页面 / 落库 / 联动显示） | `internal/ui/ui_contacts.go` + `internal/contacts/contacts.go` + `internal/core/contacts.go`（内存快照与号码规范化）；联动显示见 `callDisplay`（ui_call.go）与 `historyDisplay`（ui_history.go）、未接通知在 `ui_notify.go`；CSV 编解码在 `internal/core/contactcsv.go`（桌面与 WS 共用一份） |
 | 注册/呼叫/保持信令 | `internal/sip/phone.go`（先读 CLAUDE.md 的 sipgo 陷阱） |
 | 休眠/切网后恢复注册 | `internal/sip/netwatch.go`（墙钟跳变用 `UnixNano` 差，勿改回 `time.Sub`） |
 | SDP / 编解码协商 | `internal/media/sdp.go` + `engine.go`（`codecPT`、`activePT`、`SDPDirectionFor`） |

@@ -182,9 +182,10 @@ func markTrayQuit(item *fyne.MenuItem) {}
 // 126 = 上下 4px 留白 + 行距 2×2px + 三行各 38px（36 紧凑按钮 + 2 行距垫）。
 const (
 	callPanelWidth = 260
-	// callPanelHeight 140 = 上下留白 8 + 三行各 36 + 行间 2×8（Fyne 网格自带 4px
-	// 行距、按钮上下再各余 ~2px）。126 时行距被压成 0，按钮上下相连（用户实测）。
-	callPanelHeight     = 140
+	// callPanelHeight 142 = 上下留白 8 + 三行各 36 + 行间 2 + 2（第 2、3 行整体
+	// 下移 2px，用户要求）+ 第一行后的额外 2px。126 时行距被压成 0，按钮上下相连
+	// （历史实测）；140 时三行贴得偏上，加 2px 后更透气。
+	callPanelHeight     = 144
 	callPanelButtonSize = 36
 )
 

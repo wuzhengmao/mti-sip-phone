@@ -1,6 +1,6 @@
 # 本地 WebSocket 控制协议
 
-> 适用版本：1.0.8。网页通过本机 WebSocket 连接 SIP 软电话，实现拨号、接听、挂断等控制，并接收振铃、挂断等事件。
+> 适用版本：1.0.9。网页通过本机 WebSocket 连接 SIP 软电话，实现拨号、接听、挂断等控制，并接收振铃、挂断等事件。
 >
 > 本文档面向网页前端开发者；JS SDK 已封装本协议，通常无需直接读写报文。
 
@@ -64,8 +64,12 @@
 | `call.setVideo` | `{ "callId": "...", "enabled": true }` | `{ "callId": "..." }` | 视频总开关（纯本地动作，REQ-VIDEO-008）：关 = 不显示远端、不推送本地、视频窗口关闭；状态变化推 `call.video` |
 | `call.dtmf` | `{ "callId": "...", "digit": "5" }` | `{ "callId": "..." }` | 发送 DTMF（RFC 4733 telephone-event，REQ-CALL-006）：`digit` 为单个字符 `0-9 * # A-D`，通话接通后才有效；参数缺失或 `digit` 不是单字符返回 `invalid_params` |
 | `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态、自动接听开关） |
+| `contact.export` | `{}` | `{ "csv": "...", "count": 12 }` | 导出通信录 CSV 文本（REQ-WS-015）：表头 `号码,名称,备注,常用`，**UTF-8 带 BOM**（Excel 直接打开不乱码）。网页端不做通信录的增删改查 |
+| `contact.import` | `{ "csv": "号码,名称,备注,常用
+2999,张三,前台,是
+" }` | `{ "added": 1, "updated": 0, "skipped": 0, "total": 12 }` | 导入通信录 CSV：按号码去重，**已存在的只覆盖号码/名称/备注，常用标志只增不减**（本地已标就保持、本地没标而 CSV 标了则变常用），不存在的整条新增；没有号码或整行解析失败的行计入 `skipped`。参数缺失返回 `invalid_params`，通信录不可用返回 `contacts_unavailable`。单条消息上限 4MB |
 | `system.setAutoAnswer` | `{ "enabled": true }` | `{ "enabled": true }` | 自动接听开关（REQ-CALL-014）：与软电话界面上的「自动接听」按钮**共用一份状态**，变更后广播 `system.autoAnswer`，桌面按钮与网页据此同步。视频来电自动接听时按「视频接听」接通（REQ-VIDEO-004） |
-| `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64", "force": false }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.8" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选；`force: true` = **强制推送**，跳过"版本必须更高"的检查（REQ-UPD-015，页面对着手动推送/回滚用；SDK 的定时查询不带它） |
+| `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64", "force": false }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.9" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选；`force: true` = **强制推送**，跳过"版本必须更高"的检查（REQ-UPD-015，页面对着手动推送/回滚用；SDK 的定时查询不带它） |
 | `video.subscribe` | `{ "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 }, "local": { "maxWidth": 160, "maxHeight": 120 } }` | 见下 | 订阅视频画面（REQ-VIDEO-009）：**必定订阅远端画面**（`remote` 不传也有默认参数），`local` 可选——不传就是**不订阅本地回显**；两条通道各带各的参数（本地回显通常小一号）。订阅期间**软电话自动关闭视频窗口**，画面以二进制帧推送（见 4.1） |
 | `video.unsubscribe` | `{}` | `{ "local": false, "remote": false }` | 取消本连接的全部视频订阅（两条通道都已退订）；软电话恢复显示视频窗口 |
 | `video.setTransform` | `{ "channel": "remote", "rotate": true }` / `{ "channel": "local", "mirror": true }` / `{ "channel": "remote", "rotation": 90 }` | `{ "remote": { "rotation": 90, "mirror": false }, "local": { "rotation": 0, "mirror": false } }` | 画面旋转/水平镜像（REQ-VIDEO-012）：`rotate: true` = 顺时针 +90°，`rotation` 直接设角度，`mirror` 设水平镜像；`channel` 为 `remote`（远端画面，可省）或 `local`（本地回显）。**状态存在软电话侧、桌面与网页共用一份**，谁改都广播 `video.transform` |
@@ -74,7 +78,7 @@
 
 ```json
 {
-  "version": "1.0.8",
+  "version": "1.0.9",
   "os": "windows",
   "arch": "amd64",
   "register": { "state": "registered", "account": "1001", "reason": "" },
@@ -107,6 +111,34 @@
 - `video`：画面旋转/水平镜像（REQ-VIDEO-012），远端与本地回显各一份；网页连上（含断线重连）即可据此把按钮和渲染状态对齐。
 - `autoAnswer`：自动接听开关当前状态（与软电话界面的按钮共用一份，可用 `system.setAutoAnswer` 修改）。
 
+### 通信录 HTTP 接口（网页导入导出）
+
+**JSON（REST，REQ-CONTACT-005）** —— 给程序用，网页可以直接 XHR 收发结构化数据：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/contacts` | 返回 `{ "count": N, "contacts": [ {"number","name","note","starred"}, … ] }`（`application/json`） |
+| `POST` | `/api/contacts` | 请求体是 **裸数组** `[{...}]` **或**上面那种带 `contacts` 字段的对象（导出→改→导入可直接回灌）；返回 `{added, updated, skipped, total}`。JSON 语法/格式错误返回 **400** + `{"error": "..."}`；请求体上限 8MB |
+
+**CSV**（一键下载/上传，适合人工编辑与表格软件）：
+
+
+SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 端点（不是 WS）——CSV 是整份文本，走 HTTP 没有单条消息大小限制，浏览器也能直接流式下载/上传：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/contacts.csv` | 导出通信录 CSV（`text/csv`，带 `Content-Disposition` 文件名与 `X-Contact-Count` 条数头；跨域读取该头需 `Access-Control-Expose-Headers`） |
+| `POST` | `/api/contacts/import` | 导入：**请求体就是 CSV 文本**（`Content-Type: text/csv`），返回 `{ "added", "updated", "skipped", "total" }`，失败返回 503 + `{"error": "..."}`；请求体上限 8MB |
+
+两个端点与 WS 一致：**只接受本机回环来源**，无需鉴权；导入的合并语义（按号码去重、常用标志只增不减）与 `contact.import` 完全相同。
+
+### contact.import 说明
+
+- **去重键是"规范化号码"**：`sip:` 前缀、尖括号、`;user=phone`、`@host`、空格与 `-()[]_./` 分隔符都会被归一，所以 `2999` 与 `sip:2999@10.168.4.40:5060` 是同一条。
+- **常用标志只增不减**：本地已标常用就保持（文件里的"否"冲不掉它），本地没标而文件标了"是"则变成常用。
+- 解析容忍 BOM、无表头（按列序）、表头列序不同、列数不齐、空行与不规范引号；`常用` 列接受 `是/否/1/0/true/false/yes/no`。
+- 单条 WS 消息读上限为 **4MB**（框架默认 32KB 不够导入通信录，超过会被直接断开连接）。
+
 ### system.notifyUpdate 说明
 
 - 由**业务前端**在查询到更高版本后调用；软电话自身不查询更新服务器。
@@ -138,7 +170,7 @@
 | --- | --- | --- |
 | `system.state` | 与 getState 返回相同 | 连接建立时推送状态快照 |
 | `call.dialing` | `{ "callId", "call" }` | 呼出已发起（本地拨号按钮与 WS 拨号共用） |
-| `call.incoming` | `{ "callId", "call" }` | 来电振铃；`call.hasVideo` 为 true 表示对端带视频 |
+| `call.incoming` | `{ "callId", "call" }` | 来电振铃；`call.hasVideo` 为 true 表示对端带视频。**`call.contact`**（`{name, note, starred}`）在号码命中通信录时出现，页面可据此在号码旁显示名称、★ 与备注提示（REQ-UI-037） |
 | `call.ringing` | `{ "callId", "call", "earlyMedia" }` | 呼出已振铃（180/183）；`earlyMedia: true` 表示本次振铃带**早期媒体**（183+SDP，回铃音由对端下发，软电话不再放本地回铃音） |
 | `call.established` | `{ "callId", "call" }` | 通话建立 |
 | `call.terminated` | `{ "callId", "call", "reason", "missed" }` | 通话结束；reason：`local_hangup`（本端挂断）/ `remote_hangup`（对端挂断）/ `remote_cancel`（振铃中收到 CANCEL）/ `rejected`（本端拒接）。**`missed: true` = 未接来电**（呼入、从未接通、且非本端当场处理——本端拒接/振铃中挂断不算），桌面端据此弹系统通知（REQ-UI-010） |

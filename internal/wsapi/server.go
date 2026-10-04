@@ -2,7 +2,9 @@ package wsapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -33,9 +35,11 @@ func FindFreeWSPort(start int) int {
 // 安全性由仅监听回环地址保证（不再使用 token 鉴权，按用户要求）。
 //
 // 路由：
-//   - GET /              测试页面
-//   - GET /sdk/*         JS SDK 静态文件
-//   - GET /ws            WebSocket 端点
+//   - GET  /                    测试页面
+//   - GET  /sdk/*               JS SDK 静态文件
+//   - GET  /ws                  WebSocket 端点
+//   - GET  /api/contacts.csv    导出通信录 CSV（网页一键下载，REQ-CONTACT-004）
+//   - POST /api/contacts/import 导入通信录 CSV（请求体就是 CSV 文本）
 type Server struct {
 	app   *core.App
 	video *videoHub // 网页视频订阅中枢（REQ-VIDEO-009）
@@ -52,6 +56,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/sdk/", s.handleStatic)
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/contacts.csv", s.handleContactsExport)
+	mux.HandleFunc("/api/contacts/import", s.handleContactsImport)
+	mux.HandleFunc("/api/contacts", s.handleContactsJSON) // JSON 的 REST 接口（GET 导出 / POST 导入）
 	// CORS：允许任意网页来源访问（本机页面可能从任意端口打开）
 	return withCORS(mux)
 }
@@ -120,6 +127,120 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// maxContactsCSVBody 导入请求体上限（与桌面端导入同一个量级）。
+const maxContactsCSVBody = 8 << 20
+
+// handleContactsJSON 通信录的 JSON REST 接口（REQ-CONTACT-005）：
+//
+//	GET  /api/contacts  → { "count": N, "contacts": [ {number,name,note,starred}, ... ] }
+//	POST /api/contacts  → 请求体是上面这种对象**或裸数组**，返回 {added,updated,skipped,total}
+//
+// 给网页用：XHR/fetch 直接收发结构化数据，不用自己解析 CSV（CSV 那套仍然保留，
+// 见 /api/contacts.csv 与 /api/contacts/import）。合并语义与 CSV 导入完全一致。
+func (s *Server) handleContactsJSON(w http.ResponseWriter, r *http.Request) {
+	if !isLoopback(r.RemoteAddr) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	switch r.Method {
+	case http.MethodGet:
+		data, err := s.app.ExportContactsJSON()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write(data)
+
+	case http.MethodPost:
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxContactsCSVBody))
+		if err != nil {
+			http.Error(w, "通信录 JSON 读取失败或超过 8MB", http.StatusRequestEntityTooLarge)
+			return
+		}
+		res, err := s.app.ImportContactsJSON(body)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		out := map[string]any{
+			"added":   res.Added,
+			"updated": res.Updated,
+			"skipped": res.Skipped,
+			"total":   s.app.ContactCount(),
+		}
+		if err != nil {
+			out["error"] = err.Error()
+			w.WriteHeader(http.StatusBadRequest) // JSON 语法/格式错误属客户端问题
+		}
+		_ = json.NewEncoder(w).Encode(out)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleContactsExport 导出通信录 CSV（GET /api/contacts.csv）。
+//
+// 网页一键导出走这条 **HTTP** 路径而不是 WS：CSV 是一整份文本，走 WS 会受
+// 单条消息大小限制（默认 32KB，已放宽到 4MB 也仍是限制），而且浏览器拿到
+// 二进制/文本后还要自己造 Blob 再下载；直连 HTTP 可以流式下载、没有大小问题。
+func (s *Server) handleContactsExport(w http.ResponseWriter, r *http.Request) {
+	if !isLoopback(r.RemoteAddr) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	csv, err := s.app.ExportContactsCSV()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	name := "contacts-" + time.Now().Format("20060102") + ".csv"
+	// 条数放响应头：网页一键下载是浏览器直接存文件，拿不到正文里的信息，
+	// SDK 用它在页面上显示"已导出 N 位联系人"
+	w.Header().Set("X-Contact-Count", fmt.Sprint(s.app.ContactCount()))
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	// 跨域读取响应头需要显式允许（页面由别的端口提供时）
+	w.Header().Set("Access-Control-Expose-Headers", "X-Contact-Count")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write([]byte(csv))
+}
+
+// handleContactsImport 导入通信录 CSV（POST /api/contacts/import，请求体即 CSV 文本）。
+// 返回 JSON：{added, updated, skipped, total, error?}。
+func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
+	if !isLoopback(r.RemoteAddr) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxContactsCSVBody))
+	if err != nil {
+		http.Error(w, "CSV 内容读取失败或超过 8MB", http.StatusRequestEntityTooLarge)
+		return
+	}
+	res, err := s.app.ImportContactsCSV(string(body))
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	data := map[string]any{
+		"added":   res.Added,
+		"updated": res.Updated,
+		"skipped": res.Skipped,
+		"total":   s.app.ContactCount(),
+	}
+	if err != nil {
+		data["error"] = err.Error()
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(data)
+}
+
 // handleWS WebSocket 连接（无 token 鉴权，仅接受本机回环连接）。
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// 仅接受来自本机的连接（服务本身只绑定 127.0.0.1，这里再兜底校验）
@@ -136,6 +257,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		logx.Logger().Debug("WS 握手失败", "err", err)
 		return
 	}
+	// 放开单条消息的读上限（coder/websocket 默认 32768 字节）：通信录导入
+	// 是一整份 CSV 文本，稍大一点就会被默认上限拒掉（表现为连接断开、没有
+	// 任何业务错误，极难排查）。仅回环连接，4MB 足够且没有滥用面。
+	conn.SetReadLimit(4 << 20)
 	logx.Logger().Info("网页已连接", "remote", r.RemoteAddr)
 	s.serveConn(r.Context(), conn)
 }
@@ -154,8 +279,11 @@ func isLoopback(remoteAddr string) bool {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// Chrome 的 Private Network Access：从公网页面访问本机（私有网络）时，
+		// 预检要显式允许，否则请求会被拦掉（本机页面之间不需要）
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

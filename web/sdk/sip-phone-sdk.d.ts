@@ -95,6 +95,48 @@ declare class SipPhoneSDK {
   /** 自动接听开关（与软电话界面按钮共用一份状态；变更推 system.autoAnswer 事件） */
   setAutoAnswer(enabled: boolean): Promise<{ enabled: boolean }>;
 
+  /**
+   * 导出通信录为 CSV 文本（表头「号码,名称,备注,常用」，带 UTF-8 BOM）。
+   * 网页端不做增删改查，只提供一键导入/导出。
+   */
+  exportContacts(): Promise<{ csv: string; count: number }>;
+
+  /**
+   * 一键导出：取回 CSV 后由浏览器存成文件（默认 contacts-YYYYMMDD.csv）。
+   * 走 HTTP（`GET /api/contacts.csv`），没有 WS 的单条消息大小限制。
+   */
+  downloadContacts(filename?: string): Promise<{ count: number; filename: string }>;
+
+  /**
+   * 导入通信录 CSV：按号码去重，已存在的只覆盖号码/名称/备注（**常用只增不减**），
+   * 不存在的整条新增。
+   */
+  importContacts(csv: string): Promise<SipContactImportResult>;
+
+  /**
+   * 导出通信录为 **JSON**（REST：`GET /api/contacts`）——给程序用的结构化数据，
+   * 网页可直接 XHR 取来渲染。
+   */
+  exportContactsJSON(): Promise<{ count: number; contacts: SipContactJSON[] }>;
+
+  /**
+   * 导入通信录 **JSON**（REST：`POST /api/contacts`）。可传裸数组或
+   * exportContactsJSON() 返回的对象（导出→改→导入可直接回灌）。
+   * 合并语义与 CSV 导入一致：按号码去重、只覆盖号码/名称/备注、常用标志只增不减。
+   */
+  importContactsJSON(contacts: SipContactJSON[] | { count?: number; contacts: SipContactJSON[] } | string):
+    Promise<SipContactImportResult>;
+
+  /**
+   * 一键导入：弹系统文件选择框选 CSV 文件后合并（走 HTTP POST
+   * `/api/contacts/import`，请求体即 CSV，没有 WS 的大小限制）。
+   * 用户取消时以 code='cancelled' 拒绝。
+   */
+  importContactsFromFile(): Promise<SipContactImportResult & { filename: string }>;
+
+  /** 按 File/Blob 导入通信录（HTTP 直传，不弹文件选择框） */
+  importContactsFile(file: File | Blob): Promise<SipContactImportResult>;
+
   /** 查询状态（注册状态、通话列表、版本与平台、更新状态、自动接听开关） */
   getState(): Promise<{
     version: string;
@@ -120,6 +162,8 @@ declare class SipPhoneSDK {
         width: number;
         height: number;
       };
+      /** 通信录匹配结果（命中才有）：名称/备注/是否常用（REQ-UI-037） */
+      contact?: SipContactInfo;
     }>;
     update?: SipUpdateStatus;
   }>;
@@ -228,6 +272,38 @@ interface SipCall {
     width: number;
     height: number;
   };
+  /** 通信录匹配结果（命中才有）：页面可直接显示名称、★ 与备注（REQ-UI-037） */
+  contact?: SipContactInfo;
+}
+
+/** 通话对象里携带的通信录信息（对端号码在通信录里命中时才有） */
+interface SipContactInfo {
+  /** 通信录里的显示名称（可能为空串） */
+  name: string;
+  /** 备注（可能为空串；可作悬停提示） */
+  note: string;
+  /** 常用联系人（页面上可在名称后加 ★） */
+  starred: boolean;
+}
+
+/** REST 接口里的联系人 JSON 形状 */
+interface SipContactJSON {
+  number: string;
+  name: string;
+  note: string;
+  starred: boolean;
+}
+
+/** 通信录导入结果 */
+interface SipContactImportResult {
+  /** 新增条数 */
+  added: number;
+  /** 覆盖条数（只覆盖号码/名称/备注） */
+  updated: number;
+  /** 跳过的行数（没有号码或格式不对） */
+  skipped: number;
+  /** 导入后的通信录总条数 */
+  total: number;
 }
 
 /** 视频通道名 */
