@@ -163,7 +163,8 @@ internal/
   autostart/  开机自启（Windows HKCU Run / Linux XDG autostart，其他平台 no-op）
 web/
   test.html   测试页面（内嵌进二进制，右列事件日志）
-  sdk/        JS SDK（sip-phone-sdk.js + .d.ts，无 token；含定时查询更新站点）
+  sdk/        JS SDK（sip-phone-sdk.js + .d.ts，无 token；更新只保留强制推送
+              notifyUpdate，查询在软电话侧）
 release/      发布到更新站点的配置与元数据：release.conf（站点/应用 ID/令牌）、
               app.json（应用级元数据，经站点 metadata 接口写入）、icon.svg（图标，经 icon 接口写入）
 scripts/      第三方库构建（build-video-libs.*、build-audio-lib.*）与一键发布（release.sh/.bat）
@@ -184,7 +185,7 @@ main（组装）
 ```
 
 - **事件流单向**：sip 层 → `p.sink`（core.App 回调：OnIncoming/OnRinging/OnEstablished/OnFailed/OnTerminated）→ 事件总线 → UI 与 WS 订阅者。
-- **自动更新**：业务前端（网页）经 WS `system.notifyUpdate` 告知新版本（软电话自身不查更新服务器）→ `internal/updater` 校验并发布 `system.update` 事件 → UI 弹右下角提示窗 + 主窗体提示行 → **用户点击后**才下载、替换 exe 并重启（WS 不能触发下载/重启）。下载/替换的进度与失败原因同样经总线事件到 UI 与网页。网页侧「有没有更高版本」由 **JS SDK 定时查询更新站点**得到（`updateUrl` 在网页初始化 SDK 时告知，见 `web/sdk/sip-phone-sdk.js` 的 `checkUpdate`/`update.check`），软电话只负责提示与安装。`system.notifyUpdate` 另带可选 `force`（**强制推送**，跳过版本高低检查，测试页「推送更新」按钮用）——SDK 的定时查询**不带**它，自动更新仍按版本比较走。
+- **自动更新**：**软电话自己**按配置的周期查更新站点（`internal/updater/checker.go`，配置见 `config.Update`：站点/应用 ID/周期/预览版，配置页可改、网页可经 WS `system.setUpdateConfig` 写，REQ-UPD-017/018）→ 查到更高版本经 `updater.Notify` 校验并发布 `system.update` 事件 → UI 弹右下角提示窗 + 主窗体提示行 → **用户点击后**才下载、替换 exe 并重启（WS 不能触发下载/重启）。下载/替换的进度与失败原因同样经总线事件到 UI 与网页。业务前端仍可经 WS `system.notifyUpdate` **强制推送**某个版本（`force` 跳过版本高低检查，测试页「推送」按钮用，REQ-UPD-019）；SDK 不再查询站点。
 - **media.Engine 与音频设备解耦**：音频回调调用 `FeedMic`（任意帧长，内部按 20ms 帧累积发送）/ `ReadPlayback`（任意帧长，内部从样本环形缓冲取）。
 - **播放缓冲**（media/jitter.go）：样本粒度环形缓冲 8 秒容量；RTP 按序号处理——乱序/过期丢弃、丢包填静音（PLC 用静音而非循环旧帧）、SSRC 切换或序号大跳变（>2 秒）重置缓冲（183 早期媒体 → 200 新媒体流的关键）。
 - **保持语义**：本端保持发 re-INVITE（offer `a=sendonly`，恢复 `a=sendrecv`）；对端 re-INVITE 按方向镜像应答（对端 `recvonly` → 本端 `sendonly` 且停止发送）。
@@ -532,6 +533,16 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   禁用期间字段保留解禁后回到的音量，当前是否禁用看 `micMuted`/`speakerMuted`；
   新通话在 `upsertCall` 里默认 100（0 有专有含义，不能靠零值）。`upsertCall` 是
   **整份覆盖**，只在通话创建时调用，后续状态一律走 `updateCall`。
+- **自动更新：查询在软电话、网页只写配置 + 强制推送（REQ-UPD-017~019）**。软电话按
+  `config.Update`（站点/应用 ID/周期/预览版）自己定时查 `GET {站点}/api/v1/apps/{应用}/check`
+  （`internal/updater/checker.go`，**不带 channel**，用站点默认通道），查到更高版本走
+  `updater.Notify` 同一条链路提示用户。几个坑：① **首次检查要在启动后立即做**，代码里
+  用 `first` 标志把首轮 wait 置 0——否则填完站点要干等一个周期；② 首次检查往往**早于界面
+  订阅事件**，`system.update` 收不到、同版本又被 `lastNotified` 去重挡掉，界面就永远不弹窗
+  ——所以 `ui.Run` 在订阅后要**补取一次 `UpdateStatus()`**；③ 查询结果**不要把站点返回的
+  os/arch 塞回 `UpdateInfo`**（站点给的是 `x64/x86`，`Notify` 按 `GOARCH` 严格比对会拒绝）；
+  ④ 去重键是「版本|sha256」，改配置时清空。网页侧：`system.setUpdateConfig`（字段可选）
+  写配置、`system.notifyUpdate` 强制推送，SDK **不再查询站点**（`notifyUpdate` 恒带 force）。
 - **`call.audio` 事件必须合并发布**（`internal/core/audio.go` 的 `audioPublisher`）：
   滚轮/拖滑块一秒能触发十几下，逐条广播会把事件总线（容量 64、满即丢）刷爆、把
   通话状态事件挤掉，也会把网页日志刷屏。合并口径 =「首次立即发 + 窗口内最多补发
@@ -693,4 +704,14 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   的 `index out of range`，每次崩的字符串都不一样）。所以涉及后台加载的界面
   （如通话记录窗口）**不要**写成渲染测试；纯文案/逻辑函数照常测。真实驱动下
   `fyne.Do` 会投递到主循环，不存在这个问题。
+- **改完内嵌网页 / JS SDK 后，用无头 Edge 跑一遍页面查运行期错误**：`web/test.html` 与 SDK
+  是**内嵌进二进制**的（改完必须重新构建 + 重启，否则页面还是旧的——踩过：SDK 改坏后页面报
+  `Uncaught TypeError: this._startHeartbeat is not a function`，本地文件已修好却没重建，
+  看页面仍旧报错）。验证命令（Edge 在 Win11 自带，路径见下）：
+  `"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --headless=new --disable-gpu
+  --enable-logging=stderr --v=1 --virtual-time-budget=6000 --dump-dom http://127.0.0.1:8765/`
+  → `grep -i uncaught` 看有没有 JS 运行期错误，`--dump-dom` 里能看到 JS 填出来的内容
+  （如「当前版本：1.0.10-rc（windows/amd64）」）说明 SDK 连上并跑通了。改 SDK 时另外用脚本
+  对一遍「`this.xxx()` 调用是否都有定义」——**大段删代码时最容易连带删掉无关方法**
+  （这次就是删更新查询时把 `_emit` / `_startHeartbeat` 一起删了，页面直接白屏）。
 - **rtp_rx.wav**：根目录与 internal/sip/ 下的抓包调试产物，已被 .gitignore 忽略，勿误提交。

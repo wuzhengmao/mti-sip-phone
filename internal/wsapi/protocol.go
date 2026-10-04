@@ -51,9 +51,10 @@ const (
 	MethodSetSpeakerVolume = "call.setSpeakerVolume" // 扬声器音量百分比（0–100，0 = 禁用；REQ-MEDIA-006）
 	MethodSetVideo          = "call.setVideo"        // 视频总开关（纯本地，REQ-VIDEO-008）
 	MethodDTMF              = "call.dtmf"            // 发送 DTMF（RFC 4733，REQ-CALL-006）
-	MethodGetState          = "system.getState"      // 查询状态
-	MethodSetAutoAnswer     = "system.setAutoAnswer" // 自动接听开关（桌面按钮与网页共用一份）
-	MethodNotifyUpdate      = "system.notifyUpdate"  // 前端告知新版本
+	MethodGetState          = "system.getState"          // 查询状态
+	MethodSetAutoAnswer     = "system.setAutoAnswer"     // 自动接听开关（桌面按钮与网页共用一份）
+	MethodSetUpdateConfig   = "system.setUpdateConfig"   // 自动更新配置（站点/应用 ID/周期/预览版，REQ-UPD-018）
+	MethodNotifyUpdate      = "system.notifyUpdate"      // 前端强制推送新版本
 	MethodVideoSubscribe    = "video.subscribe"      // 订阅视频画面（REQ-VIDEO-009）
 	MethodVideoUnsubscribe  = "video.unsubscribe"    // 退订视频画面
 	MethodVideoSetTransform = "video.setTransform"   // 画面旋转/水平镜像（REQ-VIDEO-012）
@@ -77,8 +78,9 @@ const (
 	EvVideoWeb        = "video.web"         // 网页视频订阅状态变化（订阅后软电话隐藏视频窗口）
 	EvVideoTransform  = "video.transform"   // 画面旋转/镜像变化（桌面与网页共用一份状态）
 	EvRegisterState   = "register.state"    // 注册状态变化
-	EvSystemUpdate    = "system.update"     // 自动更新状态变化（phase/进度/失败原因）
-	EvAutoAnswer      = "system.autoAnswer" // 自动接听开关变化（桌面与网页共用一份状态）
+	EvSystemUpdate    = "system.update"       // 自动更新状态变化（phase/进度/失败原因）
+	EvAutoAnswer      = "system.autoAnswer"   // 自动接听开关变化（桌面与网页共用一份状态）
+	EvUpdateConfig    = "system.updateConfig" // 自动更新配置变化（REQ-UPD-018，桌面与网页共用一份）
 )
 
 // newError 构造错误信息。

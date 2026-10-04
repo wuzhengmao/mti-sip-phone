@@ -329,22 +329,27 @@
     <div class="card" style="margin-bottom:16px">
       <h2>自动更新</h2>
       <p class="state-line" id="verLine">当前版本：—</p>
-      <!-- 更新站点：SDK 初始化时告知地址，连上软电话后定时查询（留空 = 不查询） -->
+      <!-- 更新站点：**由本页自己 fetch** 查版本（软电话侧的自动检查由它自己的配置驱动，
+           见下方「写入软电话配置」） -->
       <div class="row">
         <label>更新站点</label>
-        <input type="text" id="updSite" value="https://update.wuzm219.cn" placeholder="如 https://update.example.com（留空 = 不自动查询）">
+        <input type="text" id="updSite" value="https://update.wuzm219.cn" placeholder="如 https://update.example.com">
         <button id="btnCheckUpdate">检查更新</button>
       </div>
       <div class="row">
         <label>应用 ID</label>
         <input type="text" id="updAppId" value="mti-sip-phone">
-        <label>通道</label>
-        <input type="text" id="updChannel" placeholder="默认">
+        <label>周期(分)</label>
+        <input type="number" id="updInterval" value="5" min="1" max="1440" style="min-width:70px;flex:none;width:80px">
       </div>
-      <p class="state-line" id="updLine">定时查询：未启用。</p>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="updPrerelease">接受预览版</label>
+        <button id="btnWriteUpdCfg" class="gray">写入软电话配置</button>
+      </div>
+      <p class="state-line" id="updLine">软电话自动检查：见下方「写入软电话配置」与软电话设置页。</p>
       <!-- 站点版本列表（点「检查更新」拉取）：每行 = 版本 + 黄色「推送」按钮 -->
       <ul class="upd-list" id="updVersions"></ul>
-      <p class="state-line">「推送」是强制推送：跳过版本比较，低版本/同版本也能推给软电话（联调用）；定时查询始终按版本高低决定要不要提示。</p>
+      <p class="state-line">「推送」是强制推送：跳过版本比较，低版本/同版本也能推给软电话（联调用）。</p>
       <p class="state-line">站点用自签名证书时，浏览器必须先信任该证书（否则查询会被证书校验拦下）；站点若只开了 HTTP 端口且会 301 跳到 HTTPS，这里要直接填 https 地址。</p>
     </div>
     <div class="card">
@@ -380,13 +385,11 @@
     ? 'ws://' + location.host + '/ws' : 'ws://127.0.0.1:8765/ws';
   $('wsUrl').value = wsBase;
 
-  // 更新站点地址由网页在初始化 SDK 时告知（留空 = 不自动查询更新）
+  // SDK 不再负责查更新（改由软电话自己按配置定时查，见「写入软电话配置」）；
+  // 本页要查版本就在下面用 fetch 自己请求站点接口。
   var sdk = new SipPhoneSDK({
     url: wsBase,
-    autoReconnect: true,
-    updateUrl: $('updSite').value.trim(),
-    appId: $('updAppId').value.trim() || 'mti-sip-phone',
-    updateInterval: 60 * 1000 // 测试页查得勤一点：1 分钟一次（SDK 默认 5 分钟）
+    autoReconnect: true
   });
 
   var currentCall = null; // { callId, direction, state }
@@ -567,49 +570,88 @@
     }
   });
 
-  // ---------------- 自动更新 ----------------
+  // ---------------- 自动更新（页面自己查站点，软电话侧的检查由它自己的配置驱动）----------------
+  // 说明：查询更新站点**不再由 SDK 负责**（REQ-UPD-017：软电话自己按配置的周期查）。
+  // 本页保留「查版本 + 强制推送」的联调能力，查询用页面自己的 fetch 实现。
 
-  // SDK 定时查询更新站点的结果（SDK 本地事件，不经过 WS）
-  var lastCheckLog = '';
-  sdk.on('update.check', function (r) {
-    var msg;
-    if (r.error) {
-      msg = '更新查询失败：' + r.error;
-    } else if (r.notified) {
-      msg = '发现新版本 v' + r.latestVersion + '（当前 v' + r.currentVersion + '），已告知软电话';
-    } else if (r.updateAvailable) {
-      msg = '有新版本 v' + r.latestVersion + '，但未告知软电话（' + (r.reason || '未知原因') + '）';
-    } else {
-      msg = '已是最新版本（当前 v' + (r.currentVersion || '?') + '）';
+  var UPDATE_FETCH_TIMEOUT = 10000;
+
+  // 站点请求：GET {站点}/api/v1/apps/{应用}{路径}?参数
+  function siteFetch(path, params, mirror) {
+    var base = $('updSite').value.trim().replace(/\/+$/, '');
+    if (!base) {
+      return Promise.reject(new Error('未填更新站点'));
     }
-    // 更新站点没开时每次查询都失败，同一句只记一次，避免刷屏
-    if (msg === lastCheckLog) { return; }
-    lastCheckLog = msg;
-    addLog(r.error ? 'info' : (r.notified ? 'ok' : 'ev'), msg);
-  });
+    var appId = $('updAppId').value.trim() || 'mti-sip-phone';
+    var qs = Object.keys(params).map(function (k) {
+      return k + '=' + encodeURIComponent(params[k]);
+    }).join('&');
+    var url = base + '/api/v1/apps/' + encodeURIComponent(appId) + path + (qs ? '?' + qs : '');
+    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, UPDATE_FETCH_TIMEOUT) : null;
+    return fetch(url, ctrl ? { signal: ctrl.signal } : {}).then(function (resp) {
+      if (timer) { clearTimeout(timer); }
+      if (resp.status === 404) { return null; } // /latest 无匹配版本 = 没有，不算错误
+      if (!resp.ok) { throw new Error('HTTP ' + resp.status); }
+      return resp.json();
+    }, function (e) {
+      if (timer) { clearTimeout(timer); }
+      throw (e && e.name === 'AbortError') ? new Error('请求超时') : e;
+    }).then(function (data) {
+      if (!data || !mirror) { return data; }
+      // 拍平成 {version, prerelease, notes, url, sha256}（与列表项一致）
+      var r = data.release || {};
+      var d = data.download || {};
+      return {
+        version: r.version || '',
+        title: r.title || '',
+        prerelease: !!r.prerelease,
+        publishedAt: r.publishedAt || '',
+        notes: r.notes || '',
+        mandatory: !!r.mandatory,
+        file: d.file || '',
+        url: d.url || '',
+        sha256: d.sha256 || '',
+        size: d.size || 0
+      };
+    });
+  }
 
-  // 更新站点配置：输入框改动即时生效（SDK 重启定时器并立即查一次；地址留空 = 停表）
-  function applyUpdateSource() {
-    var cfg = sdk.setUpdateSource({
+  // 拉「最新版本（含预览版）」与「最新稳定版」。注意 prerelease 必须显式传：
+  // 站点默认就是 false，不传的话两次请求会拿到同一个结果。
+  function fetchSiteReleases() {
+    var params = {};
+    if (buildInfo.os) { params.os = buildInfo.os; }
+    if (buildInfo.arch) { params.arch = buildInfo.arch; }
+    return Promise.all([
+      siteFetch('/latest', Object.assign({ prerelease: 'true' }, params), true),
+      siteFetch('/latest', Object.assign({ prerelease: 'false' }, params), true)
+    ]).then(function (res) {
+      return { current: buildInfo.version || '', latest: res[0], latestStable: res[1] };
+    });
+  }
+
+  // 「写入软电话配置」：把卡片里的站点/应用 ID/周期/预览版写进软电话（REQ-UPD-018），
+  // 之后**软电话自己**会按周期检查并在有更新时弹提示窗。
+  $('btnWriteUpdCfg').onclick = function () {
+    var interval = parseInt($('updInterval').value, 10);
+    if (!interval || interval < 1) { interval = 5; }
+    if (interval > 1440) { interval = 1440; }
+    sdk.setUpdateConfig({
       url: $('updSite').value.trim(),
       appId: $('updAppId').value.trim() || 'mti-sip-phone',
-      channel: $('updChannel').value.trim()
+      intervalMinutes: interval,
+      prerelease: $('updPrerelease').checked
+    }).then(function (cfg) {
+      $('updInterval').value = cfg.intervalMinutes;
+      $('updLine').textContent = cfg.url
+        ? '软电话自动检查：' + cfg.url + '（应用 ' + cfg.appId + '，每 ' + cfg.intervalMinutes + ' 分钟）'
+        : '软电话自动检查：未启用（更新站点为空）';
+      addLog('ok', '已写入软电话更新配置：' + (cfg.url ? cfg.url + '，每 ' + cfg.intervalMinutes + ' 分钟' : '未启用自动检查'));
+    }, function (e) {
+      addLog('err', '写入软电话更新配置失败: ' + e.message);
     });
-    $('updAppId').value = cfg.appId;
-    $('updLine').textContent = cfg.url
-      ? '定时查询：' + cfg.url + '（应用 ' + cfg.appId +
-        (cfg.channel ? '，通道 ' + cfg.channel : '') +
-        '，每 ' + Math.round(cfg.interval / 60000) + ' 分钟）'
-      : '定时查询：未启用（填入更新站点地址即启用）';
-    return cfg;
-  }
-  ['updSite', 'updAppId', 'updChannel'].forEach(function (id) {
-    $(id).onchange = function () {
-      var cfg = applyUpdateSource();
-      addLog('info', '更新站点配置已更新：' + (cfg.url || '（未启用自动查询）'));
-    };
-  });
-  applyUpdateSource();
+  };
 
   // 站点版本列表的一项：版本名 + 黄色「推送」按钮（强制推送，跳过版本比较）
   function versionItem(label, item, currentVersion) {
@@ -646,8 +688,7 @@
         version: item.version,
         url: item.url,
         sha256: item.sha256,
-        notes: item.notes,
-        force: true
+        notes: item.notes
       }).then(function (res) {
         addLog('ok', '已强制推送 v' + res.version + '（当前 v' + res.currentVersion +
           '，状态 ' + res.phase + '）——请在软电话上确认更新');
@@ -660,11 +701,10 @@
   }
 
   $('btnCheckUpdate').onclick = function () {
-    applyUpdateSource();
     var box = $('updVersions');
     box.textContent = '';
     addLog('info', '查询更新站点版本列表…');
-    sdk.listReleases().then(function (r) {
+    fetchSiteReleases().then(function (r) {
       box.appendChild(versionItem('最新版本', r.latest, r.current));
       box.appendChild(versionItem('最新稳定版', r.latestStable, r.current));
       addLog('ok', '站点版本：最新 ' + (r.latest ? 'v' + r.latest.version : '—') +

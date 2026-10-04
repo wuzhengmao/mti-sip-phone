@@ -79,6 +79,9 @@ type State struct {
 	AutoAnswer bool `json:"autoAnswer"`
 	// Video 显示用的旋转/镜像（远端 + 本地回显），网页连上就能拿到并与桌面同步
 	Video VideoTransforms `json:"video"`
+	// UpdateConfig 自动更新配置（站点/应用 ID/周期/预览版，REQ-UPD-017）：
+	// 网页连上就能拿到当前值，也可用 system.setUpdateConfig 改写
+	UpdateConfig config.UpdateConfig `json:"updateConfig"`
 }
 
 // 常见错误，供接口层映射为错误码。
@@ -225,8 +228,9 @@ func (a *App) State() State {
 		Register:   a.reg,
 		Calls:      make([]Call, 0, len(a.callOrder)),
 		Update:     upd,
-		Video:      a.videoTx,
-		AutoAnswer: a.autoAnswer,
+		Video:        a.videoTx,
+		AutoAnswer:   a.autoAnswer,
+		UpdateConfig: a.cfg.Update,
 	}
 	for _, id := range a.callOrder {
 		c := *a.calls[id]

@@ -65,12 +65,13 @@
 | `call.setSpeakerVolume` | `{ "callId": "...", "speakerVolume": 80 }` | `{ "callId": "..." }` | 扬声器音量（REQ-MEDIA-006，纯本地动作）：`speakerVolume` 为 **0–100 的百分比整数**，**0 = 禁用**，大于 0 时同时解除禁用；变更推 `call.audio` |
 | `call.setVideo` | `{ "callId": "...", "enabled": true }` | `{ "callId": "..." }` | 视频总开关（纯本地动作，REQ-VIDEO-008）：关 = 不显示远端、不推送本地、视频窗口关闭；状态变化推 `call.video` |
 | `call.dtmf` | `{ "callId": "...", "digit": "5" }` | `{ "callId": "..." }` | 发送 DTMF（RFC 4733 telephone-event，REQ-CALL-006）：`digit` 为单个字符 `0-9 * # A-D`，通话接通后才有效；参数缺失或 `digit` 不是单字符返回 `invalid_params` |
-| `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态、自动接听开关） |
+| `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态、**自动更新配置 updateConfig**、自动接听开关） |
 | `contact.export` | `{}` | `{ "csv": "...", "count": 12 }` | 导出通信录 CSV 文本（REQ-WS-015）：表头 `号码,名称,备注,常用`，**UTF-8 带 BOM**（Excel 直接打开不乱码）。网页端不做通信录的增删改查 |
 | `contact.import` | `{ "csv": "号码,名称,备注,常用
 2999,张三,前台,是
 " }` | `{ "added": 1, "updated": 0, "skipped": 0, "total": 12 }` | 导入通信录 CSV：按号码去重，**已存在的只覆盖号码/名称/备注，常用标志只增不减**（本地已标就保持、本地没标而 CSV 标了则变常用），不存在的整条新增；没有号码或整行解析失败的行计入 `skipped`。参数缺失返回 `invalid_params`，通信录不可用返回 `contacts_unavailable`。单条消息上限 4MB |
 | `system.setAutoAnswer` | `{ "enabled": true }` | `{ "enabled": true }` | 自动接听开关（REQ-CALL-014）：与软电话界面上的「自动接听」按钮**共用一份状态**，变更后广播 `system.autoAnswer`，桌面按钮与网页据此同步。视频来电自动接听时按「视频接听」接通（REQ-VIDEO-004） |
+| `system.setUpdateConfig` | `{ "url": "https://update.example.com", "appId": "mti-sip-phone", "intervalMinutes": 5, "prerelease": false }` | 生效后的完整配置 `{url, appId, intervalMinutes, prerelease}` | 写入软电话的**自动更新配置**（REQ-UPD-018）：软电话据此自己定时查询更新站点（**url 留空 = 不检查**，周期 1–1440 分钟，prerelease 默认 false）。字段**都是可选的**，只改传入的那些；写入后落盘、立即生效（配了站点马上查一次）并广播 `system.updateConfig`。url 非 http/https 或周期越界返回 `invalid_params` |
 | `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64", "force": false }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.10" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选；`force: true` = **强制推送**，跳过"版本必须更高"的检查（REQ-UPD-015，页面对着手动推送/回滚用；SDK 的定时查询不带它） |
 | `video.subscribe` | `{ "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 }, "local": { "maxWidth": 160, "maxHeight": 120 } }` | 见下 | 订阅视频画面（REQ-VIDEO-009）：**必定订阅远端画面**（`remote` 不传也有默认参数），`local` 可选——不传就是**不订阅本地回显**；两条通道各带各的参数（本地回显通常小一号）。订阅期间**软电话自动关闭视频窗口**，画面以二进制帧推送（见 4.1） |
 | `video.unsubscribe` | `{}` | `{ "local": false, "remote": false }` | 取消本连接的全部视频订阅（两条通道都已退订）；软电话恢复显示视频窗口 |
@@ -143,12 +144,12 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 
 ### system.notifyUpdate 说明
 
-- 由**业务前端**在查询到更高版本后调用；软电话自身不查询更新服务器。
-- `version` 不高于软电话当前版本 → 失败，错误码 `update_not_newer`（视为正常结果，不必告警）。
-- `force: true` 跳过上面这条版本比较（强制推送，REQ-UPD-015）：同版本、甚至更低版本都会被受理，用于联调与回滚；平台一致性等其余校验不变。**SDK 的定时查询不使用它**——自动更新始终按版本高低决定要不要提示。
-- 参数缺失、`url` 非 http/https、`os`/`arch` 与软电话不一致 → `invalid_params`。
-- 受理后软电话会在右下角弹出提示窗并在主界面显示更新提示行；**是否下载/重启由用户在软电话界面上确认**，本方法不会自动下载。
-- 重复告知同一版本为幂等操作（仍返回 ok）。
+由**业务前端**调用的**强制推送**通道（REQ-UPD-019）：把某个版本告知软电话，软电话弹提示、由用户在界面上确认后下载替换重启（**WS 只能告知，不能触发下载或重启**，REQ-UPD-009）。
+
+- `version` 与 `url` 必填；`sha256`/`notes`/`os`/`arch` 可选（os/arch 提供时须与软电话自身一致）。
+- 版本不高于当前返回 `update_not_newer`；参数非法返回 `invalid_params`；正在下载/已就绪时再来一条返回 `internal`。
+- 同版本重复告知幂等（已在下载/就绪的同版本直接忽略）。
+- 「有没有新版本」**不在网页侧裁决**：软电话自己按 `system.setUpdateConfig` 的配置定时查询更新站点（REQ-UPD-017）；本方法用于页面手动推送（联调/回滚），SDK 的 `notifyUpdate` 恒带 `force`。
 
 ### video.subscribe 返回示例
 
@@ -183,6 +184,7 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `video.web` | `{ "active", "local", "remote", "viewers" }` | 网页视频订阅状态变化（任一连接订阅/退订时广播）。`active: true` 表示有网页在看画面，此时软电话**不显示视频窗口** |
 | `video.transform` | `{ "remote": { "rotation", "mirror" }, "local": { "rotation", "mirror" } }` | 画面旋转/水平镜像变化（桌面视频窗口或网页任一侧改动都会广播）；重连时也可从 `system.state` 的 `video` 字段取当前值 |
 | `register.state` | `{ "state", "account", "reason" }` | 注册状态变化 |
+| `system.updateConfig` | `{ "url", "appId", "intervalMinutes", "prerelease" }` | 自动更新配置变化（本机配置页保存或网页 `system.setUpdateConfig` 写入都会广播，REQ-UPD-018）；重连时也可从 `system.state` 的 `updateConfig` 字段取当前值 |
 | `system.autoAnswer` | `{ "enabled": true }` | 自动接听开关变化（桌面按钮点击或网页 `system.setAutoAnswer` 设置都会广播）；重连时也可从 `system.state` 的 `autoAnswer` 字段取当前值 |
 | `system.update` | 更新状态对象，见下 | 自动更新状态变化（受理/下载进度/就绪/失败） |
 
@@ -265,32 +267,32 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
   |                       |<- call.established ---|
 ```
 
-### 6.3 自动更新（SDK 定时查询更新站点 → 前端告知新版本）
+### 6.3 自动更新（软电话自己定时查站点 → 提示用户 → 用户确认后更新）
 
 ```
-业务前端（网页/SDK）      软电话                  更新站点
-  |---- WS 连接 ---------> |                       |
-  |<--- system.state ----- |（含 version/os/arch）  |
-  |---------- 查询最新版本（version/os/arch） ----->|   连上后立即查一次，
-  |<--------- 有更高版本：版本号 + 下载地址 --------|   之后按 SDK 的间隔定时查
-  |-- system.notifyUpdate >|                       |
-  |<-- 响应 {phase:available}                      |
-  |<--- system.update -----|（右下角提示窗 + 主窗体提示行；等待用户点击）
-  |                        |== 用户点击「立即更新」==
-  |<--- system.update -----|（downloading，progress 递增）
-  |<--- system.update -----|（ready；无通话则自动重启，通话中等待通话结束）
-  |         ...软电话替换可执行文件并重启，WS 断开，重连后重新上报...
+软电话                     更新站点                    网页（可选）
+  |-- GET /check(version/os/arch) -->|                    |
+  |<-- 有更高版本 + 下载地址/sha256 --|                    |
+  |    （启动即查一次，之后按配置的周期）                    |
+  |-- system.updateConfig 事件广播 ----------------------->|（配置变化时同步）
+  |<-- system.setUpdateConfig ---------------------------- |（网页写入配置，REQ-UPD-018）
+  |<-- system.notifyUpdate（强制推送，可选）---------------|（业务前端手动推送）
+  |== 右下角提示窗 + 主窗体提示行（等待用户点击）==          |
+  |-- system.update 事件（available/downloading/ready）--->|
+  |== 用户点「立即更新」→ 下载 → 校验 → 替换 → 重启 ==      |
 ```
 
-查询由 **JS SDK** 完成（`updateUrl` 在网页初始化 SDK 时告知，`checkUpdate` / `setUpdateSource`）：
-站点接口与字段见其《REST API》的 `GET /api/v1/apps/{app}/check`。SDK 只做搬运——
-**不比较版本高低**（裁决在站点与软电话），查到的结果经 SDK 本地事件 `update.check` 给页面
-（本地事件，不经过 WS，也不在本文档第 4 节的事件表里）。软电话侧没有任何轮询逻辑
-（REQ-UPD-009：WS 只能告知，下载与重启必须由用户在软电话界面上点击）。
+查询由**软电话自己**完成（REQ-UPD-017）：配置页可设更新站点（留空 = 不检查）、应用 ID、
+检查周期（默认 5 分钟）与是否接受预览版；网页也可用 `system.setUpdateConfig` 写这份配置
+（业务前端统一管理更新策略）。站点接口与字段见《自动更新与更新站点接入》的 REST API
+（`GET /api/v1/apps/{app}/check`，**不带通道参数**）。
 
+判定权在站点（只看 `updateAvailable`），软电话侧只做"不降级"的兜底比较；
+**同一版本 + 同一 sha256 只提示一次**。软电话仍遵守 REQ-UPD-009：
+**WS 只能告知，下载与重启必须由用户在软电话界面上点击**。
 ## 7. 安全说明
 
 - WS 服务仅监听 127.0.0.1，不对外网暴露，且拒绝非回环来源连接。
 - 连接不做鉴权（已按用户要求取消 token）：**本机任何进程或网页均可控制软电话**，安全性完全依赖回环监听。
-- `system.notifyUpdate` 只能"告知"，不能触发下载或重启：下载必须由用户在软电话界面上点击，且提示窗会显示下载地址的主机名供用户判断来源。
+- 更新相关：`system.notifyUpdate`（强制推送）与 `system.setUpdateConfig` 都只能"告知/配置"，**不能触发下载或重启**——下载必须由用户在软电话界面上点击，且提示窗会显示下载地址的主机名供用户判断来源。软电话自己查站点只读不写，不携带任何凭据。
 - 若需更高强度隔离，后续版本可增加来源端口白名单或恢复 token 鉴权（P1）。

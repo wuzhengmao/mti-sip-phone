@@ -339,6 +339,40 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		}
 		resp = okMessage(msg.ID, map[string]any{"enabled": p.Enabled})
 
+	case MethodSetUpdateConfig:
+		// 自动更新配置（REQ-UPD-018）：网页可写入站点/应用 ID/周期/预览版，
+		// 软电话据此自己定时检查（配了站点才查）。字段**都是可选的**，
+		// 只改传了的（用指针区分"没传"与"传了零值"），写入后落盘并广播
+		// system.updateConfig，桌面配置页与其它网页同步。
+		var p struct {
+			URL             *string `json:"url"`
+			AppID           *string `json:"appId"`
+			IntervalMinutes *int    `json:"intervalMinutes"`
+			Prerelease      *bool   `json:"prerelease"`
+		}
+		if err := json.Unmarshal(msg.Params, &p); err != nil {
+			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("参数格式错误"))
+			break
+		}
+		cfg := s.app.UpdateConfig()
+		if p.URL != nil {
+			cfg.URL = *p.URL
+		}
+		if p.AppID != nil {
+			cfg.AppID = *p.AppID
+		}
+		if p.IntervalMinutes != nil {
+			cfg.IntervalMins = *p.IntervalMinutes
+		}
+		if p.Prerelease != nil {
+			cfg.Prerelease = *p.Prerelease
+		}
+		if err := s.app.SetUpdateConfig(cfg); err != nil {
+			resp = errMessage(msg.ID, codeOf(err), err)
+			break
+		}
+		resp = okMessage(msg.ID, s.app.UpdateConfig())
+
 	case MethodNotifyUpdate:
 		var p struct {
 			Version string `json:"version"`

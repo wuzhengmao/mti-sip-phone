@@ -10,11 +10,13 @@
  *   await sdk.connect();
  *   await sdk.dial('1001');
  *
- * 自动更新（REQ-UPD-010）：网页初始化时告知更新站点地址，SDK 连上软电话后
- * 定时查询该站点有没有更高版本，有则自动经 system.notifyUpdate 告知软电话
- * （软电话只弹提示，下载与重启仍须用户在软电话界面上确认）：
- *   const sdk = new SipPhoneSDK({ updateUrl: 'http://update.example.com' });
- *   sdk.on('update.check', (r) => console.log('更新查询', r));
+ * 自动更新（REQ-UPD-017/018）：**查询由软电话自己做**——这里只是把更新配置
+ * 写进软电话（构造参数或 setUpdateConfig），软电话据此定时查站点、有更新弹提示
+ * （下载与重启仍须用户在软电话界面上确认）：
+ *   const sdk = new SipPhoneSDK({ updateUrl: 'http://update.example.com' }); // 连上即写入
+ *   await sdk.setUpdateConfig({ url: '', });                                // 运行期改/清空
+ * 另外保留**强制推送**通道（不受版本与预览版约束，测试页「推送」按钮用）：
+ *   await sdk.notifyUpdate({ version: '1.2.3', url: '...', sha256: '...' });
  *
  * 通信录（REQ-SDK-006）：网页端不做增删改查，只提供一键导入/导出；
  * 一键路径走**本地 HTTP 接口**（`GET /api/contacts.csv` 与
@@ -46,13 +48,6 @@
     return 'ws://127.0.0.1:8765/ws';
   };
 
-  // 更新站点默认参数：应用 ID 就是软电话在更新站点上的标识；
-  // 查询间隔默认 5 分钟（下限 60 秒，避免误配 0 时打爆站点）。
-  const DEFAULT_UPDATE_APP_ID = 'mti-sip-phone';
-  const DEFAULT_UPDATE_INTERVAL = 5 * 60 * 1000;
-  const MIN_UPDATE_INTERVAL = 60 * 1000;
-  const UPDATE_FETCH_TIMEOUT = 10000;
-
   class SipPhoneSDK {
     /**
      * @param {Object} options
@@ -62,13 +57,12 @@
      *                                      之后失败不再自动拉起（每页会话仅一次）
      * @param {boolean} [options.autoReconnect] 断线自动重连，默认 true
      * @param {number} [options.reconnectDelay] 重连间隔毫秒，默认 3000
-     * @param {string} [options.updateUrl]  更新站点根地址（如 http://update.example.com）。
-     *                                      不传 = 不自动查询更新；查询结果见 update.check 事件
-     * @param {string} [options.appId]      更新站点上的应用 ID，默认 'mti-sip-phone'
-     * @param {number} [options.updateInterval] 查询间隔毫秒，默认 5 分钟（下限 60 秒）
-     * @param {string} [options.updateChannel]  发布通道（如 beta），默认站点默认通道
-     * @param {boolean} [options.updatePrerelease] 是否接受预发布版；不传 = 自适应
-     *                                      （本地版本含 "-" 如 1.0.5-rc 时视为 true）
+     * @param {string} [options.updateUrl]  更新站点根地址（REQ-UPD-018）。
+     *                                      给了就连上软电话后写入其自动更新配置：软电话据此
+     *                                      自己定时查询（不传 = 不改软电话配置）
+     * @param {string} [options.updateAppId] 更新站点上的应用 ID，默认 'mti-sip-phone'
+     * @param {number} [options.updateIntervalMinutes] 检查周期（分钟，1–1440，默认 5）
+     * @param {boolean} [options.updatePrerelease] 是否接受预览版，默认 false
      */
     constructor(options) {
       options = options || {};
@@ -77,18 +71,14 @@
       this.autoReconnect = options.autoReconnect !== false;
       this.reconnectDelay = options.reconnectDelay || 3000;
 
-      // 更新站点（可选）：地址由网页在初始化时告知
-      this.updateUrl = trimTrailingSlash(options.updateUrl || '');
-      this.appId = options.appId || DEFAULT_UPDATE_APP_ID;
-      this.updateInterval = clampUpdateInterval(options.updateInterval);
-      this.updateChannel = options.updateChannel || '';
-      this.updatePrerelease = (typeof options.updatePrerelease === 'boolean')
-        ? options.updatePrerelease : null; // null = 按本地版本自适应
-      this._updateTimer = null;    // 定时查询句柄
-      this._updateInFlight = false;
-      this._updateAbort = null;    // 在途 fetch 的 AbortController
-      this._updateGen = 0;         // 代次：丢弃被取代的旧响应
-      this._lastNotified = '';     // 已告知软电话的「版本|sha256」，避免重复发
+      // 更新配置（REQ-UPD-018）：给了才在连上后写入软电话（undefined = 不改）
+      this._updateConfigWanted = null;
+      const upd = {};
+      if (options.updateUrl !== undefined) { upd.url = String(options.updateUrl || '').trim(); }
+      if (options.updateAppId !== undefined) { upd.appId = String(options.updateAppId || '').trim(); }
+      if (options.updateIntervalMinutes !== undefined) { upd.intervalMinutes = Math.round(options.updateIntervalMinutes); }
+      if (options.updatePrerelease !== undefined) { upd.prerelease = !!options.updatePrerelease; }
+      if (Object.keys(upd).length > 0) { this._updateConfigWanted = upd; }
 
       this._seq = 0;                 // 请求 ID 自增
       this._pending = new Map();     // id -> { resolve, reject }
@@ -114,9 +104,8 @@
       this.on('video.transform', (st) => this._applyTransformState(st));
       // 断线重连后自动恢复订阅（订阅是连接级的，新连接默认没有订阅）
       this.on('connected', () => this._restoreVideoSubscription());
-      // 连上后开始定时查询更新站点（未配置 updateUrl 时为空操作），断开即停表
-      this.on('connected', () => this._startUpdateTimer());
-      this.on('disconnected', () => this._stopUpdateTimer());
+      // 业务前端在构造参数里给了更新配置 → 连上后写入软电话（REQ-UPD-018）
+      this.on('connected', () => this._applyUpdateConfigOnConnect());
     }
 
     /** 是否已连接 */
@@ -180,7 +169,6 @@
     /** 主动断开连接（不再自动重连） */
     close() {
       this._closed = true;
-      this._stopUpdateTimer();
       if (this._ws) {
         this._ws.close();
         this._ws = null;
@@ -196,9 +184,9 @@
      *         register.state / system.state /
      *         system.update（自动更新状态：phase/progress/error 等）/
      *         video.frame（订阅视频后逐帧推送，data 为 {channel, seq, blob, size}）/
-     *         update.check（SDK 本地事件：每次查询更新站点的结果）/
+     *         system.updateConfig（自动更新配置变化）/
      *         connected / disconnected
-     * 注：SDK 本地事件（connected / disconnected / update.check）不会派发给 '*' 订阅者。
+     * 注：SDK 本地事件（connected / disconnected）不会派发给 '*' 订阅者。
      * @param {string} event 事件名，'*' 订阅全部
      * @param {Function} fn 回调 (data) => {}
      * @returns {this}
@@ -563,13 +551,14 @@
     }
 
     /**
-     * 告知软电话有新版本可用（自动更新）。软电话只提示用户，
-     * 由用户在软电话界面上确认后才会下载、替换并重启。
+     * **强制推送**更新：把指定版本告知软电话，软电话提示用户、由用户确认后更新。
+     *
+     * 这是 SDK 唯一的更新相关能力——**不受版本高低与预览版约束**（内部恒带
+     * force）。「有没有新版本」由**软电话自己**按配置的周期查询更新站点
+     * （配置见 setUpdateConfig）；网页若要自己查版本，请自行请求站点接口。
+     *
      * @param {{version: string, url: string, sha256?: string, notes?: string,
-     *          os?: string, arch?: string, force?: boolean}} info 新版本信息；
-     *        version 默认必须高于软电话当前版本，否则返回 update_not_newer；
-     *        force=true 时**跳过版本高低检查**（联调/回滚时按指定版本强推）——
-     *        仅供页面手动推送使用，SDK 的定时查询不带这个标记
+     *          os?: string, arch?: string}} info 新版本信息
      * @returns {Promise<{phase: string, version: string, currentVersion: string}>}
      */
     notifyUpdate(info) {
@@ -584,156 +573,43 @@
         notes: info.notes,
         os: info.os,
         arch: info.arch,
-        force: !!info.force
+        force: true // 本方法就是强制推送通道
       });
     }
 
     /**
-     * 列出更新站点上的**最新版本**与**最新稳定版**（各带本平台可用的下载
-     * 地址），供页面展示或手动"推送更新"用。**不做版本比较**——是否更高、
-     * 要不要推，由调用方决定（软电话侧 notifyUpdate 默认仍会拦低版本）。
-     * @returns {Promise<{current: string, latest: Object|null, latestStable: Object|null}>}
-     *          条目为 {version, title, prerelease, publishedAt, notes, mandatory,
-     *          file, url, sha256, size}；站点上没有对应版本时为 null，
-     *          有版本但本平台没有产物时 url 为空串
+     * 写入软电话的**自动更新配置**（REQ-UPD-018）：软电话据此自己定时查询更新
+     * 站点（配了站点才会查），查到新版本弹提示窗。字段都是可选的，只改传入的。
+     *
+     * 构造参数里给了 `updateUrl` / `updateAppId` / `updateIntervalMinutes` /
+     * `updatePrerelease` 时，连上软电话后会自动写入一次（业务前端统一管理策略）。
+     *
+     * @param {{url?: string, appId?: string, intervalMinutes?: number,
+     *          prerelease?: boolean}} cfg url 空 = 不自动检查；周期 1–1440 分钟
+     * @returns {Promise<{url: string, appId: string, intervalMinutes: number,
+     *          prerelease: boolean}>} 生效后的完整配置
      */
-    listReleases() {
-      if (!this.updateUrl) {
-        return Promise.reject(new Error('未配置更新站点（构造参数 updateUrl）'));
-      }
+    setUpdateConfig(cfg) {
+      cfg = cfg || {};
+      const params = {};
+      if (cfg.url !== undefined) { params.url = String(cfg.url || '').trim(); }
+      if (cfg.appId !== undefined) { params.appId = String(cfg.appId || '').trim(); }
+      if (cfg.intervalMinutes !== undefined) { params.intervalMinutes = Math.round(cfg.intervalMinutes); }
+      if (cfg.prerelease !== undefined) { params.prerelease = !!cfg.prerelease; }
+      this._updateConfigWanted = Object.assign({}, this._updateConfigWanted, params);
       if (!this._connected) {
         return Promise.reject(new Error('尚未连接软电话'));
       }
-      return this.getState().then((st) => {
-        const current = (st && st.version) || '';
-        return Promise.all([
-          this._fetchLatestRelease(st, true),  // 最新版本（含预发布）
-          this._fetchLatestRelease(st, false)  // 最新稳定版
-        ]).then((res) => ({ current: current, latest: res[0], latestStable: res[1] }));
+      return this._request('system.setUpdateConfig', params);
+    }
+
+    /** _applyUpdateConfigOnConnect 连上后把构造参数里的更新配置写入软电话。 */
+    _applyUpdateConfigOnConnect() {
+      if (!this._updateConfigWanted) { return; }
+      this._request('system.setUpdateConfig', this._updateConfigWanted).catch(() => {
+        // 写入失败不影响其它功能（页面可从 system.state.updateConfig 看到实际值）
       });
     }
-
-    /** 内部：取某个通道的最新版本（站点 /latest 接口），无版本/应用不存在返回 null */
-    _fetchLatestRelease(state, prerelease) {
-      const params = [];
-      if (state.os) {
-        params.push('os=' + encodeURIComponent(state.os));
-      }
-      if (state.arch) {
-        params.push('arch=' + encodeURIComponent(state.arch));
-      }
-      if (this.updateChannel) {
-        params.push('channel=' + encodeURIComponent(this.updateChannel));
-      }
-      if (!prerelease) {
-        params.push('prerelease=false');
-      }
-      const url = this.updateUrl + '/api/v1/apps/' + encodeURIComponent(this.appId) +
-        '/latest?' + params.join('&');
-
-      const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-      const timer = ctrl ? setTimeout(function () { ctrl.abort(); }, UPDATE_FETCH_TIMEOUT) : null;
-      const done = function () { if (timer) { clearTimeout(timer); } };
-
-      return fetch(url, ctrl ? { signal: ctrl.signal } : {}).then(function (resp) {
-        if (resp.status === 404) {
-          return null; // 该通道还没有版本（no_release）或应用不存在
-        }
-        if (!resp.ok) {
-          const err = new Error('更新站点返回 HTTP ' + resp.status);
-          err.status = resp.status;
-          throw err;
-        }
-        return resp.json();
-      }).then((data) => {
-        done();
-        if (!data) {
-          return null;
-        }
-        const r = data.release || {};
-        const dl = data.download || null;
-        return {
-          version: r.version || '',
-          title: r.title || '',
-          prerelease: !!r.prerelease,
-          publishedAt: r.publishedAt || '',
-          notes: r.notes || '',
-          mandatory: !!r.mandatory,
-          file: dl ? (dl.file || '') : '',
-          url: dl ? (dl.url || '') : '',
-          sha256: dl ? (dl.sha256 || '') : '',
-          size: dl ? (dl.size || 0) : 0
-        };
-      }, function (e) {
-        done();
-        throw e;
-      });
-    }
-
-    /**
-     * 立即向更新站点查一次版本（不必等定时器）。查询结果同时经
-     * update.check 事件派发；失败以 update.check 的 error 字段给出，不抛未捕获异常。
-     * @returns {Promise<{currentVersion: string, latestVersion: string,
-     *          updateAvailable: boolean, notified: boolean, reason: string, error: string}>}
-     *          notified=true 表示已把新版本告知软电话（软电话会弹提示，是否更新由用户点）
-     */
-    checkUpdate() {
-      if (!this.updateUrl) {
-        return Promise.reject(new Error('未配置更新站点（构造参数 updateUrl）'));
-      }
-      if (!this._connected) {
-        const info = {
-          currentVersion: '', latestVersion: '', updateAvailable: false,
-          notified: false, reason: '', error: '尚未连接软电话'
-        };
-        this._emit('update.check', info);
-        return Promise.reject(new Error(info.error));
-      }
-      return this._runUpdateCheck();
-    }
-
-    /**
-     * 运行期修改更新站点配置（测试页改地址/通道用），改完立即生效：
-     * 已连接时重启定时器并马上查一次；地址置空 = 停止自动查询。
-     * @param {{url?: string, appId?: string, interval?: number, channel?: string,
-     *          prerelease?: (boolean|null)}} options
-     * @returns {{url: string, appId: string, interval: number, channel: string,
-     *           prerelease: (boolean|null)}} 生效后的配置
-     */
-    setUpdateSource(options) {
-      options = options || {};
-      if (options.url !== undefined) {
-        this.updateUrl = trimTrailingSlash(options.url || '');
-      }
-      if (options.appId) {
-        this.appId = options.appId;
-      }
-      if (options.interval) {
-        this.updateInterval = clampUpdateInterval(options.interval);
-      }
-      if (options.channel !== undefined) {
-        this.updateChannel = options.channel || '';
-      }
-      if (options.prerelease !== undefined) {
-        this.updatePrerelease = (typeof options.prerelease === 'boolean') ? options.prerelease : null;
-      }
-      this._lastNotified = '';
-      if (this._connected) {
-        if (this.updateUrl) {
-          this._startUpdateTimer(); // 内含「立即查一次」
-        } else {
-          this._stopUpdateTimer();
-        }
-      }
-      return {
-        url: this.updateUrl,
-        appId: this.appId,
-        interval: this.updateInterval,
-        channel: this.updateChannel,
-        prerelease: this.updatePrerelease
-      };
-    }
-
 
     /**
      * 订阅视频画面（REQ-VIDEO-009）。**SDK 自己把画面渲染到传入的 <video>**，
@@ -1015,173 +891,6 @@
       this._renderers[channel] = r;
     }
 
-    /** 内部：启动更新查询定时器（连接建立/配置变更时调用），并立即查一次 */
-    _startUpdateTimer() {
-      this._stopUpdateTimer();
-      if (!this.updateUrl) {
-        return;
-      }
-      this._lastNotified = ''; // 新连接（含断线重连）允许重新告知同版本
-      this._runUpdateCheck();
-      this._updateTimer = setInterval(() => {
-        if (this._connected && !this._updateInFlight) {
-          this._runUpdateCheck(); // 上一轮还没回来就跳过这一轮
-        }
-      }, this.updateInterval);
-    }
-
-    /** 内部：停止更新查询定时器，并丢弃在途请求（close/断线/改配置） */
-    _stopUpdateTimer() {
-      if (this._updateTimer) {
-        clearInterval(this._updateTimer);
-        this._updateTimer = null;
-      }
-      this._updateGen++; // 代次 +1：在途响应回来时会被丢弃
-      if (this._updateAbort) {
-        try {
-          this._updateAbort.abort();
-        } catch (e) {
-          // 忽略：仅取消请求
-        }
-        this._updateAbort = null;
-      }
-    }
-
-    /**
-     * 内部：查一次更新站点。任何失败都收进返回值的 error 字段（不抛），
-     * 结果经 update.check 事件派发。
-     */
-    _runUpdateCheck() {
-      this._updateInFlight = true;
-      const sdk = this;
-      const gen = ++this._updateGen;
-      if (this._updateAbort) {
-        try {
-          this._updateAbort.abort();
-        } catch (e) {
-          // 忽略
-        }
-      }
-      const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-      const timer = ctrl ? setTimeout(function () { ctrl.abort(); }, UPDATE_FETCH_TIMEOUT) : null;
-      this._updateAbort = ctrl;
-      let currentVersion = '';
-
-      const finish = function (info) {
-        if (timer) {
-          clearTimeout(timer);
-        }
-        if (sdk._updateAbort === ctrl) {
-          sdk._updateAbort = null;
-        }
-        // 代次变了说明这次结果已被取代（改配置/断开/新一轮）：不派发、不清在途标记
-        if (gen === sdk._updateGen) {
-          sdk._updateInFlight = false;
-          sdk._emit('update.check', info);
-        }
-        return info;
-      };
-
-      return this.getState().then(function (st) {
-        currentVersion = (st && st.version) || '';
-        if (!currentVersion) {
-          throw new Error('软电话未上报版本号');
-        }
-        return fetch(sdk._checkURL(st, currentVersion), ctrl ? { signal: ctrl.signal } : {});
-      }).then(function (resp) {
-        if (!resp.ok) {
-          const err = new Error('更新站点返回 HTTP ' + resp.status +
-            (resp.status === 404 ? '（应用不存在）' : ''));
-          err.status = resp.status;
-          throw err;
-        }
-        return resp.json();
-      }).then(function (data) {
-        return sdk._handleCheckResult(currentVersion, data);
-      }).catch(function (e) {
-        return {
-          currentVersion: currentVersion, latestVersion: '', updateAvailable: false,
-          notified: false, reason: '', error: describeUpdateError(e)
-        };
-      }).then(finish);
-    }
-
-    /** 内部：拼 check 请求地址（站点文档 /docs/api 的 GET /apps/{app}/check） */
-    _checkURL(state, version) {
-      const params = ['version=' + encodeURIComponent(version)];
-      // os/arch 用软电话上报的 GOOS/GOARCH（站点接受 amd64/i386 这类别名）
-      if (state.os) {
-        params.push('os=' + encodeURIComponent(state.os));
-      }
-      if (state.arch) {
-        params.push('arch=' + encodeURIComponent(state.arch));
-      }
-      if (this.updateChannel) {
-        params.push('channel=' + encodeURIComponent(this.updateChannel));
-      }
-      // 预发布：显式配置优先；未配置时按本地版本自适应——开发版（1.0.5-rc）
-      // 看得到预发布，正式版只看正式版（站点默认同样不返回预发布）
-      const pre = (this.updatePrerelease === null) ? /[-_]/.test(version) : !!this.updatePrerelease;
-      if (pre) {
-        params.push('prerelease=true');
-      }
-      return this.updateUrl + '/api/v1/apps/' + encodeURIComponent(this.appId) +
-        '/check?' + params.join('&');
-    }
-
-    /**
-     * 内部：处理 check 响应。有更高版本且有本平台产物时告知软电话——
-     * **版本高低由站点与软电话裁决，SDK 不比较版本**。
-     */
-    _handleCheckResult(currentVersion, data) {
-      const sdk = this;
-      const d = data || {};
-      const info = {
-        currentVersion: currentVersion,
-        latestVersion: d.latestVersion || '',
-        updateAvailable: !!d.updateAvailable,
-        notified: false,
-        reason: '',
-        error: ''
-      };
-      if (!info.updateAvailable) {
-        info.reason = 'up_to_date';
-        return Promise.resolve(info);
-      }
-      const dl = d.download;
-      if (!dl || !dl.url) {
-        // 有更高版本，但当前平台没有可用产物（站点 download 为 null）
-        info.reason = 'no_download';
-        return Promise.resolve(info);
-      }
-      const key = info.latestVersion + '|' + (dl.sha256 || '');
-      if (key === this._lastNotified) {
-        info.reason = 'already_notified'; // 同版本已告知过（软电话侧本来就幂等）
-        return Promise.resolve(info);
-      }
-      // 注意：**不传 os/arch**——站点回的是规范化值（x64/x86），而软电话按
-      // GOARCH 严格比对（amd64/386），传了会被判平台不符而拒绝。
-      return this.notifyUpdate({
-        version: info.latestVersion,
-        url: dl.url,
-        sha256: dl.sha256,
-        notes: d.notes
-      }).then(function () {
-        sdk._lastNotified = key;
-        info.notified = true;
-        return info;
-      }, function (e) {
-        const code = e && e.code;
-        if (code === 'update_not_newer' || code === 'update_in_progress') {
-          // 都是正常结果：版本不高于当前、或用户已在软电话上处理过这次更新
-          info.reason = code;
-        } else {
-          info.reason = 'notify_failed';
-          info.error = (e && e.message) || '告知软电话失败';
-        }
-        return info;
-      });
-    }
 
     /** 内部：启动心跳（每 25 秒发一条空消息，重置服务端读超时） */
     _startHeartbeat() {
@@ -1217,42 +926,7 @@
           }
         });
       }
-    }
-  }
-
-  /** trimTrailingSlash 去掉地址结尾的 "/"（拼接口路径用） */
-  function trimTrailingSlash(url) {
-    return String(url || '').trim().replace(/\/+$/, '');
-  }
-
-  /** clampUpdateInterval 查询间隔钳制到 [60 秒, 24 小时]，非法值取默认 5 分钟 */
-  function clampUpdateInterval(ms) {
-    const n = Number(ms);
-    if (!isFinite(n) || n <= 0) {
-      return DEFAULT_UPDATE_INTERVAL;
-    }
-    if (n < MIN_UPDATE_INTERVAL) {
-      return MIN_UPDATE_INTERVAL;
-    }
-    if (n > 24 * 60 * 60 * 1000) {
-      return 24 * 60 * 60 * 1000;
-    }
-    return n;
-  }
-
-  /** describeUpdateError 把查询失败的异常转成给页面看的中文说明 */
-  function describeUpdateError(e) {
-    if (!e) {
-      return '查询更新失败';
-    }
-    if (e.name === 'AbortError') {
-      return '查询更新超时';
-    }
-    if (e.status || /连接已断开|尚未连接/.test(e.message || '')) {
-      return e.message; // 更新站点/软电话侧的明确错误，原样展示
-    }
-    return '无法访问更新站点：' + (e.message || '网络错误');
-  }
+    }  }
 
   /**
    * pickChannel 归一化一条视频通道：允许直接传 <video> 元素，或传
