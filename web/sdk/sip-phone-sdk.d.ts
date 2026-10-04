@@ -86,6 +86,12 @@ declare class SipPhoneSDK {
   /** 扬声器开关（纯本地动作，继续接收） */
   muteSpeaker(callId: string, muted: boolean): Promise<{ callId: string }>;
 
+  /** 麦克风增益（REQ-MEDIA-006，纯本地动作）；gainPercent 0–200，0 = 禁用 */
+  setMicGain(callId: string, gainPercent: number): Promise<{ callId: string }>;
+
+  /** 扬声器音量（REQ-MEDIA-006，纯本地动作）；volumePercent 0–100，0 = 禁用 */
+  setSpeakerVolume(callId: string, volumePercent: number): Promise<{ callId: string }>;
+
   /** 发送 DTMF（RFC 4733，通话接通后有效）；digit 为单个字符：0-9 * # A-D */
   sendDTMF(callId: string, digit: string): Promise<{ callId: string }>;
 

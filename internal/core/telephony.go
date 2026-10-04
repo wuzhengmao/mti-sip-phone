@@ -28,6 +28,12 @@ type Telephony interface {
 	MuteMic(callID string, muted bool) error
 	// MuteSpeaker 扬声器静音：muted=true 停止本地播放（继续接收）。
 	MuteSpeaker(callID string, muted bool) error
+	// SetMicGain 麦克风增益（REQ-MEDIA-006）：1 = 原始电平，0–2（界面显示 0–200%）。
+	// 纯本地，不发 SIP 信令。
+	SetMicGain(callID string, gain float32) error
+	// SetSpeakerVolume 扬声器音量（REQ-MEDIA-006）：1 = 原始电平，0–1
+	//（界面显示 0–100%）。纯本地，不发 SIP 信令。
+	SetSpeakerVolume(callID string, vol float32) error
 	// SendDTMF 在通话中发送一个 DTMF 音（RFC 2833）。
 	SendDTMF(callID, digit string) error
 	// SetAutoAnswer 开关自动接听：开启后来电自动接听。

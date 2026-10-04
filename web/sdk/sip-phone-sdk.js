@@ -313,6 +313,29 @@
     }
 
     /**
+     * 麦克风增益（REQ-MEDIA-006，纯本地动作，不发 SIP 信令）。
+     * 0 = 禁用（等同把麦克风开关关掉），大于 0 时同时解除禁用。
+     * 状态变化会推 call.audio 事件（滚轮连调时事件会被合并，见软电话侧说明）。
+     * @param {string} callId
+     * @param {number} gainPercent 0–200 的百分比整数
+     * @returns {Promise<{callId: string}>}
+     */
+    setMicGain(callId, gainPercent) {
+      return this._request('call.setMicGain', { callId: callId, gain: Math.round(gainPercent) });
+    }
+
+    /**
+     * 扬声器音量（REQ-MEDIA-006，纯本地动作）。
+     * 0 = 禁用（等同把扬声器开关关掉），大于 0 时同时解除禁用。
+     * @param {string} callId
+     * @param {number} volumePercent 0–100 的百分比整数
+     * @returns {Promise<{callId: string}>}
+     */
+    setSpeakerVolume(callId, volumePercent) {
+      return this._request('call.setSpeakerVolume', { callId: callId, speakerVolume: Math.round(volumePercent) });
+    }
+
+    /**
      * 发送 DTMF（RFC 4733 telephone-event，通话接通后有效，REQ-CALL-006）。
      * @param {string} callId
      * @param {string} digit 单个字符：0-9 * # A-D

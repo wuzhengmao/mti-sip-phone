@@ -78,6 +78,13 @@
   #callArea .caller { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
   #callArea .hint { font-size: 12px; color: var(--gray); margin-bottom: 10px; }
   #timer { font-variant-numeric: tabular-nums; color: var(--gray); font-size: 13px; }
+  /* 扬声器 / 麦克风各一行（REQ-MEDIA-006）：左边开关按钮，右边滑块 + 百分比 */
+  .media-line { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .media-line input[type=range] { flex: 1; min-width: 70px; accent-color: var(--primary); cursor: pointer; }
+  .media-line .vol-val {
+    font-size: 12px; color: var(--gray); width: 44px; text-align: right;
+    font-variant-numeric: tabular-nums; flex: none;
+  }
   #log {
     height: 360px; overflow-y: auto; background: #0f172a; color: #cbd5e1;
     border-radius: 8px; padding: 10px; font-family: Consolas, Monaco, monospace;
@@ -194,19 +201,30 @@
       <h2>通话控制</h2>
       <div id="callArea" style="display:none">
         <div class="caller" id="callName"></div>
-        <div class="hint" id="callHint"></div>
+        <!-- 状态文字 + 通话计时：计时紧跟「通话中」后面（用户要求） -->
+        <div class="hint"><span id="callHint"></span> <span id="timer"></span></div>
         <div class="row">
           <button id="btnAnswer" class="green">接听</button>
           <button id="btnAnswerVideo" class="green">视频接听</button>
           <button id="btnReject" class="red">拒接</button>
           <button id="btnMute" class="yellow" style="display:none">保持</button>
           <button id="btnHangup" class="red">挂断</button>
-          <span id="timer"></span>
         </div>
-        <div class="row" id="mediaRow" style="display:none">
-          <button id="btnMic" class="icon-btn" title="麦克风"></button>
-          <button id="btnSpeaker" class="icon-btn" title="扬声器"></button>
-          <button id="btnVideoToggle" class="icon-btn" title="视频" style="display:none"></button>
+        <!-- 扬声器 / 麦克风各占一行（用户要求）：左边开关按钮，右边音量滑块 + 百分比。
+             拖动即调，**0% = 禁用**（等同开关的「关」）；与软电话通话面板的滚轮是
+             同一份状态，两边互相跟随（REQ-MEDIA-006） -->
+        <div id="mediaRows" style="display:none">
+          <div class="media-line">
+            <button id="btnSpeaker" class="icon-btn" title="扬声器"></button>
+            <input type="range" id="volSpeaker" min="0" max="100" step="5" value="100">
+            <span class="vol-val" id="volSpeakerVal">100%</span>
+            <button id="btnVideoToggle" class="icon-btn" title="视频" style="display:none"></button>
+          </div>
+          <div class="media-line">
+            <button id="btnMic" class="icon-btn" title="麦克风"></button>
+            <input type="range" id="volMic" min="0" max="200" step="5" value="100">
+            <span class="vol-val" id="volMicVal">100%</span>
+          </div>
         </div>
         <!-- DTMF 拨号盘（REQ-CALL-006）：通话接通后显示，点按向对端发 RFC 4733 -->
         <div id="dtmfPad" class="dtmf-pad" style="display:none"></div>
@@ -454,14 +472,21 @@
     addLog('info', data.muted ? '已保持' : '已取消保持');
   });
 
-  // 麦克风/扬声器开关（桌面面板或网页任一侧改动都会推来）
+  // 麦克风/扬声器开关 + 音量（桌面面板滚轮或网页任一侧改动都会推来；
+  // 连续调节时软电话侧会把事件合并，最多 150ms 一条）
   sdk.on('call.audio', function (data) {
     if (!data.call) { return; }
     if (currentCall && currentCall.id === data.call.id) { currentCall = data.call; }
     applyMediaButtons(data.call);
-    addLog('info', '音频开关: 麦克风' + (data.call.micMuted ? '静音' : '开') +
-      '，扬声器' + (data.call.speakerMuted ? '静音' : '开'));
+    addLog('info', '音频: 扬声器 ' + audioStateText(data.call.speakerMuted, data.call.speakerVolume) +
+      '，麦克风增益 ' + audioStateText(data.call.micMuted, data.call.micGain));
   });
+
+  // 音量文本：静音（0%）就说静音，否则显示百分比
+  function audioStateText(muted, percent) {
+    if (muted || !percent) { return '静音(0%)'; }
+    return percent + '%';
+  }
 
   // 视频状态变化（协商成功 / 开关切换 / 拿到对端分辨率）
   sdk.on('call.video', function (data) {
@@ -976,7 +1001,54 @@
     setIconButton($('btnMic'), call.micMuted !== true, ICON_PATH.micOn, ICON_PATH.micOff);
     setIconButton($('btnSpeaker'), call.speakerMuted !== true, ICON_PATH.speakerOn, ICON_PATH.speakerOff);
     setIconButton($('btnVideoToggle'), !!(call.video && call.video.enabled), ICON_PATH.videoOn, ICON_PATH.videoOff);
+    syncVolumeUI(call);
   }
+
+  // 音量滑块同步软电话的状态（REQ-MEDIA-006）：禁用/0% 显示 0，
+  // 否则显示音量百分比（禁用时软电话侧保留"恢复值"，这里仍显示 0）。
+  // **正在拖动的那个滑块不覆盖**——否则事件回推会把手指下的滑块拽回去。
+  function syncVolumeUI(call) {
+    setSliderValue($('volSpeaker'), $('volSpeakerVal'),
+      (call.speakerMuted || !call.speakerVolume) ? 0 : call.speakerVolume);
+    setSliderValue($('volMic'), $('volMicVal'),
+      (call.micMuted || !call.micGain) ? 0 : call.micGain);
+  }
+
+  function setSliderValue(el, valEl, value) {
+    if (!el || document.activeElement === el) { return; }
+    el.value = String(value);
+    valEl.textContent = value + '%';
+  }
+
+  // 拖动滑块 → 防抖后下发（拖动一次会连发几十个 input 事件）；
+  // 0% 就是禁用（软电话侧会同时把开关置为「关」）。
+  function bindVolumeSlider(el, valEl, send) {
+    var timer = null;
+    el.addEventListener('input', function () {
+      var v = parseInt(el.value, 10);
+      valEl.textContent = v + '%';
+      if (timer) { clearTimeout(timer); }
+      timer = setTimeout(function () { send(v); }, 120);
+    });
+    // 松手立刻生效一次（不等防抖）
+    el.addEventListener('change', function () {
+      if (timer) { clearTimeout(timer); timer = null; }
+      send(parseInt(el.value, 10));
+    });
+  }
+
+  bindVolumeSlider($('volSpeaker'), $('volSpeakerVal'), function (v) {
+    if (!currentCall) { return; }
+    sdk.setSpeakerVolume(currentCall.id, v).catch(function (e) {
+      addLog('err', '扬声器音量设置失败: ' + e.message);
+    });
+  });
+  bindVolumeSlider($('volMic'), $('volMicVal'), function (v) {
+    if (!currentCall) { return; }
+    sdk.setMicGain(currentCall.id, v).catch(function (e) {
+      addLog('err', '麦克风增益设置失败: ' + e.message);
+    });
+  });
 
   function showCall(call) {
     $('callArea').style.display = 'block';
@@ -1007,7 +1079,7 @@
     $('btnReject').style.display = (ringing && incoming) ? '' : 'none';
     // 接通后才有一排媒体开关（保持/麦克风/扬声器/视频）
     $('btnMute').style.display = established ? '' : 'none';
-    $('mediaRow').style.display = established ? '' : 'none';
+    $('mediaRows').style.display = established ? '' : 'none';
     // 纯音频通话不显示视频开关（与桌面通话面板一致，REQ-VIDEO-008）
     $('btnVideoToggle').style.display = (established && call.hasVideo) ? '' : 'none';
     // 接通后才显示 DTMF 拨号盘（未接通发不了，REQ-CALL-006）
@@ -1028,7 +1100,7 @@
     $('noCall').style.display = '';
     $('btnMute').style.display = 'none';
     $('btnMute').textContent = '保持';
-    $('mediaRow').style.display = 'none';
+    $('mediaRows').style.display = 'none';
     $('dtmfPad').style.display = 'none';
     // 通话结束：画面由 SDK 清空（监听 call.terminated），这里只清角标
     resetStats();

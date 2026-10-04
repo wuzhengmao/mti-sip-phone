@@ -51,6 +51,10 @@ func (s *stubTel) Reject(callID string, code int) error        { return nil }
 func (s *stubTel) Mute(callID string, muted bool) error        { return nil }
 func (s *stubTel) MuteMic(callID string, muted bool) error     { return nil }
 func (s *stubTel) MuteSpeaker(callID string, muted bool) error { return nil }
+func (s *stubTel) SetMicGain(callID string, gain float32) error {
+	return nil
+}
+func (s *stubTel) SetSpeakerVolume(callID string, vol float32) error { return nil }
 func (s *stubTel) SendDTMF(callID, digit string) error {
 	s.mu.Lock()
 	s.dtmf = append(s.dtmf, digit)

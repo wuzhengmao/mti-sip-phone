@@ -685,6 +685,26 @@ func (p *Phone) MuteSpeaker(callID string, muted bool) error {
 	return nil
 }
 
+// SetMicGain 麦克风增益（REQ-MEDIA-006）：纯本地，不发 SIP 信令。
+func (p *Phone) SetMicGain(callID string, gain float32) error {
+	cs := p.getCall(callID)
+	if cs == nil || cs.engine == nil {
+		return core.ErrCallNotFound
+	}
+	cs.engine.SetMicGain(gain)
+	return nil
+}
+
+// SetSpeakerVolume 扬声器音量（REQ-MEDIA-006）：纯本地，不发 SIP 信令。
+func (p *Phone) SetSpeakerVolume(callID string, vol float32) error {
+	cs := p.getCall(callID)
+	if cs == nil || cs.engine == nil {
+		return core.ErrCallNotFound
+	}
+	cs.engine.SetSpeakerVolume(vol)
+	return nil
+}
+
 // sendHoldReInvite 发送保持/取消保持的 re-INVITE：
 // INVITE（新 SDP offer，方向 sendonly/sendrecv）→ 2xx → 应用 answer → ACK。
 func (p *Phone) sendHoldReInvite(cs *callSession, muted bool) {

@@ -47,6 +47,8 @@ const (
 	MethodMute              = "call.mute"            // 保持（静音）
 	MethodMuteMic           = "call.muteMic"         // 麦克风开关（纯本地，REQ-UI-023）
 	MethodMuteSpeaker       = "call.muteSpeaker"     // 扬声器开关（纯本地，REQ-UI-023）
+	MethodSetMicGain       = "call.setMicGain"       // 麦克风增益百分比（0–200，0 = 禁用；REQ-MEDIA-006）
+	MethodSetSpeakerVolume = "call.setSpeakerVolume" // 扬声器音量百分比（0–100，0 = 禁用；REQ-MEDIA-006）
 	MethodSetVideo          = "call.setVideo"        // 视频总开关（纯本地，REQ-VIDEO-008）
 	MethodDTMF              = "call.dtmf"            // 发送 DTMF（RFC 4733，REQ-CALL-006）
 	MethodGetState          = "system.getState"      // 查询状态

@@ -151,7 +151,8 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		}
 		resp = okMessage(msg.ID, map[string]string{"callId": callID})
 
-	case MethodAnswer, MethodHangup, MethodReject, MethodMute, MethodMuteMic, MethodMuteSpeaker, MethodSetVideo, MethodDTMF:
+	case MethodAnswer, MethodHangup, MethodReject, MethodMute, MethodMuteMic, MethodMuteSpeaker,
+		MethodSetMicGain, MethodSetSpeakerVolume, MethodSetVideo, MethodDTMF:
 		var p struct {
 			CallID  string `json:"callId"`
 			Code    int    `json:"code"`
@@ -159,6 +160,9 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 			Video   bool   `json:"video"`   // 仅 call.answer：true = 视频接听（REQ-VIDEO-004）
 			Enabled bool   `json:"enabled"` // 仅 call.setVideo：视频总开关（REQ-VIDEO-008）
 			Digit   string `json:"digit"`   // 仅 call.dtmf：一个 DTMF 字符（0-9 * # A-D）
+			// 音量（REQ-MEDIA-006）：**百分比整数**，0 = 禁用（同开关的「关」）
+			Gain           *int `json:"gain"`           // 仅 call.setMicGain：0–200
+			SpeakerVolume  *int `json:"speakerVolume"`  // 仅 call.setSpeakerVolume：0–100
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil || p.CallID == "" {
 			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 callId"))
@@ -167,6 +171,16 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		if msg.Method == MethodDTMF && len(p.Digit) != 1 {
 			resp = errMessage(msg.ID, CodeInvalidParams,
 				fmt.Errorf("digit 必须是单个字符（0-9 * # A-D）"))
+			break
+		}
+		if msg.Method == MethodSetMicGain && (p.Gain == nil || *p.Gain < 0 || *p.Gain > 200) {
+			resp = errMessage(msg.ID, CodeInvalidParams,
+				fmt.Errorf("gain 必须是 0–200 的百分比整数"))
+			break
+		}
+		if msg.Method == MethodSetSpeakerVolume && (p.SpeakerVolume == nil || *p.SpeakerVolume < 0 || *p.SpeakerVolume > 100) {
+			resp = errMessage(msg.ID, CodeInvalidParams,
+				fmt.Errorf("speakerVolume 必须是 0–100 的百分比整数"))
 			break
 		}
 		var err error
@@ -187,6 +201,10 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 			err = s.app.MuteMic(p.CallID, p.Muted)
 		case MethodMuteSpeaker:
 			err = s.app.MuteSpeaker(p.CallID, p.Muted)
+		case MethodSetMicGain:
+			err = s.app.SetMicGain(p.CallID, float32(*p.Gain)/100)
+		case MethodSetSpeakerVolume:
+			err = s.app.SetSpeakerVolume(p.CallID, float32(*p.SpeakerVolume)/100)
 		case MethodSetVideo:
 			err = s.app.SetVideoEnabled(p.CallID, p.Enabled)
 		case MethodDTMF:

@@ -137,10 +137,13 @@ type App struct {
 	trayRegistered bool
 	autoAnswer     bool // 自动接听开关
 
-	// 扬声器/麦克风开关（REQ-UI-023）：会话内记忆——通话面板再次弹出时
-	// 沿用上次状态；不持久化，应用重启后恢复默认都打开。
-	speakerOn bool
-	micOn     bool
+	// 扬声器音量 / 麦克风增益（REQ-UI-023 / REQ-MEDIA-006）：会话内记忆——
+	// 通话面板再次弹出时沿用上次的值；不持久化，应用重启后恢复默认 100%。
+	// 0% 即"禁用"，等同原来开关的「关」。见 ui_call_volume.go。
+	speakerLevel levelState
+	micLevel     levelState
+	pctTimer     *time.Timer // 百分比数字的隐藏定时器（滚动时重置）
+	pctGen       uint64      // 百分比数字的世代号（作废已触发但还没执行的旧回调）
 
 	// 主窗口可见性跟踪（Fyne 无 Visible() 查询，自行维护）：
 	// mainShown 当前是否显示；mainWasVisible 通话前是否可见
@@ -228,8 +231,10 @@ func New(c *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath strin
 		onRestart: onRestart,
 		fyne:      app.NewWithID("com.mti.sip-phone"),
 		regState:  "unregistered",
-		speakerOn: true, // 扬声器默认开（REQ-UI-023）
-		micOn:     true, // 麦克风默认开（REQ-UI-023）
+		// 扬声器/麦克风默认 100%（REQ-UI-023 / REQ-MEDIA-006，会话内记忆，
+		// 不持久化：重启回默认开）
+		speakerLevel: newLevelState(speakerMaxPercent),
+		micLevel:     newLevelState(micMaxPercent),
 		// 视频：默认开（会话内记忆，不持久化）
 		videoOn:   true,
 		previewOn: true,
@@ -1348,13 +1353,11 @@ func (a *App) onEvent(ev core.Event) {
 
 	case "call.audio":
 		// 麦克风/扬声器开关变化（REQ-UI-023）：桌面按钮与网页控制共用一份状态，
-		// 网页改了也要同步本机面板的按钮外观与"会话内记忆"。
+		// 网页改了也要同步本机面板的按钮外观与"会话内记忆"（0% ↔ 上次非零值，
+		// 幂等——本机自己滚轮触发的调节也会收到这条事件，不能把刚调的值冲掉）。
 		if callID, call := callData(ev.Data); call != nil && callID == a.activeCallID {
 			a.activeCall = call
-			a.micOn = !call.MicMuted
-			a.speakerOn = !call.SpeakerMuted
-			a.applyMicButton()
-			a.applySpeakerButton()
+			a.syncAudioButtonsFromEvent(call)
 		}
 	}
 }

@@ -57,9 +57,10 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 
 # 音频/媒体排查（可选，默认关闭、零开销）：设 SIP_PHONE_AUDIODUMP=1 启动，
 # 每通电话在日志里每秒输出一行【诊断】（收包/写入/读出样本、播放回调次数、
-# 缓冲深度、累计截断），并把"网络收到的声音"与"实际播放的声音"分别落成
-# 日志目录下的 rx-<RTP端口>.wav / play-<RTP端口>.wav——两者一比就知道
-# 问题出在收、还是出在播。分析：python tools/wavscan.py <wav>
+# 缓冲深度、累计截断、采集峰值/采集RMS/麦克风增益%），并把"网络收到的声音"、
+# "实际播放的声音"与"送编码器的采集声音（含麦克风增益）"分别落成日志目录下的
+# rx-<RTP端口>.wav / play-<RTP端口>.wav / mic-<RTP端口>.wav——三者一比就知道
+# 问题出在收、播、还是麦克风。分析：python tools/wavscan.py <wav>
 ```
 
 测试页地址：`http://127.0.0.1:<WS端口>/`（默认 8765，占用自动 +1 并保存配置）。
@@ -503,6 +504,40 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   一次性垫高；垫高后深度**只增不减**（读多少写多少），表现为"通话越久延迟越大、
   有几秒"。早先容量给到 8 秒，等于允许累积 8 秒延迟。截断时会打
   `播放缓冲超深已截断` 的 Warn（限频 10s），这是排查延迟的第一线索。
+- **音量/增益（REQ-MEDIA-006）**：通话面板扬声器/麦克风按钮**滚轮即调音量**，
+  0% = 禁用（等同「关」，走 `SetMicMuted`/`SetPlayMuted` 静音标志，**不**下发增益 0
+  ——否则别处单独解除静音会得到"没有提示的静音"）。引擎里增益/音量存的是
+  **「百分比 − 100」的整数偏移**（`micGainOff`/`playVolOff`）而不是 float32 位模式：
+  零值必须等于 100% 单位增益，存位模式时零值恰好是 +0.0（静音）会被误读。
+  界面侧同理按**百分比整数**存（`levelState`，0.05 累加 20 次不再等于 1.0）。
+  滚轮事件走 `fyne.Scrollable`，但**一格不是 1**——桌面驱动把 yoff 放大成 25
+  （`scroll_speed_default.go`），触摸板是连续小量，所以按「累计 DY ÷ 25 取整、
+  余数留存」（`wheelSteps`）折算，别写成"一个事件一步"；`|yoff| ≥ 10` 时驱动还会
+  乘 125，**单事件步数必须夹取**（`maxWheelSteps`），否则一次滚动就到底。
+  按钮底色是**圆周填充**（`compactButton.sweepImage`）：**100% 满蓝**，麦克风
+  100%→200% 的增益段在蓝色之上再叠一层**橙色**（`colorLevelBoost`，200% 整块橙）
+  ——所以 levelState 的 `level()` 只管"是否满格"，画底色用 `blueLevel()`/`boostLevel()`。
+  从正上方起顺时针扫过，
+  用 `canvas.Raster` 逐像素画——**Fyne 没有"裁剪到圆角矩形"的能力**，`canvas.Arc`
+  满格时是个圆、方形按钮的四个角会露出轨道色，所以这里自己按角度+圆角矩形判定。
+  Raster 的生成器拿到的是**设备像素**尺寸（`textureScale`），按 `Size()` 换算比例；
+  改 level 后 `Raster.Refresh()` 会让驱动丢掉缓存纹理重新生成（gl 的 `freeTexture`）。
+- **滚轮监听不能挂在 `compactButton` 上**：Fyne 的滚轮分发只把事件交给指针下
+  **最深的一个** `Scrollable` 且**不冒泡**（glfw 驱动 `processMouseScrolled` →
+  `driver.FindObjectAtPositionMatching`），而 `compactButton` 到处都是——通话记录页/
+  通信录页的行内「呼叫」按钮就在可滚动列表里，挂上去会把列表的滚轮吞掉。
+  音量按钮挂的是透明中继 `scrollRelay`（只实现 `Scrollable`，不实现
+  Tappable/Hoverable，排在 Stack 最后），别处零影响。
+- **`core.Call` 的 `micGain`/`speakerVolume` 是百分比、且是"恢复值"**：0 表示禁用，
+  禁用期间字段保留解禁后回到的音量，当前是否禁用看 `micMuted`/`speakerMuted`；
+  新通话在 `upsertCall` 里默认 100（0 有专有含义，不能靠零值）。`upsertCall` 是
+  **整份覆盖**，只在通话创建时调用，后续状态一律走 `updateCall`。
+- **`call.audio` 事件必须合并发布**（`internal/core/audio.go` 的 `audioPublisher`）：
+  滚轮/拖滑块一秒能触发十几下，逐条广播会把事件总线（容量 64、满即丢）刷爆、把
+  通话状态事件挤掉，也会把网页日志刷屏。合并口径 =「首次立即发 + 窗口内最多补发
+  一条（150ms）」，最后一次改动一定会发出去。另外：**静音状态没变就不要调
+  `MuteMic`/`MuteSpeaker`**（它们在 core 里会发布事件），0% 的禁用由
+  `SetMicGain/SetSpeakerVolume` 内部处理。
 - **Opus：RTP 时钟率 48000 与 PCM 帧长 160 不是一回事**。内部 PCM 管线恒为 8kHz
   （设备、播放缓冲、提示音都是 8k），所以编码器/解码器以 `Fs=8000` 创建——窄带工作，
   不需要重采样，对端发宽带/全带包也能解码（libopus 内部降到 8k 输出）。但 SDP 的
