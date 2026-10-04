@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
+mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
 当前版本 **1.0.9**（dev 开发中；1.0.8 含通话记录（本地 SQLite、主窗体内记录页）、
 配置页顶栏与记录页统一，已定版并合并到 master）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
@@ -139,6 +139,8 @@ internal/
               internal/calllog：单 worker FIFO 队列串行执行全部 SQL、
               call_id 主键幂等、启动清扫上次遗留的"进行中"记录
   calllog/    通话记录 SQLite 存储（纯 Go 驱动 modernc.org/sqlite，无 CGO）
+  contacts/   通信录 SQLite 存储（同一套单 worker 骨架；主键是规范化号码，
+              写操作由 core 串行"写库 + 重建内存快照"，导入时常用标志只增不减）
   sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理；
               netwatch.go 为注册看护：休眠唤醒/网络切换后立即重新注册，REQ-CALL-009）
   media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus 编解码、播放环形缓冲、SDP 协商
@@ -289,7 +291,15 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - 版本 1.0.9 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
 - 弹窗按钮文案「确定/取消」；**弹窗的 parent 必须是当前可见的窗口**——Fyne 把对话框画在父窗口的画布上，主窗体隐藏到托盘时弹在主窗体上用户根本看不见。默认走 `a.dialogParent()`（主窗体不可见且通话记录窗口开着就用它），从记录窗口发起的用 `showXxxIn(a.historyW, …)`；**永远不要传 nil**（dialog 的 parent 为 nil 直接 panic）。
 - **通话记录（REQ-CALL-007）的写入口径**：开始/接通/结束三个时刻在 `core.App` 里**直接入队**（不订阅事件总线——总线容量 64、满即丢，通话记录不能建立在会丢事件的东西上），且**先写记录再 `publishCall`**（界面收到 `call.terminated` 会立刻查库刷新，顺序反了就查不到新记录）。同一通话重复上报结束的幂等由存储层的 `ended_at=0` 条件兜住，**不要**在核心层再加"是否首次结束"的状态。库里时间戳 0 表示"未接通/进行中"（0 与 `time.Time{}` 的互转只在 `internal/calllog` 的 `toMillis/fromMillis` 里做，别把 1970 年漏到界面）。
-- 需求变更同步更新 docs/requirements.md 与 changelog.md。
+- **通信录（REQ-CONTACT-*）的查找走内存快照，不要逐行查库**：启动时把全量联系人载入 `core.App` 的内存快照（`contactMap` 号码 → 条目 + `contactList` 全量），通话记录行/通话面板/视频窗口标题/WS 事件负载的查找都是 O(1) 读内存。写操作统一走 `App.mutateContacts`——**"写存储 + 重建快照"必须整体串行**（`contactWriteMu`），否则两个并发写入方（界面 + 多个 WS 连接）可能让先写的快照后于后写的完成，把旧数据当最新发布出去。`core.Call.Contact` 是**发布事件时即时解析**的（不在 upsert 时就地写 `a.calls` ——那会和 State() 的读路径构成数据竞争）。
+- **号码匹配一律走 `core.NormalizeNumber`**（去 `sip:`/尖括号/`;user=phone`/`@host`/空格与 `-()[]_./`、转小写），去重键、查找键、CSV 合并键三处共用一份实现；显示仍用原始号码。已知限制：不做国码归并（`+86…` 与 `138…` 是两个号码）。
+- **悬停提示（备注 tip）不能用 `widget.PopUp` / `canvas.Overlays()`**：Fyne 的指针命中测试一旦发现画布上有 overlay，就**只查 overlay 层、不再回落内容层**（`internal/driver/util.go` 的 `FindObjectAtPositionMatching`：`if overlay != nil { 只遍历 overlay } else { 遍历 roots }`）——overlay 自己是 Hoverable，鼠标一动就把被提示控件的悬停状态抢走（提示闪烁）；做成非 Hoverable 则整个界面在提示显示期间收不到指针事件（提示再也关不掉）。正确做法是**窗口内容 Stack 的顶层图层**（`ui_tooltip.go` 的 `tooltipLayer`：自绘圆角底色 + `plainText`，都不是 Hoverable/Tappable → 命中测试穿透、绘制在最上层且不被滚动容器裁剪）。主窗体的 `mainContent` 因此是 `NewStack(页面, 提示图层)`，切页只换 `Objects[0]`；切页/窗口隐藏时要显式 `hideTip()`（指针可能没离开那一行，MouseOut 不会来）。
+- **图标要跟随主题变色就只能用 `fill`**：Fyne 的 `ThemedResource`（`theme.NewColoredResource`）只替换 SVG 里的 **fill**（`internal/svg` 的 `replaceFillColor`），`stroke` 画的线不会变色——所以"线稿"风格的图标要用**细长矩形/细条拼描边**（通信录图标就是这么画的，见 `icons.go` 的 `contactsIconSVG`）。另：`canvas.Image` 渲染 SVG 时必须给显式尺寸，否则可能只画出一个点。
+- **SDK 里从 WS 地址推导 HTTP 基址，不能直接取 `new URL(ws://…).origin`**：非 http(s) 协议的 origin 会把 scheme 原样带上（`ws://127.0.0.1:8765`），拿去 `fetch` 直接 "Failed to fetch"。要显式换成 `http:`/`https:`（`sip-phone-sdk.js` 的 `httpBase()`）。
+- **通信录的 ★ 是自绘 SVG 图标，不要用文字 "★"**：Fyne 的主题图标集里没有星形，默认字体的回退链在精简的 Linux 环境不保证有 U+2605（会渲染成方框）。`IconStar` 与顶栏入口 `IconContacts` 都在 `icons.go`，用 `markAfterLayout`（已支持任意个标记）跟在名称后面。
+- **Windows 原生文件对话框的 CLSID 别抄网上的**：`CLSID_FileSaveDialog` 是 **{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}**（网上常见的 `C0A651F5-…` 在本机注册表里不存在，`CoCreateInstance` 返回 `REGDB_E_CLASSNOTREG` 0x80040154，表现为"点了导出什么都不发生"）。保存/打开都用 `IID_IFileDialog` 取接口即可（`IFileSaveDialog` 由它派生，基础方法槽位一致：Show(3)/SetFileTypes(4)/SetOptions(9)/SetFileName(15)/SetTitle(17)/GetResult(20)/SetDefaultExtension(22)），取消要与不可用分开（`HRESULT_FROM_WIN32(ERROR_CANCELLED)`）。验证方法：起一个 goroutine 调对话框，主 goroutine `FindWindowW` 按标题找窗口再 `WM_CLOSE` 关掉（见会话内的一次性验证程序）。
+- **`coder/websocket` 单条消息默认读上限 32KB**（`read.go` 的 `defaultReadLimit`）：通信录导入是一整份 CSV，超限会**直接断开连接、没有任何业务错误**。服务端在 `Accept` 后 `conn.SetReadLimit(4<<20)` 放开（仅回环监听，没有滥用面）。 不过**网页的一键导入导出走的是 HTTP**（`GET /api/contacts.csv`、`POST /api/contacts/import`），完全绕开这个限制；WS 的那两个方法保留给需要走 WS 的客户端。
+- **需求变更同步更新 docs/requirements.md 与 changelog.md。**
 - 单通话限制：呼叫/振铃/通话中禁止新呼出（返回错误）；新来电直接 486 USER_BUSY。
 - WS 端口可配置（默认 8765），被占用自动 +1 并保存；无 token 鉴权（仅回环）。
 - SDP 编解码优先级：PCMA > PCMU > Opus；Opus 本端 offer 固定 PT 96（rtpmap `opus/48000/2`），answer 仍复用对端 PT；**RTP 端口按 RFC 3550 取偶数、RTCP = RTP + 1**（`bindRTPRTCP` 命中奇数就重选，音频/视频两对端口都走它），SDP 用 `a=rtcp` 宣告 RTCP 端口。

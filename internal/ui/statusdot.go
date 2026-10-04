@@ -71,9 +71,9 @@ func (r *statusDotRenderer) Objects() []fyne.CanvasObject {
 
 func (r *statusDotRenderer) Destroy() {}
 
-// statusRowLayout 状态行布局：圆点 + 2px 固定间距 + 号码文本。
+// statusRowLayout 状态行布局：圆点 + 2px 固定间距 + 状态文字。
 // 自定义布局的原因：HBox 项间距由主题 Padding 决定，这里固定 2px
-//（用户要求圆点与号码紧贴）。
+// （用户要求圆点与文字紧贴）。
 type statusRowLayout struct{}
 
 func (statusRowLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
@@ -83,8 +83,12 @@ func (statusRowLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	dot.Move(fyne.NewPos(2, (size.Height-dotSize.Height)/2)) // 圆点右移 2px
 
 	labelSize := label.MinSize()
-	label.Resize(fyne.NewSize(fyne.Min(labelSize.Width, size.Width-dotSize.Width-4), labelSize.Height))
-	label.Move(fyne.NewPos(dotSize.Width+4, (size.Height-labelSize.Height)/2))
+	// 文字起点 = 圆点的 2px 左偏移 + 圆点直径 + 间距。**别漏掉那 2px**：
+	// 只写 dotSize.Width+gap 的话文字实际是贴着圆点的（圆点先右移了 2px）。
+	const gap = 2
+	label.Resize(fyne.NewSize(fyne.Min(labelSize.Width, size.Width-dotSize.Width-gap-2), labelSize.Height))
+	// 文字比圆点中心再上移 1px（视觉重心：汉字比圆圈偏下，用户要求；圆点不动）
+	label.Move(fyne.NewPos(2+dotSize.Width+gap, (size.Height-labelSize.Height)/2-1))
 }
 
 func (statusRowLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {

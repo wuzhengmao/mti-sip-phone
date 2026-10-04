@@ -11,9 +11,9 @@ import (
 // showSystemFolderDialog Linux：依次尝试桌面环境常见的系统目录选择器
 // （zenity / kdialog / yad）。Fyne 自带的 dialog.FolderOpen 只能内嵌在
 // 主窗体画布内（主窗体固定 320px 宽，空间很小）。
-// 都不可用时返回 folderDialogUnavailable，由调用方回退到内置对话框；
-// 用户取消（这些程序的退出码 1）返回 folderDialogCancelled。
-func showSystemFolderDialog(title, initial string) (string, folderDialogResult) {
+// 都不可用时返回 fileDialogUnavailable，由调用方回退到内置对话框；
+// 用户取消（这些程序的退出码 1）返回 fileDialogCancelled。
+func showSystemFolderDialog(title, initial string) (string, fileDialogResult) {
 	type candidate struct {
 		bin  string
 		args []string
@@ -35,16 +35,16 @@ func showSystemFolderDialog(title, initial string) (string, folderDialogResult) 
 		out, err := exec.Command(c.bin, c.args...).Output()
 		if err == nil {
 			if path := strings.TrimSpace(string(out)); path != "" {
-				return path, folderDialogPicked
+				return path, fileDialogPicked
 			}
 			continue
 		}
 		// 退出码非 0 = 用户取消（zenity/kdialog/yad 的惯例）
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return "", folderDialogCancelled
+			return "", fileDialogCancelled
 		}
 		// 其他错误（无法启动等）：换下一个候选
 	}
-	return "", folderDialogUnavailable
+	return "", fileDialogUnavailable
 }

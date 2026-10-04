@@ -92,6 +92,11 @@
   #log .info { color: #cbd5e1; }
   .state-line { font-size: 13px; color: var(--gray); margin-top: 6px; word-break: break-all; }
   /* DTMF 拨号盘：3×4 紧凑按键，通话接通后在通话控制卡片里出现 */
+  /* 通信录卡片：四个按钮两行两列对齐（每列等宽、按钮撑满格子） */
+  .contacts-actions {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+  }
+  .contacts-actions button { width: 100%; }
   .dtmf-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 10px; max-width: 210px; }
   .dtmf-pad button { padding: 6px 0; font-size: 14px; }
   /* 站点版本列表（自动更新卡片）：小一号字、紧凑列表，右侧是黄色的「推送」按钮。
@@ -134,7 +139,7 @@
 <p class="sub">通过本地 WebSocket 控制 SIP 软电话：网页拨号、接听、挂断、视频呼叫与视频画面订阅（使用 JS SDK 实现）</p>
 
 <div class="grid">
-  <!-- 左列：连接、拨号与通话控制 -->
+  <!-- 左列：连接、拨号、通话控制与通信录 -->
   <div>
     <div class="card" style="margin-bottom:16px">
       <h2>连接状态
@@ -216,6 +221,20 @@
       </div>
     </div>
 
+    <div class="card" style="margin-bottom:16px">
+      <h2>通信录</h2>
+      <p class="state-line">网页端只提供导入/导出（增删改查在软电话界面里做）。
+        导入按号码去重：已存在的只覆盖名称与备注、<b>常用标志只增不减</b>（本地已标就保持，本地没标而文件标了就变成常用），没有的整条新增。<br>
+        CSV（UTF-8 带 BOM，Excel 可直接打开）适合人工编辑；<b>JSON 走 REST 接口</b>（<code>GET/POST /api/contacts</code>），页面可直接 XHR 收发结构化数据。</p>
+      <!-- 四个按钮两行两列对齐（同列等宽，导入/导出各自成列） -->
+      <div class="contacts-actions">
+        <button id="btnExportContacts" class="ghost">导出 CSV</button>
+        <button id="btnImportContacts" class="ghost">导入 CSV</button>
+        <button id="btnExportContactsJSON" class="ghost">导出 JSON</button>
+        <button id="btnImportContactsJSON" class="ghost">导入 JSON</button>
+      </div>
+      <div class="state-line" id="contactsLine">—</div>
+    </div>
   </div>
 
   <!-- 中列：视频 -->
@@ -678,6 +697,68 @@
     });
   };
 
+  // ---------------- 通信录（一键导入/导出，REQ-SDK-006）----------------
+
+  $('btnExportContacts').onclick = function () {
+    addLog('info', '导出通信录…');
+    sdk.downloadContacts().then(function (r) {
+      $('contactsLine').textContent = '已导出 ' + r.count + ' 位联系人（' + r.filename + '）';
+      addLog('ok', '通信录已导出：' + r.count + ' 条 → ' + r.filename);
+    }).catch(function (e) {
+      $('contactsLine').textContent = '导出失败：' + e.message;
+      addLog('err', '导出通信录失败: ' + e.message + (e.code ? '（' + e.code + '）' : ''));
+    });
+  };
+
+  $('btnImportContacts').onclick = function () {
+    addLog('info', '选择通信录 CSV 文件…');
+    sdk.importContactsFromFile().then(function (r) {
+      var msg = '导入完成：新增 ' + r.added + ' 条，覆盖 ' + r.updated + ' 条';
+      if (r.skipped) { msg += '，跳过 ' + r.skipped + ' 行'; }
+      msg += '（共 ' + r.total + ' 条）';
+      $('contactsLine').textContent = msg;
+      addLog('ok', msg + ' ← ' + r.filename);
+    }).catch(function (e) {
+      if (e.code === 'cancelled') {
+        $('contactsLine').textContent = '已取消导入';
+        addLog('info', '已取消导入通信录');
+        return;
+      }
+      $('contactsLine').textContent = '导入失败：' + e.message;
+      addLog('err', '导入通信录失败: ' + e.message + (e.code ? '（' + e.code + '）' : ''));
+    });
+  };
+
+  $('btnExportContactsJSON').onclick = function () {
+    addLog('info', '导出通信录（JSON）…');
+    sdk.exportContactsJSON().then(function (r) {
+      var list = (r && r.contacts) || [];
+      $('contactsLine').textContent = 'JSON 导出：' + list.length + ' 位联系人';
+      addLog('ok', 'JSON 导出：' + JSON.stringify(list.slice(0, 3)) + (list.length > 3 ? ' …' : ''));
+    }).catch(function (e) {
+      $('contactsLine').textContent = '导出失败：' + e.message;
+      addLog('err', 'JSON 导出失败: ' + e.message + (e.code ? '（' + e.code + '）' : ''));
+    });
+  };
+
+  $('btnImportContactsJSON').onclick = function () {
+    // 演示：构造两条数据（其中一条已在通信录里 → 覆盖名称/备注、常用只增不减）
+    var payload = [
+      { number: '2999', name: '张三丰', note: 'JSON 导入演示', starred: false },
+      { number: '18800000088', name: '演示联系人', note: '来自网页 JSON', starred: true }
+    ];
+    addLog('info', '导入通信录（JSON）: ' + JSON.stringify(payload));
+    sdk.importContactsJSON(payload).then(function (r) {
+      var msg = 'JSON 导入：新增 ' + r.added + ' 条，覆盖 ' + r.updated + ' 条';
+      if (r.skipped) { msg += '，跳过 ' + r.skipped + ' 条'; }
+      $('contactsLine').textContent = msg + '（共 ' + r.total + ' 条）';
+      addLog('ok', msg);
+    }).catch(function (e) {
+      $('contactsLine').textContent = '导入失败：' + e.message;
+      addLog('err', 'JSON 导入失败: ' + e.message + (e.code ? '（' + e.code + '）' : ''));
+    });
+  };
+
   // 媒体开关图标：与软电话通话面板同一套 Material Design 路径
   //（internal/ui/icons.go 的 micIconSVG / speakerIconSVG / videoIconSVG）
   var ICON_PATH = {
@@ -900,9 +981,21 @@
   function showCall(call) {
     $('callArea').style.display = 'block';
     $('noCall').style.display = 'none';
+    // 通信录命中时显示「号码 名称★」（名称悬停出备注，REQ-UI-037）；
+    // 未命中仍是 SIP 显示名优先
     var name = call.remoteName || call.remote || '';
+    var star = '';
+    if (call.contact && call.contact.name) {
+      name = (call.remote ? call.remote + ' ' : '') + call.contact.name;
+      star = call.contact.starred ? ' ★' : '';
+    }
     var label = call.direction === 'incoming' ? '来电：' : '去电：';
-    $('callName').textContent = label + name;
+    $('callName').textContent = label + name + star;
+    if (call.contact && call.contact.note) {
+      $('callName').title = call.contact.note;
+    } else {
+      $('callName').removeAttribute('title');
+    }
     $('callHint').textContent = call.direction === 'incoming' ? '对方正在呼叫您' : '正在呼叫对方...';
 
     var ringing = call.state === 'ringing';

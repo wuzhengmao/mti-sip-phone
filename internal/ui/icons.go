@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"fmt"
+	"strings"
+
 	"fyne.io/fyne/v2"
 )
 
@@ -129,12 +132,62 @@ var (
 	// IconVideoMark 视频通话标记（第一行号码右边的小摄像头）：这里给的填充色
 	// 会被 theme.NewColoredResource 换成主题前景色，与行内文字同色。
 	IconVideoMark = fyne.NewStaticResource("video-mark.svg", []byte(videoIconSVG("#1a1a1a", false)))
+	// IconStar 常用联系人标记（金色五角星）：通信录行、通话记录行与通话面板
+	// 上跟在名称后面（REQ-UI-032/037）。
+	IconStar = fyne.NewStaticResource("star.svg", []byte(starIconSVG("#fbc02d")))
+	// IconContacts 通信录入口按钮（顶栏，颜色同其它主题图标）。
+	IconContacts = fyne.NewStaticResource("contacts.svg", []byte(contactsIconSVG("#b3b3b3")))
+
 	// IconArrowOutGreen/Red 呼出箭头（↗）；IconArrowInGreen/Red 呼入箭头（↙）。
 	IconArrowOutGreen = fyne.NewStaticResource("arrow-out-green.svg", []byte(arrowIconSVG("#43a047", false)))
 	IconArrowOutRed   = fyne.NewStaticResource("arrow-out-red.svg", []byte(arrowIconSVG("#e53935", false)))
 	IconArrowInGreen  = fyne.NewStaticResource("arrow-in-green.svg", []byte(arrowIconSVG("#43a047", true)))
 	IconArrowInRed    = fyne.NewStaticResource("arrow-in-red.svg", []byte(arrowIconSVG("#e53935", true)))
 )
+
+// starIconSVG 常用联系人标记（REQ-UI-032）：实心五角星。
+//
+// **不要用文字 "★"**：Fyne 的主题图标集里没有星形，默认字体的回退链在
+// 精简的 Linux 环境下不保证有 U+2605（会渲染成方框）；自绘 SVG 单 <path>
+// 最稳（注意不要用 <g transform>，Fyne 的 SVG 渲染器不认）。
+func starIconSVG(color string) string {
+	path := `M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z`
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<path fill="` + color + `" d="` + path + `"/>
+</svg>`
+}
+
+// contactsIconSVG 通信录图标（按用户给的参考图：一本通讯录 + 右侧索引格 + 中间听筒）。
+//
+// **线稿风格要靠"细长矩形拼描边"**：Fyne 的 ThemedResource 只把 **fill** 换成
+// 主题色（internal/svg 的 replaceFillColor 只处理填充，不认 stroke），用
+// stroke 画的线不会跟着主题变色。听筒是 Material phone 路径按 0.5 缩放、平移到
+// 封面中央的（坐标由脚本换算，别手改）。
+// contactsHandsetPath 听筒路径：Material phone 按 0.5 缩放 + 平移到封面中央
+// （坐标由脚本换算，手改容易错位）。
+const contactsHandsetPath = "M 7.46 11.395 A 7.525 7.525 0 0 0 10.755 14.69 L 11.855 13.59 A 0.5 0.5 0 0 1 12.365 13.47 C 12.925 13.655 13.53 13.755 14.15 13.755 A 0.5 0.5 0 0 1 14.65 14.255 L 14.65 16 A 0.5 0.5 0 0 1 14.15 16.5 A 8.5 8.5 0 0 1 5.65 8 A 0.5 0.5 0 0 1 6.15 7.5 L 7.9 7.5 A 0.5 0.5 0 0 1 8.4 8 C 8.4 8.62 8.5 9.225 8.685 9.785 A 0.5 0.5 0 0 1 8.565 10.295 L 7.46 11.395 Z"
+
+func contactsIconSVG(color string) string {
+	f := func(x, y, w, h, r float32) string {
+		return fmt.Sprintf(`<rect x="%g" y="%g" width="%g" height="%g" rx="%g" fill="%s"/>`,
+			x, y, w, h, r, color)
+	}
+	var b strings.Builder
+	b.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">` + "\n")
+	// 封面：左侧书脊 + 上/下/右三条边框
+	b.WriteString(f(2.2, 2.5, 2.4, 19, 1.2) + "\n")
+	b.WriteString(f(2.2, 2.5, 15.4, 2.2, 1.1) + "\n")
+	b.WriteString(f(2.2, 19.3, 15.4, 2.2, 1.1) + "\n")
+	b.WriteString(f(15.4, 2.5, 2.2, 19, 1.1) + "\n")
+	// 右侧 4 个索引格
+	for _, y := range []float32{5.2, 9.4, 13.6, 17.8} {
+		b.WriteString(f(18, y, 3.8, 2.2, 0.7) + "\n")
+	}
+	// 中间听筒
+	b.WriteString(`<path fill="` + color + `" d="` + contactsHandsetPath + `"/>` + "\n")
+	b.WriteString(`</svg>`)
+	return b.String()
+}
 
 // arrowIconSVG 通话记录行的方向箭头（REQ-UI-031）：↗ 呼出 / ↙ 呼入。
 //

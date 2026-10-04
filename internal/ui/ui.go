@@ -64,15 +64,22 @@ type App struct {
 	onKeyTone func(key string)
 
 	regDot        *statusDot
-	regLabel      *widget.Label // 本机号码显示
+	regLabel      *plainText // 注册状态文字（颜色跟圆点一致；本机号码见窗口标题）
 	autoAnswerBtn *widget.Button
 	callBtn       *compactButton
 	settingsBtn   *widget.Button
+	contactsBtn   *widget.Button // 通信录（REQ-UI-032，位于通话记录按钮右侧）
 	historyBtn    *widget.Button // 通话记录（REQ-UI-031，位于设置按钮左侧）
 
 	// ---- 通话记录（REQ-CALL-007，与配置页一样切在主窗体内）----
 	historyPage *fyne.Container // 记录页内容（buildHistoryPage 构建）
 	history     *historyState   // 列表状态（见 ui_history.go）
+
+	// ---- 通信录（REQ-UI-032，同样切在主窗体内）----
+	contactsPage *fyne.Container // 通信录页内容（buildContactsPage 构建）
+	contacts     *contactsState  // 页面状态（见 ui_contacts.go）
+	mainTip      *tooltipLayer   // 备注悬停提示图层（主窗体内容顶层，见 ui_tooltip.go）
+	callTip      *tooltipLayer   // 通话面板的提示图层
 
 	// 设置页控件
 	settingsScroll    *container.Scroll
@@ -100,9 +107,9 @@ type App struct {
 	wsPortEntry       *widget.Entry // 本地 WS 监听端口（默认 8765，修改后重启生效）
 
 	// 通话面板控件（呼叫/振铃/通话三态共用）
-	callNameLabel  *widget.Label
-	callStateLabel *widget.Label
-	callTimerLabel *widget.Label
+	callName       *callNameBox // 对端号码/名称（含 ★ 与备注悬停，REQ-UI-037）
+	callStateLabel *plainText   // 自绘单行文本（widget.Label 在本主题下带 12px 内边距，会与名称行错位）
+	callTimerLabel *plainText
 	callRows       *fyne.Container // 通话面板三行内容容器（按状态重建）
 	hangupBtn      *compactButton
 	answerBtn      *compactButton
@@ -284,8 +291,13 @@ func (a *App) buildMainWindow() {
 	a.buildDialPage()
 	a.buildSettingsPage()
 	a.buildHistoryPage()
+	a.buildContactsPage()
 
-	a.mainContent = container.NewStack(a.dialPage)
+	// 窗口内容 = 当前页 + 顶层提示图层（备注悬停用，见 ui_tooltip.go）。
+	// 切页只换 Objects[0]，提示图层恒为 Objects[1]：它不含 Hoverable/Tappable，
+	// 命中测试会穿透到下面的页面，绘制顺序上又在最上层、不受滚动裁剪。
+	a.mainTip = newTooltipLayer()
+	a.mainContent = container.NewStack(a.dialPage, a.mainTip)
 	w.SetContent(a.mainContent)
 	w.Resize(fyne.NewSize(320, 620)) // 更窄的宽度 + 按键增高后的总高
 	w.CenterOnScreen()
@@ -364,20 +376,28 @@ func (a *App) onKeypadDigit(key string) {
 func (a *App) buildDialPage() {
 	// ---- 顶部栏：状态圆点 + 本机号码 + 设置按钮（右上角）----
 	a.regDot = newStatusDot("unregistered")
-	a.regLabel = widget.NewLabel("") // 本机号码（已配置时显示）
+	// 注册状态文字：与圆点同色、加粗、字号与「自动接听」按钮一致（用户要求）。
+	// 用自绘文本才能直接指定颜色（widget.Label 只有 Importance 几档主题色，
+	// 对不上圆点那四个自定颜色）。本机号码不在顶栏显示，见窗口标题。
+	a.regLabel = newPlainText(regText("unregistered"),
+		a.fyne.Settings().Theme().Size(theme.SizeNameText), dotColors["unregistered"], true)
 	a.autoAnswerBtn = widget.NewButton("自动接听", a.toggleAutoAnswer)
 	// 未选中时浅灰底（与通话面板开关关闭状态一致，REQ-UI-024 修订）
 	a.autoAnswerBtn.Importance = widget.MediumImportance
 	statusRow := fyne.NewContainerWithLayout(statusRowLayout{}, a.regDot, a.regLabel)
+	// 顶栏图标按钮统一用**标准 Fyne 按钮**（低强调）：通话记录在左、通信录居中、
+	// 设置在右（REQ-UI-031 / REQ-UI-032）。自绘紧凑版观感与其它按钮不一致，已回退。
 	a.settingsBtn = widget.NewButtonWithIcon("", theme.SettingsIcon(), a.showSettings)
 	a.settingsBtn.Importance = widget.LowImportance
-	// 通话记录按钮：放在设置按钮**左边**（REQ-UI-031）
 	a.historyBtn = widget.NewButtonWithIcon("", theme.HistoryIcon(), a.showHistory)
 	a.historyBtn.Importance = widget.LowImportance
+	a.contactsBtn = widget.NewButtonWithIcon("",
+		theme.NewColoredResource(IconContacts, theme.ColorNameForeground), a.showContacts)
+	a.contactsBtn.Importance = widget.LowImportance
 
-	// 顶栏：圆点+号码靠左，通话记录+设置按钮靠右，自动接听按钮居中
+	// 顶栏：圆点+状态靠左，通话记录+通信录+设置按钮靠右，自动接听按钮居中
 	topBar := container.NewBorder(nil, nil, statusRow,
-		container.NewHBox(a.historyBtn, a.settingsBtn),
+		container.NewHBox(a.historyBtn, a.contactsBtn, a.settingsBtn),
 		container.NewCenter(a.autoAnswerBtn))
 
 	// ---- 号码输入框：可下拉（最近 5 次呼叫号码，去重）----
@@ -682,6 +702,7 @@ func (a *App) showSettings() {
 	if a.wsPortEntry != nil {
 		a.wsPortEntry.SetText(strconv.Itoa(a.cfg.WS.Port))
 	}
+	a.hideTip() // 切页时收起备注提示（指针可能没离开行）
 	a.mainContent.Objects[0] = a.settingsPage
 	a.mainContent.Refresh()
 	// 每次进入配置页回到顶部
@@ -732,6 +753,7 @@ func (a *App) applyWSPort() {
 
 // showDialPage 返回拨号盘页。
 func (a *App) showDialPage() {
+	a.hideTip() // 切页时收起备注提示
 	a.mainContent.Objects[0] = a.dialPage
 	a.mainContent.Refresh()
 }
@@ -761,7 +783,7 @@ func (a *App) onCallButton() {
 		State:     core.CallRinging,
 	}
 	a.savedNumber = target
-	a.setCallUI(uiDialing, target)
+	a.setCallUI(uiDialing, a.activeCall)
 	a.refreshRecentDials()
 }
 
@@ -793,7 +815,7 @@ func (a *App) onVideoCallButton() {
 	a.savedNumber = target
 	a.videoOn = true
 	a.previewOn = true
-	a.setCallUI(uiDialing, target)
+	a.setCallUI(uiDialing, a.activeCall)
 	a.refreshRecentDials()
 }
 
@@ -813,7 +835,10 @@ func (a *App) cameraUsable() bool {
 //   - uiDialing：主窗口隐藏，通话面板置顶显示"呼叫中 + 号码 + 时长 + 红色挂断"
 //   - uiRinging：主窗口隐藏，通话面板置顶显示"来电号码 + 振铃时长 + 绿色接听 + 红色挂断"
 //   - uiInCall：主窗口隐藏，通话面板置顶显示"号码 + 通话时长 + 黄色 || + 红色挂断"
-func (a *App) setCallUI(state int, remote string) {
+//
+// call 为本次通话（uiIdle 传 nil）：对端展示文案由它算出——命中通信录时
+// 号码右边显示联系人名称与 ★（REQ-UI-037）。
+func (a *App) setCallUI(state int, call *core.Call) {
 	// 通话面板显示前记录主窗口是否显示（仅从空闲进入通话状态时
 	// 记录一次——状态间切换或重复事件不会覆盖记录）
 	if state != uiIdle && a.uiState == uiIdle {
@@ -831,6 +856,9 @@ func (a *App) setCallUI(state int, remote string) {
 		a.stopTimer()
 		if a.callW != nil {
 			a.callW.Hide()
+		}
+		if a.callTip != nil {
+			a.callTip.hide() // 面板藏了，提示不能留在屏幕上
 		}
 		a.applyMainCallMode(false) // 恢复输入框/设置/自动接听/呼叫等控件（REQ-UI-030）
 		if a.savedNumber != "" {
@@ -864,7 +892,7 @@ func (a *App) setCallUI(state int, remote string) {
 		a.setKeypadEnabled(false) // 呼叫未接通，发不了 DTMF（REQ-CALL-006）
 		a.buildCallPanelIfNeeded()
 		a.updateCallWindowTitle()
-		a.callNameLabel.SetText(remote)
+		a.setCallName(call)
 		a.callStateLabel.SetText("呼叫中")
 		a.rebuildCallRows(dialingButtons)
 		showCallWindow(a.callW) // 平台函数：Windows 下不占任务栏（见 showWindowAsTool）
@@ -878,7 +906,7 @@ func (a *App) setCallUI(state int, remote string) {
 		a.setKeypadEnabled(false) // 振铃中还不能发 DTMF
 		a.buildCallPanelIfNeeded()
 		a.updateCallWindowTitle()
-		a.callNameLabel.SetText(remote)
+		a.setCallName(call)
 		a.callStateLabel.SetText("来电")
 		a.rebuildCallRows(ringingButtons)
 		showCallWindow(a.callW)
@@ -893,7 +921,7 @@ func (a *App) setCallUI(state int, remote string) {
 		a.setKeypadEnabled(true) // 通话中：号码按键用来发 DTMF（REQ-CALL-006）
 		a.buildCallPanelIfNeeded()
 		a.updateCallWindowTitle()
-		a.callNameLabel.SetText(remote)
+		a.setCallName(call)
 		a.callStateLabel.SetText("通话中")
 		a.rebuildCallRows(incallButtons)
 		showCallWindow(a.callW)
@@ -938,7 +966,7 @@ func (a *App) applyMainCallMode(inCall bool) {
 	for _, c := range []interface {
 		Enable()
 		Disable()
-	}{a.settingsBtn, a.historyBtn, a.autoAnswerBtn, a.callBtn, a.videoCallBtn} {
+	}{a.settingsBtn, a.historyBtn, a.contactsBtn, a.autoAnswerBtn, a.callBtn, a.videoCallBtn} {
 		setEnabled(c, !inCall)
 	}
 }
@@ -1092,15 +1120,13 @@ func (a *App) updateTrayIcon() {
 func (a *App) subscribeEvents() {
 	// 初始状态直接从核心快照读取（REQ-UI-015）：注册可能在 UI 订阅
 	// 事件之前已完成（启动即注册），依赖事件流会导致界面状态不准确。
-	// regLabel 显示本机号码（不是状态文本）；状态由圆点颜色表示。
+	// regLabel 显示注册状态文字，颜色与圆点一致（本机号码见窗口标题/配置页）。
 	st := a.core.State()
 	a.setRegState(string(st.Register.State))
 	if a.regDot != nil {
 		a.regDot.setState(a.regState)
 	}
-	if a.regLabel != nil {
-		a.regLabel.SetText(st.Register.Account)
-	}
+	a.setRegLabel(a.regState)
 	a.updateTrayIcon()
 	a.updateWindowTitle()
 
@@ -1135,9 +1161,7 @@ func (a *App) onEvent(ev core.Event) {
 			if state, ok := data["state"].(string); ok {
 				a.setRegState(state)
 				a.regDot.setState(state)
-				if account, ok := data["account"].(string); ok {
-					a.regLabel.SetText(account) // 本机号码
-				}
+				a.setRegLabel(state) // 顶栏显示状态文字（不再显示本机号码）
 				a.updateTrayIcon()
 				a.updateWindowTitle()
 			}
@@ -1158,7 +1182,7 @@ func (a *App) onEvent(ev core.Event) {
 			a.remoteHasVideo = false
 			a.localVideoEver = false
 			a.videoSized = false
-			a.setCallUI(uiRinging, callRemoteName(call))
+			a.setCallUI(uiRinging, call)
 			if a.audioMgr != nil {
 				a.audioMgr.PlayRing()
 			}
@@ -1226,7 +1250,7 @@ func (a *App) onEvent(ev core.Event) {
 			a.activeCall = call
 			a.savedNumber = call.Remote
 			if a.uiState != uiDialing {
-				a.setCallUI(uiDialing, callRemoteName(call))
+				a.setCallUI(uiDialing, call)
 			}
 		}
 
@@ -1264,7 +1288,7 @@ func (a *App) onEvent(ev core.Event) {
 			a.activeCallID = callID
 			a.activeCall = call
 			a.savedNumber = call.Remote
-			a.setCallUI(uiInCall, callRemoteName(call))
+			a.setCallUI(uiInCall, call)
 			// 通话建立：停止振铃音（含本地回铃音）
 			a.ringbackOn = false
 			if a.audioMgr != nil {
@@ -1276,6 +1300,7 @@ func (a *App) onEvent(ev core.Event) {
 		// 通话记录窗口开着就刷新（新记录在 core 侧先入队再发事件，这里查得到）。
 		// 必须在下面 call.failed 的提前 return 之前。
 		a.historyOnCallEnded()
+		a.contactsOnCallEnded()
 		// 停止振铃音，并按结果放提示音：遇忙放忙音，其余放挂断音
 		reason := ""
 		missed := false
@@ -1344,18 +1369,32 @@ func isBusyReason(reason string) bool {
 	return code == 486 || code == 600
 }
 
-// regText 注册状态中文文案。
+// regText 注册状态中文文案（顶栏显示的就是它）。
+// 「注册中」不写省略号：顶栏空间有限，圆点的黄色已经表示"进行中"。
 func regText(state string) string {
 	switch state {
 	case "registered":
 		return "已注册"
 	case "registering":
-		return "注册中..."
+		return "注册中"
 	case "failed":
 		return "注册失败"
 	default:
 		return "未注册"
 	}
+}
+
+// setRegLabel 更新顶栏的注册状态文字：颜色跟圆点一致（dotColors），加粗。
+func (a *App) setRegLabel(state string) {
+	if a.regLabel == nil {
+		return
+	}
+	if _, ok := dotColors[state]; !ok {
+		state = "unregistered"
+	}
+	a.regLabel.SetText(regText(state))
+	a.regLabel.SetColor(dotColors[state])
+	a.regLabel.SetBold(true)
 }
 
 // toggleAutoAnswer 自动接听开关：开启后来电自动接听。
@@ -1551,14 +1590,14 @@ func (a *App) loadLogConfigIntoForm() {
 	}
 }
 
-// folderDialogResult 系统目录选择对话框的结果：必须把"用户取消"与
+// fileDialogResult 系统文件/目录选择对话框的结果：必须把"用户取消"与
 // "系统不可用"分开——取消后再弹一个内置对话框是明显的 bug。
-type folderDialogResult int
+type fileDialogResult int
 
 const (
-	folderDialogUnavailable folderDialogResult = iota // 系统不支持或打开失败：调用方回退
-	folderDialogPicked                                // 用户选定目录
-	folderDialogCancelled                             // 用户取消：不做任何事
+	fileDialogUnavailable fileDialogResult = iota // 系统不支持或打开失败：调用方回退
+	fileDialogPicked                              // 用户选定路径
+	fileDialogCancelled                           // 用户取消：不做任何事
 )
 
 // chooseLogDir 选择日志目录：优先用系统文件夹选择对话框（独立窗口、
@@ -1570,11 +1609,11 @@ func (a *App) chooseLogDir() {
 	go func() {
 		dir, res := showSystemFolderDialog("选择日志目录", a.logDirPath())
 		switch res {
-		case folderDialogPicked:
+		case fileDialogPicked:
 			if dir != "" {
 				fyne.Do(func() { a.applyLogDir(dir) })
 			}
-		case folderDialogCancelled:
+		case fileDialogCancelled:
 			// 用户取消：保持原样
 		default:
 			fyne.Do(a.chooseLogDirFallback)

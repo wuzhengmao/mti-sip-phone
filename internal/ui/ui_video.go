@@ -258,7 +258,8 @@ func (a *App) showVideoWindow() {
 	a.ensureVideoWindow()
 	name := a.activeCallID
 	if a.activeCall != nil {
-		name = callRemoteName(a.activeCall)
+		// 命中通信录时用联系人名称（REQ-UI-037；未命中仍是 SIP 显示名/号码）
+		name, _, _ = a.callDisplay(a.activeCall)
 	}
 	a.videoW.SetTitle(videoWindowTitle(name))
 	// **每次"打开"视频窗口都带到最前面**（用户要求）：只在隐藏→显示的那一次

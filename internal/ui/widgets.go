@@ -40,6 +40,28 @@ func (t *plainText) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(t.text)
 }
 
+// SetColor 更新文字颜色（注册状态文字要跟着圆点颜色走）。
+func (t *plainText) SetColor(c color.Color) {
+	t.text.Color = c
+	t.text.Refresh()
+}
+
+// SetBold 更新字重。
+func (t *plainText) SetBold(bold bool) {
+	t.text.TextStyle = fyne.TextStyle{Bold: bold}
+	t.text.Refresh()
+}
+
+// SetText 更新文本（截断在下次 Resize 时按新宽度重算）。
+func (t *plainText) SetText(s string) {
+	if t.full == s {
+		return
+	}
+	t.full = s
+	t.text.Text = s
+	t.text.Refresh()
+}
+
 // Resize 先按分到的宽度截断文本，再走正常布局。
 func (t *plainText) Resize(size fyne.Size) {
 	if clipped := clipToWidth(t.full, t.text.TextSize, t.text.TextStyle, size.Width); clipped != t.text.Text {
@@ -86,10 +108,32 @@ func pageTopBar(title string, back func(), right fyne.CanvasObject) *fyne.Contai
 // 退化为 MinSize。布局据此判断放不放得下——用被自己截断过的宽度会自我迭代，
 // 结果是名字被永久截短（踩过）。
 func naturalWidth(o fyne.CanvasObject) float32 {
-	if t, ok := o.(*plainText); ok {
+	switch t := o.(type) {
+	case *plainText:
+		return t.fullWidth()
+	case *hoverNote: // 可悬停文本（ui_tooltip.go）内部也是 plainText
 		return t.fullWidth()
 	}
 	return o.MinSize().Width
+}
+
+// padLeftLayout 左侧留出 pad 的空白、内容占其余宽度（通信录列表行的文字要
+// 从左侧缩进一点点，与右侧的按钮留白对称）。
+type padLeftLayout struct{ pad float32 }
+
+func (l padLeftLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	m := objs[0].MinSize()
+	return fyne.NewSize(m.Width+l.pad, m.Height)
+}
+
+func (l padLeftLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	o := objs[0]
+	w := size.Width - l.pad
+	if w < 0 {
+		w = 0
+	}
+	o.Resize(fyne.NewSize(w, size.Height))
+	o.Move(fyne.NewPos(l.pad, 0))
 }
 
 // padRightLayout 对象靠左（纵向居中），右侧留出 pad 的空白；MinSize 也把
@@ -108,31 +152,40 @@ func (l padRightLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	o.Move(fyne.NewPos(0, (size.Height-m.Height)/2))
 }
 
-// markAfterLayout 一行文本 + 紧跟其后的小标记（如视频通话的摄像头图标），
-// 整体靠左。文本放得下时按**自身宽度**收窄，标记就紧贴在文字右边；放不下时
-// 文本按可用宽度截断，标记始终可见。
+// markAfterLayout 一行文本 + 紧跟其后的一串小标记（如常用 ★ 与视频通话的
+// 摄像头图标），整体靠左。文本放得下时按**自身宽度**收窄，标记紧贴在文字右边；
+// 放不下时文本按可用宽度截断，标记始终可见（一个都不能被挤掉）。
+//
+// 早期只支持一个标记，通信录要「名称 + ★ + 摄像头」所以改成任意个。
 type markAfterLayout struct{ gap float32 }
 
+// marksWidth 可见标记的总宽（含各自前面的间距）。
+func (l markAfterLayout) marksWidth(objs []fyne.CanvasObject) float32 {
+	var w float32
+	for _, o := range objs[1:] {
+		if !o.Visible() {
+			continue
+		}
+		w += l.gap + o.MinSize().Width
+	}
+	return w
+}
+
 func (l markAfterLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
-	text, mark := objs[0], objs[1]
+	text := objs[0]
 	m := text.MinSize()
-	size := fyne.NewSize(m.Width, m.Height)
-	if mark.Visible() {
-		mm := mark.MinSize()
-		size.Width += l.gap + mm.Width
-		size.Height = fyne.Max(size.Height, mm.Height)
+	size := fyne.NewSize(m.Width+l.marksWidth(objs), m.Height)
+	for _, o := range objs[1:] {
+		if o.Visible() {
+			size.Height = fyne.Max(size.Height, o.MinSize().Height)
+		}
 	}
 	return size
 }
 
 func (l markAfterLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
-	text, mark := objs[0], objs[1]
-	markW := float32(0)
-	if mark.Visible() {
-		mm := mark.MinSize()
-		markW = mm.Width + l.gap
-		mark.Resize(mm)
-	}
+	text := objs[0]
+	markW := l.marksWidth(objs)
 	tw := naturalWidth(text)
 	if tw > size.Width-markW {
 		tw = size.Width - markW
@@ -142,9 +195,111 @@ func (l markAfterLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	}
 	text.Resize(fyne.NewSize(tw, size.Height))
 	text.Move(fyne.NewPos(0, 0))
-	if mark.Visible() {
-		mm := mark.MinSize()
-		mark.Move(fyne.NewPos(tw+l.gap, (size.Height-mm.Height)/2))
+	x := tw
+	for _, o := range objs[1:] {
+		if !o.Visible() {
+			continue
+		}
+		m := o.MinSize()
+		o.Resize(m)
+		o.Move(fyne.NewPos(x+l.gap, (size.Height-m.Height)/2))
+		x += l.gap + m.Width
+	}
+}
+
+// fixedRowsLayout 固定行高的纵向排列（通话记录页与通信录页共用）：
+// 每行都拿到整行宽与固定高度，行距 0（行距与分割线由行内部留）。
+type fixedRowsLayout struct{ rowHeight float32 }
+
+func (l fixedRowsLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	n := 0
+	for _, o := range objs {
+		if o.Visible() {
+			n++
+		}
+	}
+	return fyne.NewSize(0, float32(n)*l.rowHeight)
+}
+
+func (l fixedRowsLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	y := float32(0)
+	for _, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		o.Resize(fyne.NewSize(size.Width, l.rowHeight))
+		o.Move(fyne.NewPos(0, y))
+		y += l.rowHeight
+	}
+}
+
+// fixedRowLayout 紧凑列表行：底色铺满，内容占上方（下方留出 gap + sep），
+// 分割线贴底。**不用 container.NewBorder 拼**——borderLayout 会在中间与底部
+// 之间额外加 theme.Padding()，行距就不是指定的值了（见 CLAUDE.md 的 vPad 条）。
+type fixedRowLayout struct{ gap, sep float32 }
+
+func (l fixedRowLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	m := objs[1].MinSize()
+	return fyne.NewSize(m.Width, m.Height+l.gap+l.sep)
+}
+
+func (l fixedRowLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	contentH := size.Height - l.gap - l.sep
+	bg, content, sep := objs[0], objs[1], objs[2]
+	bg.Resize(size)
+	bg.Move(fyne.NewPos(0, 0))
+	content.Resize(fyne.NewSize(size.Width, contentH))
+	content.Move(fyne.NewPos(0, 0))
+	sep.Resize(fyne.NewSize(size.Width, l.sep))
+	sep.Move(fyne.NewPos(0, contentH+l.gap))
+}
+
+// nameNoteLayout 通信录行的第二行：名称 + 备注。名称优先拿自然宽度
+// （最多占整行 maxRatio），剩下的宽度给备注，放不下就各自截断（plainText 负责
+// 补省略号）——备注再长也不会把名称挤没，也不会画到相邻控件上。
+type nameNoteLayout struct {
+	gap      float32
+	maxRatio float32 // 名称最多占整行宽的比例（0 = 不限）
+}
+
+func (l nameNoteLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	name, note := objs[0], objs[1]
+	m := name.MinSize()
+	size := fyne.NewSize(m.Width, m.Height)
+	if note.Visible() {
+		nm := note.MinSize()
+		size.Width += l.gap + nm.Width
+		size.Height = fyne.Max(size.Height, nm.Height)
+	}
+	return size
+}
+
+func (l nameNoteLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	name, note := objs[0], objs[1]
+	noteGap := float32(0)
+	if note.Visible() {
+		noteGap = l.gap
+	}
+	limit := size.Width - noteGap
+	if l.maxRatio > 0 && limit > size.Width*l.maxRatio {
+		limit = size.Width * l.maxRatio
+	}
+	nw := naturalWidth(name)
+	if nw > limit {
+		nw = limit
+	}
+	if nw < 0 {
+		nw = 0
+	}
+	name.Resize(fyne.NewSize(nw, size.Height))
+	name.Move(fyne.NewPos(0, 0))
+	if note.Visible() {
+		rest := size.Width - nw - noteGap
+		if rest < 0 {
+			rest = 0
+		}
+		note.Resize(fyne.NewSize(rest, size.Height))
+		note.Move(fyne.NewPos(nw+noteGap, 0))
 	}
 }
 

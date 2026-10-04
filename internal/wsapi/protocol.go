@@ -29,12 +29,13 @@ type Error struct {
 
 // 错误码定义。
 const (
-	CodeUnknownMethod  = "unknown_method"   // 未知方法
-	CodeInvalidParams  = "invalid_params"   // 参数缺失或非法
-	CodeNotReady       = "not_ready"        // 电话能力尚未接入
-	CodeCallNotFound   = "call_not_found"   // 通话不存在
-	CodeInternal       = "internal"         // 内部错误
-	CodeUpdateNotNewer = "update_not_newer" // 告知的版本不高于当前版本
+	CodeUnknownMethod  = "unknown_method"       // 未知方法
+	CodeInvalidParams  = "invalid_params"       // 参数缺失或非法
+	CodeNotReady       = "not_ready"            // 电话能力尚未接入
+	CodeCallNotFound   = "call_not_found"       // 通话不存在
+	CodeInternal       = "internal"             // 内部错误
+	CodeUpdateNotNewer = "update_not_newer"     // 告知的版本不高于当前版本
+	CodeContactsFailed = "contacts_unavailable" // 通信录不可用（数据库未接入/打开失败）
 )
 
 // 请求方法名。
@@ -54,6 +55,8 @@ const (
 	MethodVideoSubscribe    = "video.subscribe"      // 订阅视频画面（REQ-VIDEO-009）
 	MethodVideoUnsubscribe  = "video.unsubscribe"    // 退订视频画面
 	MethodVideoSetTransform = "video.setTransform"   // 画面旋转/水平镜像（REQ-VIDEO-012）
+	MethodContactExport     = "contact.export"       // 导出通信录 CSV（REQ-WS-015）
+	MethodContactImport     = "contact.import"       // 导入通信录 CSV（REQ-WS-015）
 )
 
 // 事件名。

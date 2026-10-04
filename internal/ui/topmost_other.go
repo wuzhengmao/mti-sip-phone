@@ -9,7 +9,7 @@ import "fyne.io/fyne/v2"
 
 const (
 	callPanelWidth      = 260
-	callPanelHeight     = 140
+	callPanelHeight     = 144
 	callPanelButtonSize = 36
 )
 

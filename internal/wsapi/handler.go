@@ -268,6 +268,40 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		}
 		resp = okMessage(msg.ID, st)
 
+	case MethodContactExport:
+		// 导出通信录 CSV（REQ-WS-015）：网页端一键下载，不做增删改查
+		csv, err := s.app.ExportContactsCSV()
+		if err != nil {
+			resp = errMessage(msg.ID, codeOf(err), err)
+			break
+		}
+		resp = okMessage(msg.ID, map[string]any{
+			"csv":   csv,
+			"count": s.app.ContactCount(),
+		})
+
+	case MethodContactImport:
+		// 导入通信录 CSV（REQ-WS-015）：按号码去重，已存在的只覆盖号码/名称/备注，
+		// **不覆盖常用标志**（与桌面端导入同一份实现，见 core.ImportContactsCSV）
+		var p struct {
+			CSV string `json:"csv"`
+		}
+		if err := json.Unmarshal(msg.Params, &p); err != nil || p.CSV == "" {
+			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 csv"))
+			break
+		}
+		res, err := s.app.ImportContactsCSV(p.CSV)
+		if err != nil {
+			resp = errMessage(msg.ID, codeOf(err), err)
+			break
+		}
+		resp = okMessage(msg.ID, map[string]any{
+			"added":   res.Added,
+			"updated": res.Updated,
+			"skipped": res.Skipped,
+			"total":   s.app.ContactCount(),
+		})
+
 	case MethodGetState:
 		resp = okMessage(msg.ID, s.app.State())
 
@@ -347,6 +381,10 @@ func codeOf(err error) string {
 	case errors.Is(err, core.ErrUpdateNotNewer):
 		return CodeUpdateNotNewer
 	case errors.Is(err, core.ErrUpdateInvalid):
+		return CodeInvalidParams
+	case errors.Is(err, core.ErrContactsUnavailable):
+		return CodeContactsFailed
+	case errors.Is(err, core.ErrContactNumberExists), errors.Is(err, core.ErrContactNumberEmpty):
 		return CodeInvalidParams
 	case errors.Is(err, core.ErrUpdateInProgress):
 		return CodeInternal

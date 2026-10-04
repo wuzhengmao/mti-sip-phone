@@ -29,13 +29,21 @@ func missedNotificationText(c *core.Call, ringFor time.Duration) (title, body st
 	if c == nil {
 		return title, ""
 	}
-	// 主叫：有显示名且与号码不同时用「显示名（号码）」，号码始终可见
+	// 主叫：通信录名称优先（REQ-UI-037；通话事件里的 contact 由核心层填好），
+	// 其次「显示名（号码）」——号码始终可见
+	name := ""
+	if c.Contact != nil {
+		name = c.Contact.Name
+	}
+	if name == "" {
+		name = c.RemoteName
+	}
 	who := c.Remote
-	if c.RemoteName != "" && c.RemoteName != c.Remote {
+	if name != "" && name != c.Remote {
 		if who != "" {
-			who = c.RemoteName + "（" + c.Remote + "）"
+			who = name + "（" + c.Remote + "）"
 		} else {
-			who = c.RemoteName
+			who = name
 		}
 	}
 	if who == "" {

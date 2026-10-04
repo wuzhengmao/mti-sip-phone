@@ -11,6 +11,7 @@ require (
 	github.com/emiago/sipgo v1.6.0
 	github.com/gen2brain/malgo v0.11.26
 	github.com/google/uuid v1.6.0
+	github.com/mozillazg/go-pinyin v0.21.0
 	github.com/pion/mediadevices v0.10.0
 	github.com/pion/rtcp v1.2.18
 	github.com/pion/rtp v1.10.5
@@ -18,6 +19,7 @@ require (
 	github.com/pion/stun v0.6.1
 	github.com/zaf/g711 v1.4.0
 	golang.org/x/sys v0.30.0
+	modernc.org/sqlite v1.34.0
 )
 
 require (
@@ -30,7 +32,6 @@ require (
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.8.0 // indirect
-	modernc.org/sqlite v1.34.0 // indirect
 	modernc.org/strutil v1.2.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 )

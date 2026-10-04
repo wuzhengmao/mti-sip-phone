@@ -285,7 +285,7 @@ import (
 // 一起改，否则两平台观感会分叉。
 const (
 	callPanelWidth      = 260
-	callPanelHeight     = 140
+	callPanelHeight     = 144
 	callPanelButtonSize = 36
 )
 

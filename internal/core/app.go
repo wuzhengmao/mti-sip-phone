@@ -48,6 +48,10 @@ type Call struct {
 	HasVideo bool `json:"hasVideo"`
 	// Video 视频状态快照（未协商成功时为零值）。
 	Video VideoState `json:"video"`
+	// Contact 对端号码在通信录里的条目（命中才有，REQ-UI-037）：网页据此在
+	// 号码旁显示名称与 ★、悬停显示备注。**发布事件时即时解析**（见 publishCall），
+	// 所以通话中改通信录，后续事件的 contact 立刻是新的。
+	Contact *ContactInfo `json:"contact,omitempty"`
 }
 
 // RegisterInfo 注册状态快照。
@@ -80,12 +84,21 @@ var (
 
 // App 应用核心：维护注册与通话状态机，向上层发布事件。
 type App struct {
-	cfg     *config.Config
-	cfgPath string
-	tel     Telephony
-	upd     Updater // 自动更新能力（nil = 未接入）
-	callLog CallLog // 通话记录存储（nil = 不记录，见 calllog.go）
-	bus     *Bus
+	cfg      *config.Config
+	cfgPath  string
+	tel      Telephony
+	upd      Updater      // 自动更新能力（nil = 未接入）
+	callLog  CallLog      // 通话记录存储（nil = 不记录，见 calllog.go）
+	contacts ContactStore // 通信录存储（nil = 不可用，见 contacts.go）
+	bus      *Bus
+
+	// 通信录内存快照（见 contacts.go）：contactMu 护 contactMap / contactList，
+	// 界面线程逐行查找与 WS 事件负载都读它，永不阻塞。
+	// contactWriteMu 串行化"写存储 + 重建快照"（多个写入方并发时快照不会互相覆盖）。
+	contactMu      sync.RWMutex
+	contactWriteMu sync.Mutex
+	contactMap     map[string]Contact // 规范化号码 → 条目
+	contactList    []Contact          // 全量（规范化号码序，结果稳定）
 
 	mu         sync.RWMutex
 	reg        RegisterInfo
@@ -207,9 +220,26 @@ func (a *App) State() State {
 		AutoAnswer: a.autoAnswer,
 	}
 	for _, id := range a.callOrder {
-		st.Calls = append(st.Calls, *a.calls[id])
+		c := *a.calls[id]
+		a.attachContact(&c) // 通信录信息即时解析（通话中改通信录，快照立刻是新的）
+		st.Calls = append(st.Calls, c)
 	}
 	return st
+}
+
+// attachContact 按对端号码补上通信录信息（命中才有；REQ-UI-037）。
+//
+// 只改传入的**副本**，不动 a.calls 里的对象：State/publishCall 是在不同锁下
+// 读通话的，就地写会与其它读路径形成数据竞争。
+func (a *App) attachContact(c *Call) {
+	if c == nil {
+		return
+	}
+	if info, ok := a.LookupContact(c.Remote); ok {
+		c.Contact = &ContactInfo{Name: info.Name, Note: info.Note, Starred: info.Starred}
+		return
+	}
+	c.Contact = nil
 }
 
 // ---------------------------------------------------------------------------
@@ -784,7 +814,9 @@ func (a *App) updateCall(callID string, fn func(*Call)) bool {
 func (a *App) publishCall(event, callID string, extra ...any) {
 	data := map[string]any{"callId": callID}
 	if c := a.getCall(callID); c != nil {
-		data["call"] = *c
+		cc := *c
+		a.attachContact(&cc) // 副本上补通信录信息（REQ-UI-037）
+		data["call"] = cc
 	}
 	// 附加字段：如 terminated 事件的 reason
 	for i := 0; i+1 < len(extra); i += 2 {

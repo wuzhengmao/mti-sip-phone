@@ -170,6 +170,7 @@ func (a *App) showHistory() {
 		a.showInfo("提示", "通话中无法查看通话记录")
 		return
 	}
+	a.hideTip() // 切页时收起备注提示
 	a.mainContent.Objects[0] = a.historyPage
 	a.mainContent.Refresh()
 	a.history.reload()
@@ -363,21 +364,98 @@ func clampInt(v, lo, hi int) int {
 // 删除与回拨
 // ---------------------------------------------------------------------------
 
-// showRowMenu 右键菜单（删除入口，页面上不再有删除按钮）。
+// showRowMenu 右键菜单：**添加到通信录/编辑联系人**（单选时）与删除。
 //
 // 右键**不改变选中状态**（用户要求）：右键的那一行若已在选中集合里，
-// 菜单针对整批选中项；否则只针对这一行。
+// 菜单针对整批选中项；否则只针对这一行。通信录那条只对单行开放（批量加联系人
+// 没有意义）。
 func (st *historyState) showRowMenu(idx int, pos fyne.Position) {
 	ids := st.menuTargets(idx)
 	if len(ids) == 0 {
 		return
 	}
+	var items []*fyne.MenuItem
+	if len(ids) == 1 {
+		if rec, ok := st.recordByID(ids[0]); ok && rec.Remote != "" {
+			number := rec.Remote
+			// 号码已在通信录里：给出「编辑联系人」与「删除联系人」；否则「添加到通信录」。
+			// **不加菜单分隔线**：与通信录页的右键菜单保持同一种观感（用户要求）。
+			if c, exists := st.a.contactFor(number); exists {
+				items = append(items,
+					fyne.NewMenuItem("编辑联系人", func() {
+						if st.a.contacts == nil {
+							return
+						}
+						// 保存后刷新记录页：第一行会显示新加的联系人名称
+						st.a.contacts.showContactDialogFor(number, st.reload)
+					}),
+					fyne.NewMenuItem("删除联系人", func() { st.confirmDeleteContact(number, c) }),
+				)
+			} else {
+				items = append(items, fyne.NewMenuItem("添加到通信录", func() {
+					if st.a.contacts == nil {
+						return
+					}
+					st.a.contacts.showContactDialogFor(number, st.reload)
+				}))
+			}
+		}
+	}
 	label := "删除这条记录"
 	if len(ids) > 1 {
 		label = fmt.Sprintf("删除选中的 %d 条记录", len(ids))
 	}
-	menu := fyne.NewMenu("", fyne.NewMenuItem(label, func() { st.confirmDelete(ids) }))
+	items = append(items, fyne.NewMenuItem(label, func() { st.confirmDelete(ids) }))
+	menu := fyne.NewMenu("", items...)
 	widget.NewPopUpMenu(menu, st.a.mainW.Canvas()).ShowAtPosition(pos)
+}
+
+// confirmDeleteContact 从通信录里删掉这个号码（二次确认）。
+func (st *historyState) confirmDeleteContact(number string, c core.Contact) {
+	name := c.Name
+	if name == "" {
+		name = number
+	}
+	st.a.showConfirmIn(st.a.mainW, "删除联系人",
+		fmt.Sprintf("从通信录中删除「%s」？此操作不可恢复。", name), func(ok bool) {
+			if !ok || st.a.core == nil {
+				return
+			}
+			go func() {
+				_, err := st.a.core.DeleteContacts([]string{number})
+				fyne.Do(func() {
+					if err != nil {
+						st.a.showErrorIn(st.a.mainW, err)
+						return
+					}
+					st.reload() // 记录行上的联系人名称要跟着消失
+				})
+			}()
+		})
+}
+
+// ensureSelection 右键时调整选中：该行没被选中就**先单选它**（清掉其它选中），
+// 已选中则保持原选中集合不变（用户要求；与资源管理器的右键语义一致）。
+func (st *historyState) ensureSelection(idx int) {
+	if idx < 0 || idx >= len(st.rows) {
+		return
+	}
+	id := st.rows[idx].CallID
+	if st.sel[id] {
+		return
+	}
+	st.sel = map[string]bool{id: true}
+	st.refreshSelection()
+}
+
+// recordByID 按 call_id 取当前列表里的记录（右键菜单用）。
+func (st *historyState) recordByID(callID string) (core.CallRecord, bool) {
+	for _, r := range st.rows {
+		if r.CallID == callID {
+			return r, true
+		}
+	}
+	return core.CallRecord{}, false
 }
 
 // menuTargets 右键要删的记录：右键的那一行若在选中集合里就针对整批选中项，
@@ -487,7 +565,7 @@ type historyListView struct {
 
 func newHistoryListView(st *historyState) *historyListView {
 	v := &historyListView{st: st}
-	v.box = container.New(historyRowsLayout{})
+	v.box = container.New(fixedRowsLayout{rowHeight: historyRowHeight})
 	v.ExtendBaseWidget(v)
 	return v
 }
@@ -527,7 +605,9 @@ func (v *historyListView) MouseUp(ev *desktop.MouseEvent) {
 		return
 	}
 	if ev.Button == desktop.MouseButtonSecondary {
-		v.st.showRowMenu(v.st.indexAt(ev.Position.Y), ev.AbsolutePosition)
+		idx := v.st.indexAt(ev.Position.Y)
+		v.st.ensureSelection(idx) // 右键的行没选中时先单选它
+		v.st.showRowMenu(idx, ev.AbsolutePosition)
 		return
 	}
 	v.st.clickSelect(v.st.pressIdx, v.st.pressShift)
@@ -541,25 +621,6 @@ func (v *historyListView) Dragged(ev *fyne.DragEvent) {
 
 // DragEnd 拖动结束。
 func (v *historyListView) DragEnd() { v.st.dragging = false }
-
-// historyRowsLayout 固定行高的纵向排列（行距 0：行距与分割线由行内部留）。
-type historyRowsLayout struct{}
-
-func (historyRowsLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
-	return fyne.NewSize(0, float32(len(objs))*historyRowHeight)
-}
-
-func (historyRowsLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
-	y := float32(0)
-	for _, o := range objs {
-		if !o.Visible() {
-			continue
-		}
-		o.Resize(fyne.NewSize(size.Width, historyRowHeight))
-		o.Move(fyne.NewPos(0, y))
-		y += historyRowHeight
-	}
-}
 
 // ---------------------------------------------------------------------------
 // 行控件
@@ -578,34 +639,23 @@ type historyRow struct {
 	root     *fyne.Container
 }
 
-// historyRowLayout 行内布局：底色铺满，内容占上方（留出 2px 行距 + 1px 分割线），
-// 分割线贴底。
-//
-// 不用 container.NewBorder 拼——borderLayout 会在中间与底部之间**额外**加
-// theme.Padding()，行距就不是指定的 2px 了（同一个坑见 CLAUDE.md 的 vPad 条）。
-type historyRowLayout struct{}
-
-func (historyRowLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
-	return fyne.NewSize(0, historyRowHeight)
-}
-
-func (historyRowLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
-	contentH := size.Height - historyRowGap - historyRowSep
-	bg, content, sep := objs[0], objs[1], objs[2]
-	bg.Resize(size)
-	bg.Move(fyne.NewPos(0, 0))
-	content.Resize(fyne.NewSize(size.Width, contentH))
-	content.Move(fyne.NewPos(0, 0))
-	sep.Resize(fyne.NewSize(size.Width, historyRowSep))
-	sep.Move(fyne.NewPos(0, contentH+historyRowGap))
-}
-
+// newHistoryRow 一条记录行（布局用公共的 fixedRowLayout：底色铺满，内容占上方，
+// 分割线贴底）。
 func newHistoryRow(st *historyState, rec core.CallRecord) *historyRow {
 	a := st.a
 	r := &historyRow{st: st, rec: rec}
 
-	// ---- 第一行：方向图标 + 号码/显示名（+ 视频通话标记）…… 开始时间 ----
-	who := newPlainText(historyWhoText(rec), historyFontMain, theme.ForegroundColor(), false)
+	// ---- 第一行：方向图标 + 号码/显示名（命中通信录时号码后面跟名称与 ★）+
+	// 视频通话标记 …… 开始时间 ----
+	whoText, starred, note := a.historyDisplay(rec)
+	// 有备注时名称可悬停出提示（REQ-UI-037）；没有备注就是普通文本，
+	// 行为与从前完全一致
+	var who fyne.CanvasObject
+	if note != "" {
+		who = newHoverNote(whoText, historyFontMain, note, a.mainTip)
+	} else {
+		who = newPlainText(whoText, historyFontMain, theme.ForegroundColor(), false)
+	}
 	when := newPlainText(historyTimeText(rec.StartedAt, time.Now()), historyFontSmall, theme.ForegroundColor(), false)
 	// 视频通话标记：紧跟号码右边，颜色同文字（主题前景色）
 	var mark fyne.CanvasObject = canvas.NewImageFromResource(nil)
@@ -617,7 +667,8 @@ func newHistoryRow(st *historyState, rec core.CallRecord) *historyRow {
 	} else {
 		mark.Hide()
 	}
-	whoWithMark := container.New(markAfterLayout{gap: 4}, who, mark)
+	// 顺序：号码/名称 → ★（常用）→ 摄像头（视频通话）
+	whoWithMark := container.New(markAfterLayout{gap: 4}, who, starMark(starred), mark)
 	line1 := container.NewBorder(nil, nil, nil, when, whoWithMark)
 
 	// ---- 第二行：状态 · 时长 …… 呼叫 / 视频呼叫 ----
@@ -649,7 +700,7 @@ func newHistoryRow(st *historyState, rec core.CallRecord) *historyRow {
 	r.bg = canvas.NewRectangle(color.Transparent)
 	sep := canvas.NewRectangle(historySeparatorColor())
 	sep.SetMinSize(fyne.NewSize(1, historyRowSep))
-	r.root = container.New(historyRowLayout{}, r.bg, content, sep)
+	r.root = container.New(fixedRowLayout{gap: historyRowGap, sep: historyRowSep}, r.bg, content, sep)
 
 	r.ExtendBaseWidget(r)
 	return r
@@ -760,6 +811,33 @@ func historyMetaText(r core.CallRecord) string {
 	}
 	return strings.Join(parts, " · ")
 }
+
+// historyDisplay 记录行的对端展示（REQ-UI-037）：命中通信录时**号码在前、
+// 名称在后**（用户要求"电话号码右边显示通信录上的名称"），并带回是否常用（★）
+// 与备注（悬停提示）；未命中沿用原来的「显示名（号码）」。
+func (a *App) historyDisplay(rec core.CallRecord) (text string, starred bool, note string) {
+	c, ok := a.contactFor(rec.Remote)
+	if !ok {
+		return historyWhoText(rec), false, ""
+	}
+	name := c.Name
+	if name == "" {
+		name = rec.RemoteName
+	}
+	switch {
+	case name == "" || name == rec.Remote:
+		text = rec.Remote
+	case rec.Remote == "":
+		text = name
+	default:
+		text = rec.Remote + " " + name
+	}
+	return sanitizeNotifyText(text, historyWhoMax), c.Starred, sanitizeNotifyText(c.Note, contactNoteMax)
+}
+
+// contactNoteMax 悬停提示里备注的最大长度（rune）：提示框放不下太长的文字，
+// 截断由 plainText 按宽度做，这里先挡一道超长文本。
+const contactNoteMax = 200
 
 // historyWhoText 对端展示名：显示名（号码），只有其一（或相同）时用其一。
 func historyWhoText(r core.CallRecord) string {
