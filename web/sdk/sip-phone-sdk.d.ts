@@ -198,6 +198,8 @@ declare class SipPhoneSDK {
    *   });
    *
    * 参数越界会被软电话钳制到合法范围，返回值里是生效值。
+   * **视频通话被关闭时订阅失败**（软电话配置里未勾选「启用视频通话」），
+   * Promise 以 `code === 'video_unsupported'` 的错误 reject。
    */
   subscribeVideo(options: SipVideoSubscribeOptions): Promise<SipVideoSubscription>;
 

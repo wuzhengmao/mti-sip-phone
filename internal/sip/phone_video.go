@@ -35,19 +35,47 @@ func (p *Phone) videoConfig() config.VideoConfig {
 	return p.videoCfg
 }
 
-// cameraUsable 摄像头是否可用于发送本地视频（构建支持 + 未被禁用）。
+// cameraUsable 摄像头是否可用于发送本地视频（总开关 + 构建支持 + 未被禁用）。
 func (p *Phone) cameraUsable() bool {
-	// 三道门：本构建有视频能力、**本平台有摄像头后端**（Windows 386 没有，
-	// 见 video.CameraSupported）、配置里没禁用摄像头。
-	return p.VideoSupported() && video.CameraSupported() && p.videoConfig().CameraUsable()
+	// 三道门：视频功能可用（总开关 + 构建支持）、**本平台有摄像头后端**
+	//（Windows 386 没有，见 video.CameraSupported）、配置里没禁用摄像头。
+	return p.videoUsable() && video.CameraSupported() && p.videoConfig().CameraUsable()
 }
 
 // CameraSupported 本构建/平台是否有摄像头采集能力（供界面区分"没插摄像头"
 // 与"这个版本压根不支持摄像头"）。
 func (p *Phone) CameraSupported() bool { return video.CameraSupported() }
 
-// VideoSupported 当前构建是否具备视频能力。
+// VideoSupported 本构建/平台是否**具备**视频能力（编译期决定，与用户的
+// 「启用视频通话」开关无关）。
 func (p *Phone) VideoSupported() bool { return video.Supported() }
+
+// VideoCallEnabled 用户是否启用了视频通话（配置总开关，默认启用，REQ-VIDEO-014）。
+func (p *Phone) VideoCallEnabled() bool { return p.videoConfig().Enabled() }
+
+// SetVideoCallEnabled 开/关视频通话总开关（配置页勾选项，立即生效）。
+// 只影响之后发起的呼叫与之后的来电：正在进行的通话里已经协商好的视频段不动
+//（关掉视频开关时界面在主窗体上，而主窗体在通话期间是隐藏的，实际碰不到）。
+func (p *Phone) SetVideoCallEnabled(on bool) error {
+	p.videoMu.Lock()
+	p.videoCfg.Disabled = !on
+	p.videoMu.Unlock()
+	logx.Logger().Info("视频通话总开关已切换", "enabled", on)
+	return nil
+}
+
+// videoUsable 视频功能整体是否可用（构建支持 + 总开关启用）。
+// 关闭后：SDP 不含 m=video、来电不上报视频、界面隐藏全部视频入口。
+func (p *Phone) videoUsable() bool { return p.VideoSupported() && p.VideoCallEnabled() }
+
+// videoUnavailableErr 视频不可用时的错误（区分"这个版本没有视频"与
+// "用户把视频关掉了"——网页/界面提示的文案不同）。
+func (p *Phone) videoUnavailableErr() error {
+	if !p.VideoSupported() {
+		return core.ErrVideoUnsupported
+	}
+	return core.ErrVideoDisabled
+}
 
 // SetCamera 选择摄像头（REQ-VIDEO-002/005）。
 // deviceID 为空 = 系统默认；config.CameraDisabled = 禁用。
@@ -195,6 +223,9 @@ func (m answerMode) String() string {
 
 // AnswerVideo 视频接听：打开摄像头，双向视频（REQ-VIDEO-004）。
 func (p *Phone) AnswerVideo(callID string) error {
+	if !p.videoUsable() {
+		return p.videoUnavailableErr()
+	}
 	return p.answerIncoming(callID, answerSendRecv)
 }
 

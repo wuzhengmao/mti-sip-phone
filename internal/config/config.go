@@ -63,6 +63,13 @@ const CameraDisabled = "disabled"
 
 // VideoConfig 视频配置。
 type VideoConfig struct {
+	// Disabled 关闭「启用视频通话」总开关（REQ-VIDEO-014，默认 false = 启用）。
+	//
+	// 这里用**反向字段**而不是 Enabled：零值必须等于"启用"——旧配置没有该
+	// 字段、沙箱实例的空白配置、任何 VideoConfig{} 字面量都不该把视频关掉
+	//（与 core.Call.micGain 的「0 有专有含义」是同一类坑）。
+	Disabled bool `json:"disabled"`
+
 	// CameraID 摄像头设备 ID；空 = 系统默认设备；CameraDisabled = 禁用。
 	// Windows 侧驱动 ID 每次启动都可能变化，同时保存 CameraName 做兜底匹配。
 	CameraID    string `json:"cameraId"`
@@ -73,8 +80,11 @@ type VideoConfig struct {
 	BitrateKbps int    `json:"bitrateKbps"` // 码率（kbps），默认 512
 }
 
-// CameraUsable 摄像头是否可用（未被禁用）。
-func (v VideoConfig) CameraUsable() bool { return v.CameraID != CameraDisabled }
+// Enabled 视频通话功能是否启用（总开关，默认启用，REQ-VIDEO-014）。
+func (v VideoConfig) Enabled() bool { return !v.Disabled }
+
+// CameraUsable 摄像头是否可用（总开关启用且未被禁用）。
+func (v VideoConfig) CameraUsable() bool { return v.Enabled() && v.CameraID != CameraDisabled }
 
 // UIConfig 界面配置。
 type UIConfig struct {

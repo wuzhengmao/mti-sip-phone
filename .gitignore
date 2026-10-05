@@ -16,7 +16,7 @@ config.json
 # 调试抓包产物
 rtp_rx.wav
 
-# 编解码静态库（由 scripts/build-video-libs.* / scripts/build-audio-lib.* 生成，体积大不入库）
+# 编解码静态库（由 scripts/build-video-libs.* / scripts/build-audio-libs.* 生成，体积大不入库）
 third_party/src/
 third_party/video/
 third_party/audio/

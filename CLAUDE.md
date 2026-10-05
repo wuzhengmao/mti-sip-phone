@@ -17,7 +17,7 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 | 领域 | 选型 | 说明 |
 | --- | --- | --- |
 | SIP 信令 | github.com/emiago/sipgo v1.6.0 | UDP/TCP，DialogClientSession / DialogServerSession |
-| 媒体 | pion/rtp、pion/rtcp、pion/sdp/v3、pion/stun、github.com/zaf/g711、libopus（cgo） | RTCP 为 v1.2.x 新 API（CompoundPacket/Goodbye，非旧版 Bye）；音频扩展编解码（Opus）由 `-tags audio` 启用，静态库见下 |
+| 媒体 | pion/rtp、pion/rtcp、pion/sdp/v3、pion/stun、github.com/zaf/g711、libopus（cgo） | RTCP 为 v1.2.x 新 API（CompoundPacket/Goodbye，非旧版 Bye）；音频扩展编解码里 **G.722 是纯 Go**（`internal/media/g722`，任何构建都带），Opus 由 `-tags audio` 启用（cgo 静态库，见下） |
 | 音频设备 | github.com/gen2brain/malgo v0.11.26 | miniaudio 绑定，**CGO**；`-tags noaudio` 切空后端（纯 Go 构建/测试） |
 | GUI | fyne.io/fyne/v2 v2.8.1 | 要求 UI 运行在主线程 |
 | WebSocket | github.com/coder/websocket | 仅监听 127.0.0.1，无 token 鉴权 |
@@ -48,7 +48,7 @@ build.bat
 export CC="<WinLibs mingw64/bin/gcc.exe 路径>"   # build.bat 输出里可见
 export CGO_ENABLED=1
 go test ./internal/media/ ./internal/wsapi/ ./internal/sip/ ./internal/ui/ ./internal/updater/
-# 带 Opus 的包还要 -tags audio（需先跑 scripts/build-audio-lib.bat 生成静态库，
+# 带 Opus 的包还要 -tags audio（需先跑 scripts/build-audio-libs.bat 生成静态库，
 # 并把 third_party/audio/<目标>/{include,lib} 经 CGO_CFLAGS/CGO_LDFLAGS 传入）：
 go test -tags audio ./internal/media/
 
@@ -145,7 +145,8 @@ internal/
               写操作由 core 串行"写库 + 重建内存快照"，导入时常用标志只增不减）
   sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理；
               netwatch.go 为注册看护：休眠唤醒/网络切换后立即重新注册，REQ-CALL-009）
-  media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus 编解码、播放环形缓冲、SDP 协商
+  media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus/G.722 编解码、播放环形缓冲、SDP 协商
+  media/g722/  G.722 纯 Go 算法（QMF + 双子带自适应 ADPCM；golden 向量在 testdata/）
   audio/      音频设备：malgo 后端（全双工采集/播放、设备枚举/选择、提示音）
   wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳、网页视频订阅 video.go）
   updater/    自动更新：前端经 WS 告知新版本 → 用户确认后下载（sha256/
@@ -168,7 +169,7 @@ web/
               notifyUpdate，查询在软电话侧）
 release/      发布到更新站点的配置与元数据：release.conf（站点/应用 ID/令牌）、
               app.json（应用级元数据，经站点 metadata 接口写入）、icon.svg（图标，经 icon 接口写入）
-scripts/      第三方库构建（build-video-libs.*、build-audio-lib.*）与一键发布（release.sh/.bat）
+scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）与一键发布（release.sh/.bat）
 docs/         design.md（架构设计：分层与依赖、各模块职责、关键决策、目录地图——新同学先看这份）、
               requirements.md（需求）、ws-protocol.md（WS 协议）、auto-update.md（自动更新与
               更新站点接入：规范摘要、REST API、参考实现、接入清单）；changelog.md 在仓库根目录
@@ -220,11 +221,35 @@ FFmpeg 的 configure **刻意不启用 libvpx/libopenh264**（只解码），因
 
 **音频 Opus（`internal/media/codec_opus.go`，cgo + libopus）**：编码用官方 libopus（FFmpeg
 自带的 `ff_opus_encoder` 标着 `AV_CODEC_CAP_EXPERIMENTAL`，官方不认为可用于生产，故不用）。
-静态库由 `scripts/build-audio-lib.sh` / `.bat` 生成到 `third_party/audio/<target>/{include,lib}`
+静态库由 `scripts/build-audio-libs.sh` / `.bat` 生成到 `third_party/audio/<target>/{include,lib}`
 （已 gitignore，音频第三方库的统一入口，以后加 G.722 等也走这里）。配置与视频**完全独立**：
 探测到 `lib/libopus.a` 就加 `-tags audio` 并注入 `CGO_CFLAGS`/`CGO_LDFLAGS`，缺失则降级为
-**无 Opus**（SDP 不宣告，仍走 PCMA/PCMU），两个库都在时标签是 `-tags video,audio`（音频扩展统一用 `audio`，以后加 G.722 等同标签）。
+**无 Opus**（SDP 不宣告，仍走 PCMA/PCMU），两个库都在时标签是 `-tags video,audio`（需要 cgo 静态库的音频扩展统一用 `audio` 标签；**纯 Go 的扩展如 G.722 不进这个标签**）。
 libopus 构建很轻（秒级，无 nasm/pkg-config 依赖，x86 的 SIMD 走编译器 intrinsics）。
+
+**音频 G.722（`internal/media/g722/`，纯 Go）**：ITU-T G.722 模式 1（64 kbit/s、7 kHz 宽频、
+静态 PT 9、**RTP 时钟 8000**）。**纯 Go 实现**——不加 cgo、不占 `-tags audio`、不需要
+`third_party/`，任何构建（含 `-tags noaudio` 的纯 Go 构建）都能用；正确性靠 FFmpeg 参考
+实现一次性生成的 **golden 向量**（`internal/media/g722/testdata/`）钉死：编码逐字节一致、
+解码逐样本一致（生成命令写在 `g722_test.go` 头部，改算法后要重新核对）。
+
+**按需 16 kHz 管线（REQ-MEDIA-011）**：G.722 的 PCM 是 16 kHz，而 G.711/Opus 的管线是
+8 kHz，所以 `Codec` 接口有 `SampleRate()`（**PCM 管线采样率，与 `ClockRate()` 不是一回事**）：
+- 引擎按**当前协商编解码器**的 `SampleRate()` 工作，`Engine.SampleRate()` 是唯一出口；
+  音频设备开流（`backend_malgo` 的 `deviceConfig.SampleRate`）、播放缓冲的深度阈值/容量、
+  诊断 WAV 的头部与上限、深度日志都按它换算——**G.711/Opus 通话恒 8 kHz，行为与历史一字不变**。
+- **G.722 在 `supportedCodecs` 里排在 Opus 之前**（PCMA > PCMU > G.722 > Opus）：对端有 G.711
+  时仍走 G.711（与历史一致），同时给出 G.722 与 Opus 时选 G.722。真机验证：在 FreeSWITCH 侧
+  把该腿 codec 限定为 G.722 打一通，日志应出现 `SDP 协商完成 codec=G722` +
+  `音频流已启动 … 采样率=16000`。
+- **`FrameSize()` = `SampleRate()/50`（20ms），`TimestampStep()` = `ClockRate()/50`**：
+  G.722 是 320 / 160（PCM 帧长是时间戳步长的两倍，与 Opus 的 160 / 960 是同一类"两个率"问题，
+  方向相反）。`TestCodecRateInvariants` 对全部编解码器断言这两条不变量。
+- 协商换速率（183 早期媒体 G.711 → 200 换 G.722、re-INVITE 换编码）时引擎会
+  `ring.SetRate` + 清采集半帧，并经 `SetSampleRateListener` 让 `audio.Manager` 把设备
+  **关流重开**（复用 `restartStream`；速率没变不重开，保持/取消保持不会白断一次音频）。
+- 丢包补静音（不做 PLC，与 G.711 一致）；编解码器是**包级共享实例**，实现了 `resetter`，
+  通话开始/换流/换编码时复位。
 
 **四个目标的可行性**（都是交叉编译，宿主机位数无关）：
 
@@ -581,7 +606,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   `scripts/build-video-libs.sh` 的 `abspath` 同理）；`build.bat` 用 `%CD%` 本来就是
   Windows 形式。手工跑 `go test -tags …` 时同理，别用 `$(pwd)`。
 - **音频静态库：libopus 是 autotools 工程（视频那三个库都不是），构建时要绕开三个坑**，
-  都在 `scripts/build-audio-lib.sh` 里（前两个是 Windows 专有）：
+  都在 `scripts/build-audio-libs.sh` 里（前两个是 Windows 专有）：
   1. **MAKE 传裸命令名 + `--disable-dependency-tracking`**：Makefile 递归调用 `$(MAKE)`，
      Windows 上递归是 CreateProcess 按 **Windows PATH** 查程序名，而 git-bash 里 `make`
      只是 shell 层解析（PATH 里实际只有 `mingw32-make.exe`），直接给 `make` 会报

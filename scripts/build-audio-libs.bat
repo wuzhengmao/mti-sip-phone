@@ -1,13 +1,13 @@
 @echo off
 rem 音频编解码静态库构建入口（Windows）。
-rem 实际逻辑在 build-audio-lib.sh，需要 git-bash：git 安装时自带，
+rem 实际逻辑在 build-audio-libs.sh，需要 git-bash：git 安装时自带，
 rem 或用 WinLibs/MSYS2 的 bash。默认只构建 windows-amd64；
 rem 传 "all" 构建全部四个目标（缺工具链的自动跳过）。
 rem
 rem 用法：
-rem   scripts\build-audio-lib.bat              -> windows-amd64
-rem   scripts\build-audio-lib.bat all          -> 全部目标
-rem   scripts\build-audio-lib.bat --clean windows-amd64
+rem   scripts\build-audio-libs.bat              -> windows-amd64
+rem   scripts\build-audio-libs.bat all          -> 全部目标
+rem   scripts\build-audio-libs.bat --clean windows-amd64
 setlocal
 
 set "BASH="
@@ -22,7 +22,7 @@ for /d %%d in ("%LOCALAPPDATA%\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.P
     if exist "%%d\mingw64\bin\gcc.exe" set "PATH=%%d\mingw64\bin;%PATH%"
 )
 
-set "SCRIPT=%~dp0build-audio-lib.sh"
+set "SCRIPT=%~dp0build-audio-libs.sh"
 "%BASH%" -lc "exec \"$(cygpath -u '%SCRIPT%' 2>/dev/null || echo '%SCRIPT%')\" %*"
 if errorlevel 1 goto :err
 exit /b 0

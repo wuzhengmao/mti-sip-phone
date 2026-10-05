@@ -455,6 +455,12 @@ func (p *Phone) dial(ctx context.Context, target string, withVideo bool) (string
 		return "", fmt.Errorf("未配置 SIP 账户")
 	}
 
+	// 视频呼叫但视频功能不可用（本构建没有视频 / 总开关关闭，REQ-VIDEO-014）：
+	// 直接失败——不建媒体引擎、不发 INVITE。
+	if withVideo && !p.videoUsable() {
+		return "", p.videoUnavailableErr()
+	}
+
 	// 目标处理：号码 → sip:号码@服务器；sip: URI 原样使用
 	recipient, err := parseTarget(target, acc)
 	if err != nil {
@@ -480,13 +486,9 @@ func (p *Phone) dial(ctx context.Context, target string, withVideo bool) (string
 		cancel: cancel,
 	}
 
-	// 视频：仅当本构建有视频能力且本次是视频呼叫时创建视频引擎
+	// 视频：仅当视频功能可用（构建支持 + 总开关启用，前面已校验）且本次是
+	// 视频呼叫时创建视频引擎——cs.video 为 nil 时 offer 里没有 m=video。
 	if withVideo {
-		if !p.VideoSupported() {
-			cancel()
-			engine.Close()
-			return "", core.ErrVideoUnsupported
-		}
 		v, err := media.NewVideoEngine(p.localIP())
 		if err != nil {
 			cancel()
@@ -1397,8 +1399,11 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 
 	// 视频（REQ-VIDEO-004）：解析对端 offer 的视频段并准备好视频引擎，
 	// 但**先不启动**——接听时才根据用户点的按钮决定视频段方向。
+	// 视频功能不可用（本构建没有 / 总开关关闭，REQ-VIDEO-014）时整个跳过：
+	// cs.offer 保持 nil，offer 里的视频段就当我们不认识，answer 自然只回
+	// m=audio（与"没启用视频的构建"逐字节一致），来电也不会显示「视频接听」。
 	hasVideo := false
-	if body := req.Body(); len(body) > 0 && p.VideoSupported() {
+	if body := req.Body(); len(body) > 0 && p.videoUsable() {
 		if offer, err := media.ParseSDP(body); err == nil {
 			cs.offer = offer
 			if info, mErr := offer.Media("video"); mErr == nil && !info.Rejected {

@@ -106,7 +106,7 @@ exit /b 1
 rem ---------------------------------------------------------------
 rem Codec static libraries, built once by the matching script:
 rem   third_party\video\<target>  <- scripts\build-video-libs.bat  -> -tags video
-rem   third_party\audio\<target>  <- scripts\build-audio-lib.bat   -> -tags audio
+rem   third_party\audio\<target>  <- scripts\build-audio-libs.bat  -> -tags audio
 rem Both are independent: a missing one only disables that feature
 rem (build without video / without Opus, which just drops it from SDP).
 rem The go compiler reads the include/lib paths from the Go environment,
@@ -180,9 +180,9 @@ set "BUILD_TAGS=audio"
 goto :eof
 :audio_none
 echo       hint: third_party\audio\%~1 not found, building without Opus
-echo             run scripts\build-audio-lib.bat once to enable it
+echo             run scripts\build-audio-libs.bat once to enable it
 goto :eof
 :audio_incomplete
 echo       hint: third_party\audio\%~1 is incomplete (libopus.a is missing),
-echo             building without Opus - re-run scripts\build-audio-lib.bat
+echo             building without Opus - re-run scripts\build-audio-libs.bat
 goto :eof

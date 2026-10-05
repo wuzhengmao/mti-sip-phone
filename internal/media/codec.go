@@ -17,9 +17,18 @@ type Codec interface {
 	Name() string
 	// PayloadType RTP 负载类型号（PCMU=0，PCMA=8，opus=96）
 	PayloadType() uint8
-	// ClockRate RTP 时钟率（G.711 = 8000，Opus = 48000）
+	// ClockRate RTP 时钟率（G.711 = 8000，Opus = 48000，G.722 = 8000）
 	ClockRate() int
-	// FrameSize 每帧 PCM 样本数（内部管线恒为 8kHz：20ms = 160）
+	// SampleRate 本编解码器要求的 **PCM 管线采样率**（Hz）。**与 ClockRate 不是
+	// 一回事**：G.722 的 RTP 时钟是 8000 而 PCM 是 16000；Opus 的 RTP 时钟是
+	// 48000 而本端 PCM 是 8000（它以 Fs=8000 创建、窄带工作）。
+	//
+	// 媒体引擎、音频设备、播放缓冲与诊断 WAV 都按**当前协商编解码器的**
+	// SampleRate 工作：G.711 / Opus 通话恒为 8 kHz（与历史行为一字不变），
+	// 协商到 G.722 的通话整条管线切到 16 kHz（REQ-MEDIA-011）。
+	SampleRate() int
+	// FrameSize 每帧 PCM 样本数 = SampleRate()/50（20ms 帧）：
+	// G.711/Opus 160（8kHz）、G.722 320（16kHz）
 	FrameSize() int
 	// TimestampStep 每帧的 RTP 时间戳增量（时钟率单位；20ms 帧 = ClockRate/50）。
 	// **不等于 FrameSize**：Opus 的 PCM 帧长是 160（8kHz 管线）而时间戳步长
@@ -55,7 +64,10 @@ type g711Codec struct {
 func (c *g711Codec) Name() string       { return c.name }
 func (c *g711Codec) PayloadType() uint8 { return c.pt }
 func (c *g711Codec) ClockRate() int     { return 8000 }
-func (c *g711Codec) FrameSize() int     { return 160 } // 20ms @ 8kHz
+
+// SampleRate G.711 是 8 kHz 窄带：RTP 时钟与 PCM 采样率相同。
+func (c *g711Codec) SampleRate() int { return 8000 }
+func (c *g711Codec) FrameSize() int  { return 160 } // 20ms @ 8kHz
 // TimestampStep G.711 的 PCM 帧长与 RTP 时间戳步长同为 160（20ms @ 8kHz）。
 func (c *g711Codec) TimestampStep() int { return 160 }
 

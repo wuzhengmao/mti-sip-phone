@@ -1,6 +1,7 @@
 package media
 
 import (
+	"math"
 	"net"
 	"testing"
 
@@ -219,4 +220,30 @@ func TestBindRTPRTCPEvenPort(t *testing.T) {
 			t.Fatalf("RTCP 端口应为 RTP+1，实际 %d（RTP %d）", p2, p1)
 		}
 	}
+}
+
+// rms 信号均方根（能量比较用，避免逐样本比对编解码时延）。
+func rms(pcm []int16) float64 {
+	if len(pcm) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, s := range pcm {
+		sum += float64(s) * float64(s)
+	}
+	return math.Sqrt(sum / float64(len(pcm)))
+}
+
+// codecByName 按名字取 supportedCodecs 里的编解码器。
+// **不要用 supportedCodecs[len-1] 找 Opus**：G.722 排在 Opus 之后
+// （见 engine.go 的 supportedCodecs 注释），最后一项不是 Opus。
+func codecByName(t *testing.T, name string) Codec {
+	t.Helper()
+	for _, c := range supportedCodecs {
+		if c.Name() == name {
+			return c
+		}
+	}
+	t.Fatalf("supportedCodecs 里没有 %s", name)
+	return nil
 }

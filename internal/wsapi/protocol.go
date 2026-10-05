@@ -36,6 +36,9 @@ const (
 	CodeInternal       = "internal"             // 内部错误
 	CodeUpdateNotNewer = "update_not_newer"     // 告知的版本不高于当前版本
 	CodeContactsFailed = "contacts_unavailable" // 通信录不可用（数据库未接入/打开失败）
+	// CodeVideoUnsupported 视频功能不可用（本构建没有视频 / 用户关闭了
+	// 「启用视频通话」总开关，REQ-VIDEO-014）。
+	CodeVideoUnsupported = "video_unsupported"
 )
 
 // 请求方法名。

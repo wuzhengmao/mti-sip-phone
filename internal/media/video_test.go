@@ -44,8 +44,9 @@ func TestLocalFramesWanted(t *testing.T) {
 // --- SDP：音频行为回归 + 视频扩展 ---
 
 // TestSDPOfferAudioGolden 纯音频 offer 的逐字节回归。
-// 需求 1：音频编解码优先级必须是 PCMA(8) 在 PCMU(0) 之前；Opus 排在最后
-// （固定 PT 96），telephone-event(101) 恒在末尾。
+// 需求 1：音频编解码优先级必须是 PCMA(8) 在 PCMU(0) 之前；G.722(9) 排在
+// Opus(96) 之前（宽频优先，见 supportedCodecs），telephone-event(101) 恒在末尾。
+// G.722 是纯 Go 实现、任何构建都有；Opus 只有 -tags audio 的构建才有。
 func TestSDPOfferAudioGolden(t *testing.T) {
 	e := newTestEngine(t)
 	e.SetSDPIP("10.0.0.5")
@@ -66,9 +67,12 @@ func TestSDPOfferAudioGolden(t *testing.T) {
 		"s=mti-sip-phone\r\n" +
 		"c=IN IP4 10.0.0.5\r\n" +
 		"t=0 0\r\n" +
-		"m=audio 40000 RTP/AVP 8 0" + opusPT + " 101\r\n" +
+		"m=audio 40000 RTP/AVP 8 0 9" + opusPT + " 101\r\n" +
 		"a=rtpmap:8 PCMA/8000\r\n" +
 		"a=rtpmap:0 PCMU/8000\r\n" +
+		// G.722：RTP 时钟是 8000（不是它的 16 kHz PCM 采样率，RFC 3551）；
+		// 排在 Opus 之前（对端同时给两者时选 G.722）
+		"a=rtpmap:9 G722/8000\r\n" +
 		opusRtpmap +
 		"a=rtpmap:101 telephone-event/8000\r\n" +
 		"a=fmtp:101 0-16\r\n" +

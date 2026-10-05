@@ -677,7 +677,9 @@ func newHistoryRow(st *historyState, rec core.CallRecord) *historyRow {
 		func() { a.onHistoryCall(rec, false) })
 	callBtn.SetCornerRadius(historyRowButtonRadius)
 	actions := container.NewHBox(callBtn)
-	if a.core != nil && a.core.VideoSupported() {
+	// 视频呼叫按钮：视频功能不可用（本构建没有 / 用户在配置里关掉了，
+	// REQ-VIDEO-014）时不显示
+	if a.core != nil && a.core.VideoUsable() {
 		videoBtn := newCompactButton(IconVideoOn, colorHoldBlue, historyRowIconSize,
 			func() { a.onHistoryCall(rec, true) })
 		videoBtn.SetCornerRadius(historyRowButtonRadius)

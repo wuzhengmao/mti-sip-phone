@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +29,8 @@ type stubTel struct {
 
 	mu   sync.Mutex // 记录发给电话层的 DTMF，供测试断言（handler 在自己的 goroutine 里跑）
 	dtmf []string
+
+	videoDisabled atomic.Bool // 「启用视频通话」总开关（默认 false = 启用，REQ-VIDEO-014）
 }
 
 func (s *stubTel) Register(ctx context.Context, acc config.Account) error { return nil }
@@ -77,9 +80,15 @@ func (s *stubTel) AudioDevices() ([]core.AudioDevice, []core.AudioDevice) {
 }
 func (s *stubTel) Close() error { return nil }
 
-// ---- 视频（本桩按「未启用视频的构建」行为实现）----
+// ---- 视频（默认「有视频能力且总开关开启」：订阅视频的测试要用）----
+// 关掉总开关（SetVideoCallEnabled(false)）后可验证 REQ-VIDEO-014 的失败路径。
 
-func (s *stubTel) VideoSupported() bool { return false }
+func (s *stubTel) VideoSupported() bool   { return true }
+func (s *stubTel) VideoCallEnabled() bool { return !s.videoDisabled.Load() }
+func (s *stubTel) SetVideoCallEnabled(on bool) error {
+	s.videoDisabled.Store(!on)
+	return nil
+}
 func (s *stubTel) DialVideo(ctx context.Context, target string) (string, error) {
 	return "", core.ErrVideoUnsupported
 }

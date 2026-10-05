@@ -12,7 +12,7 @@
 # 视频（REQ-VIDEO-*）：先跑一次 scripts/build-video-libs.sh 生成
 #   third_party/video/<target>/{include,lib}（FFmpeg 解码 + libvpx/OpenH264 编码）。
 #   存在则自动加 -tags video，缺失则该目标构建为无视频版本（音频不受影响）。
-# 音频 Opus：先跑一次 scripts/build-audio-lib.sh 生成
+# 音频 Opus：先跑一次 scripts/build-audio-libs.sh 生成
 #   third_party/audio/<target>/{include,lib}（libopus）。存在则自动加 -tags audio，
 #   缺失则该目标不含 Opus（SDP 不宣告，仍走 PCMA/PCMU），与视频互不影响。
 #   两个库都存在时标签为 -tags video,audio。
@@ -140,7 +140,7 @@ EOF
 #
 # third_party/video/<target> 由 scripts/build-video-libs.sh 生成（FFmpeg 解码 +
 # libvpx/OpenH264 编码三件套）；third_party/audio/<target> 由
-# scripts/build-audio-lib.sh 生成（libopus 音频编码）。两者**互相独立**：
+# scripts/build-audio-libs.sh 生成（libopus 音频编码）。两者**互相独立**：
 # 齐全则加对应标签（video / audio），缺失则该目标降级关闭该功能，其余功能
 # 完全不受影响（沿用本脚本「缺失即跳过并提示」的一贯做法）。
 #
@@ -215,7 +215,7 @@ video_setup() {
 
 audio_setup() {
     # $1 = 目标名；音频扩展为独立标签，与视频互不影响
-    if codec_libs_ok "third_party/audio/$1" audio "$AUDIO_LIBS" "build-audio-lib.sh"; then
+    if codec_libs_ok "third_party/audio/$1" audio "$AUDIO_LIBS" "build-audio-libs.sh"; then
         AUDIO_ON=1
     fi
 }
