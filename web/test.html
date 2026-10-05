@@ -189,8 +189,18 @@
         <input type="text" id="uriPassword" placeholder="认证密码">
       </div>
       <div class="row">
+        <!-- 传输协议（REQ-ACC-006）：tls 生成 sips:// 链接（默认端口 5061）；
+             udp/tcp 生成 sip:// 链接（tcp 带 ?transport=tcp） -->
+        <label>传输</label>
+        <select id="uriTransport">
+          <option value="udp" selected>udp</option>
+          <option value="tcp">tcp</option>
+          <option value="tls">tls（sips://）</option>
+        </select>
+      </div>
+      <div class="row">
         <!-- 实例槽位（多实例沙箱，REQ-NFR-007）：0/留空 = 主实例；
-             1–99 = 用独立数据目录的沙箱实例（需在主实例里先开启「允许多实例」） -->
+             1–99 = 用独立数据目录的沙箱实例（没有配置开关，填槽位即可） -->
         <label>实例槽位</label>
         <input type="number" id="uriInstance" min="0" max="99" placeholder="0 = 主实例">
       </div>
@@ -997,21 +1007,28 @@
     var server = $('uriServer').value.trim();
     var account = $('uriAccount').value.trim();
     var password = $('uriPassword').value;
+    var transport = $('uriTransport').value;
     if (!server || !account) { addLog('err', '请输入服务器与账号'); return; }
-    if (server.indexOf(':') < 0) { server += ':5060'; }
-    var uri = 'sip://' + account + ':' + encodeURIComponent(password) + '@' + server;
+    // 端口缺省按传输取：tls → 5061（sips），其余 5060
+    if (server.indexOf(':') < 0) { server += (transport === 'tls' ? ':5061' : ':5060'); }
+    // sips:// 即 TLS 传输（REQ-ACC-006）；tcp 用查询参数指定
+    var uri = (transport === 'tls' ? 'sips://' : 'sip://') +
+      account + ':' + encodeURIComponent(password) + '@' + server;
     // 实例槽位（REQ-NFR-007）：留空/0 = 主实例（不带参数）；1–99 加 ?instance=N，
     // 该实例在跑就把参数转发给它、没跑就用它的独立数据目录启动
     var slot = parseInt($('uriInstance').value, 10);
+    var params = [];
+    if (transport === 'tcp') { params.push('transport=tcp'); }
     if (slot > 0) {
       if (slot > 99) { addLog('err', '实例槽位范围 0–99'); return; }
-      uri += '?instance=' + slot;
+      params.push('instance=' + slot);
     }
+    if (params.length > 0) { uri += '?' + params.join('&'); }
     var link = $('sipLink');
     link.href = uri;
     link.textContent = uri;
     $('uriLine').style.display = '';
-    addLog('info', '已生成拉起链接' + (slot > 0 ? '（实例 ' + slot + '）' : '（主实例）') +
+    addLog('info', '已生成拉起链接' + '（' + transport + (slot > 0 ? '，实例 ' + slot : '，主实例') + '）' +
       '，点击后浏览器会唤起软电话（首次需确认允许）');
   };
 

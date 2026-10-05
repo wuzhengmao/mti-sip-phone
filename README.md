@@ -26,7 +26,7 @@ Linux 上用 mingw-w64 交叉构建（glfw 的 C 源码与 mingw 专用头随 go
 
 ```bash
 # 版本号：构建脚本从 internal/core/buildinfo.go 读基础版本。开发构建自动加 -rc
-# （如 1.0.12-rc，非正式版）；正式版：SIP_PHONE_RELEASE=1 build.bat（发布脚本会设）。
+# （如 1.0.13-rc，非正式版）；正式版：SIP_PHONE_RELEASE=1 build.bat（发布脚本会设）。
 
 # Windows：一键构建（自动探测 WinLibs gcc），产物输出到 dist/：
 build.bat
@@ -66,9 +66,9 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 （Windows 用 `scripts\release.bat`，内部走 git-bash）：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.12-rc），不上传
-./scripts/release.sh --pre             # 预发布：上传 1.0.12-rc（站点标记为预发布）
-./scripts/release.sh                   # 正式版：以 1.0.12 编译并上传
+./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.13-rc），不上传
+./scripts/release.sh --pre             # 预发布：上传 1.0.13-rc（站点标记为预发布）
+./scripts/release.sh                   # 正式版：以 1.0.13 编译并上传
 ```
 
 - 站点地址 / 应用 ID / 上传令牌（可选站点证书）在 `release/release.conf`，环境变量可覆盖。
@@ -96,16 +96,17 @@ Windows 上一键只出 Windows 产物；Linux 产物需在 Linux 机器上 `./b
 | 日志（分级、滚动、脱敏、SIP 信令跟踪） | ✅ 已完成 |
 | 本地 WS 控制服务 + 事件推送 | ✅ 已完成 |
 | JS SDK + 测试页面 | ✅ 已完成 |
-| SIP 注册（UDP/TCP + Digest + 续注册 + 退避重试 + 休眠/切网恢复 + 服务端心跳） | ✅ 已完成（与真实服务端联调通过） |
+| SIP 注册（UDP/TCP/TLS + Digest + 续注册 + 退避重试 + 休眠/切网恢复 + 服务端心跳） | ✅ 已完成（UDP/TCP 与真实服务端联调通过；TLS 与本机 TLS 对端联调通过） |
 | SIP 呼叫（呼出/呼入/接听/拒接/挂断/保持/DTMF） | ✅ 已完成（与真实服务端联调通过） |
 | 媒体引擎（PCMA/PCMU/Opus/G.722 + RTP + 抖动缓冲 + 音量/增益） | ✅ 已完成 |
 | 音频设备（枚举/选择/全双工，malgo） | ✅ 已完成 |
 | 视频通话（H264/VP8/VP9/H263，含网页订阅） | ✅ 已完成 |
 | GUI（托盘 / 拨号盘 / 配置页 / 来电窗口 / 通话面板 / 通话记录页 / 通信录页） | ✅ 已完成 |
 | 通话记录 / 通信录（本地 SQLite） | ✅ 已完成 |
-| sip:// 协议拉起 + 单实例参数转发 | ✅ 已完成 |
+| sip:// / sips:// 协议拉起 + 单实例参数转发 | ✅ 已完成 |
 | 自动更新（软电话自检更新站点 + 下载替换重启） | ✅ 已完成 |
-| TLS(SIPS)、SRTP、AEC/NS/AGC、录音、长时间通话稳定性 | ⏳ 后续版本（P1/P2） |
+| SIP 信令 TLS(SIPS)（传输/本端监听/自签证书） | ✅ 已完成 |
+| SRTP、AEC/NS/AGC、录音、长时间通话稳定性 | ⏳ 后续版本（P1/P2） |
 
 **注册生命周期**：配置了账户后启动即自动注册；按服务端 expires 周期定时续注册；修改账户配置保存后以新配置重新注册；退出程序时自动注销（expires=0）。
 

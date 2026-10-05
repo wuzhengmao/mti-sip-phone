@@ -127,7 +127,8 @@ func (p *Phone) watchRegistration(ctx context.Context, acc config.Account, kickC
 		// 无响应后往往已把本机摘出 location，等 0.7×expires 的续注册太久）。
 		// 单独 kick：不需要刷新 STUN/TCP。服务器不发 OPTIONS（不支持 optchk）
 		// 时从未观测到心跳，这里恒不触发。
-		if acc.ChkOpt && p.heartbeatOverdue(ts) {
+		// 仅 UDP：连接型传输不发 optchk，服务端不会按心跳探测（REQ-ACC-020 修订）
+		if acc.ChkOpt && config.NormalizeTransport(acc.Transport) == config.TransportUDP && p.heartbeatOverdue(ts) {
 			logx.Logger().Info("超过 2.5 个心跳周期未收到服务端 OPTIONS，判为掉线并立即重新注册",
 				"interval", p.heartbeatInterval().String())
 			// 先置"未注册"（界面圆点与托盘图标变红、注册失败原因可见），
@@ -179,17 +180,42 @@ func (p *Phone) applyPublicIP(ctx context.Context, acc config.Account, ip string
 	p.publicIP = ip
 }
 
-// resetClientConnection 网络变化后丢弃 sipgo 复用的出向连接（仅 TCP）。
+// resetClientConnection 网络变化后丢弃 sipgo 复用的出向连接（TCP / TLS 这类长连接）。
 //
 // UDP 出向 socket 是通配绑定（0.0.0.0:随机端口），切换网络后 OS 会按当前
-// 路由重新选源地址、源端口不变，可自愈；TCP 则按远端地址复用连接，连接
-// 死亡后不会因发送失败被清出池（sipgo 只在读循环出错时清理），不丢弃的话
-// 每次重发 REGISTER 都写进死连接，Linux 上要黑洞十几分钟。
+// 路由重新选源地址、源端口不变，可自愈；TCP（含跑在 TCP 上的 TLS）则按远端
+// 地址复用连接，连接死亡后不会因发送失败被清出池（sipgo 只在读循环出错时
+// 清理），不丢弃的话每次重发 REGISTER 都写进死连接，Linux 上要黑洞十几分钟。
 //
 // 尽力而为：解析不到池键（域名/SRV 等）就跳过，不影响后续 kick 重注册。
 func (p *Phone) resetClientConnection(ctx context.Context, acc config.Account) {
-	if !strings.EqualFold(strings.TrimSpace(acc.Transport), "tcp") || acc.Server == "" {
+	tr := config.NormalizeTransport(acc.Transport)
+	if (tr != config.TransportTCP && tr != config.TransportTLS) || acc.Server == "" {
 		return
+	}
+	addr, ok := serverConnKey(ctx, acc)
+	if !ok {
+		return
+	}
+	// 池按传输分类（sipgo 的 transport.GetConnection 用同一套 network 键），
+	// TLS 连接必须用 "tls" 去取，否则取不到、丢不掉。
+	c, err := p.client.TransportLayer().GetConnection(tr, addr)
+	if err != nil {
+		return // 池中没有连接（尚未建连或已被读循环清理）
+	}
+	if err := c.Close(); err != nil {
+		logx.Logger().Debug("丢弃旧信令连接失败", "transport", tr, "remote", addr, "err", err)
+		return
+	}
+	logx.Logger().Info("网络变化：已丢弃旧信令连接，下次注册重新建连", "transport", tr, "remote", addr)
+}
+
+// serverConnKey 解析 sipgo 连接池里本注册所用连接的键（"IP:端口"）。
+// 池键用**解析后的地址**、优先 IPv4（与 sipgo 解析远端地址的口径一致），
+// 域名解析失败或没有地址时返回 ok=false（尽力而为，不阻断调用方）。
+func serverConnKey(ctx context.Context, acc config.Account) (string, bool) {
+	if acc.Server == "" {
+		return "", false
 	}
 	host := acc.Server
 	if net.ParseIP(host) == nil {
@@ -197,7 +223,7 @@ func (p *Phone) resetClientConnection(ctx context.Context, acc config.Account) {
 		defer cancel()
 		addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
 		if err != nil || len(addrs) == 0 {
-			return
+			return "", false
 		}
 		host = addrs[0].IP.String()
 		for _, a := range addrs { // 池键用解析后的地址，优先取 IPv4
@@ -207,16 +233,7 @@ func (p *Phone) resetClientConnection(ctx context.Context, acc config.Account) {
 			}
 		}
 	}
-	addr := net.JoinHostPort(host, strconv.Itoa(acc.Port))
-	c, err := p.client.TransportLayer().GetConnection("tcp", addr)
-	if err != nil {
-		return // 池中没有连接（尚未建连或已被读循环清理）
-	}
-	if err := c.Close(); err != nil {
-		logx.Logger().Debug("丢弃旧 TCP 信令连接失败", "remote", addr, "err", err)
-		return
-	}
-	logx.Logger().Info("网络变化：已丢弃旧 TCP 信令连接，下次注册重新建连", "remote", addr)
+	return net.JoinHostPort(host, strconv.Itoa(acc.Port)), true
 }
 
 // sendKick 非阻塞投递"立即重新注册"信号：通道已有待处理信号时合并为一次

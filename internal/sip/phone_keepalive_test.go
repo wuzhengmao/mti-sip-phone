@@ -110,7 +110,8 @@ func TestRegisterUserAgentWithoutOptChk(t *testing.T) {
 // 其它方法/来源不算。
 func TestReadFilterCountsOptionsWireHeartbeats(t *testing.T) {
 	p := &Phone{}
-	p.acc = config.Account{Server: "10.0.0.2"}
+	// 计数现在同时看开关与传输（仅 UDP）：这里用默认的 udp + 开启心跳
+	p.acc = config.Account{Server: "10.0.0.2", ChkOpt: true}
 	opts := func(method string) []byte {
 		return []byte(method + " sip:2999@10.0.0.2:5060 SIP/2.0\r\nContent-Length: 0\r\n\r\n")
 	}
@@ -316,5 +317,62 @@ func TestOptionsGetsDefault405(t *testing.T) {
 	}
 	if res.StatusCode != 405 {
 		t.Fatalf("OPTIONS 应回 sipgo 默认的 405，实际 %d %s", res.StatusCode, res.Reason)
+	}
+}
+
+// TestUserAgentOptChkOnlyUDP optchk 标记只加在 **UDP** 传输的注册上
+// （用户要求：TCP/TLS 不需要服务端 OPTIONS 心跳探测）。
+func TestUserAgentOptChkOnlyUDP(t *testing.T) {
+	cases := []struct {
+		transport string
+		wantOpt   bool
+	}{
+		{"udp", true},
+		{"", true}, // 空 = 默认 udp
+		{"tcp", false},
+		{"tls", false},
+	}
+	for _, c := range cases {
+		ua := userAgentFor(config.Account{ChkOpt: true, Transport: c.transport})
+		if got := strings.Contains(ua, "optchk"); got != c.wantOpt {
+			t.Fatalf("transport=%q 时 optchk 应为 %v，实际 UA=%q", c.transport, c.wantOpt, ua)
+		}
+	}
+	if ua := userAgentFor(config.Account{ChkOpt: false, Transport: "udp"}); strings.Contains(ua, "optchk") {
+		t.Fatalf("未启用服务端心跳时不应带 optchk：%q", ua)
+	}
+}
+
+// TestHeartbeatOnlyForUDP 服务端心跳只对 **UDP** 传输生效（REQ-ACC-020 修订）：
+// tcp/tls 注册报文不带 optchk、服务端不按心跳探测，所以计数与间隔学习一并停用
+// （超时重注册依赖"已学到间隔"，计数停了它自然不触发；netwatch 里另有显式判断）。
+func TestHeartbeatOnlyForUDP(t *testing.T) {
+	options := []byte("OPTIONS sip:2999@10.0.0.2:5060 SIP/2.0\r\nContent-Length: 0\r\n\r\n")
+	props := sip.TransportReadProps{RemoteAddr: &net.UDPAddr{IP: net.ParseIP("10.0.0.2"), Port: 5060}}
+
+	for _, tr := range []string{"tcp", "tls"} {
+		p := &Phone{}
+		p.acc = config.Account{Server: "10.0.0.2", Transport: tr, ChkOpt: true}
+		if p.heartbeatWanted() {
+			t.Fatalf("transport=%s 时不应启用服务端心跳检测", tr)
+		}
+		if _, err := p.readFilter(props, options); err != nil {
+			t.Fatalf("读钩子返回错误: %v", err)
+		}
+		if !p.hbLast.IsZero() {
+			t.Fatalf("transport=%s 时服务器的 OPTIONS 不应记作心跳", tr)
+		}
+	}
+	for _, tr := range []string{"udp", ""} { // 空 = 默认 udp
+		p := &Phone{}
+		p.acc = config.Account{Server: "10.0.0.2", Transport: tr, ChkOpt: true}
+		if !p.heartbeatWanted() {
+			t.Fatalf("transport=%q 时应启用服务端心跳检测", tr)
+		}
+	}
+	p := &Phone{}
+	p.acc = config.Account{Server: "10.0.0.2", Transport: "udp", ChkOpt: false}
+	if p.heartbeatWanted() {
+		t.Fatal("未勾选开关时不应启用服务端心跳检测")
 	}
 }

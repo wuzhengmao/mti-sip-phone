@@ -36,6 +36,25 @@ func FindFreeSIPPort() int {
 	return sipPortMin
 }
 
+// FindFreeTLSPort 在 40000~50000 范围内找一个 TCP 空闲端口给 TLS 监听用
+//（TLS 跑在 TCP 上，不能与明文 TCP 监听共用端口，所以另找）；随机起点避免
+// 每次启动都落在同一端口。
+func FindFreeTLSPort() int {
+	start := sipPortMin + rand.Intn(sipPortMax-sipPortMin)
+	for p := start; p < sipPortMax; p++ {
+		if tcpPortFree(p) {
+			return p
+		}
+	}
+	for p := sipPortMin; p < start; p++ {
+		if tcpPortFree(p) {
+			return p
+		}
+	}
+	logx.Logger().Warn("40000~50000 无空闲 TCP 端口，TLS 监听回退使用", "port", sipPortMin)
+	return sipPortMin
+}
+
 // udpPortFree 探测 UDP 端口是否可用（绑定全部接口，与 SIP 监听行为一致）。
 func udpPortFree(port int) bool {
 	ln, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", port))

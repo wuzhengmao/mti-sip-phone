@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -46,8 +45,8 @@ var instanceSlot = flag.Int("instance", 0, "实例槽位（多实例沙箱，0=�
 func main() {
 	flag.Parse()
 
-	// 1. 解析 sip:// 协议拉起参数（Windows 下形如 "proto:sip://..."）
-	sipURL := findSipURL(os.Args[1:])
+	// 1. 解析 sip:// / sips:// 协议拉起参数（Windows 下形如 "proto:sips://..."）
+	sipURL := protocol.FindURL(os.Args[1:])
 
 	// 1.1 实例槽位：`-instance N` 优先，其次 sip:// 的 instance=N（缺省 0 = 主实例）。
 	slot := *instanceSlot
@@ -234,6 +233,9 @@ func main() {
 		logx.Logger().Error("初始化 SIP 软电话失败", "err", err)
 		os.Exit(1)
 	}
+	// TLS（REQ-ACC-006）：自签证书与密钥放实例自己的数据目录（多实例各一份）；
+	// 只在传输方式为 tls 时才生成/启动 TLS 监听（见 Phone.Register）
+	phone.SetTLSDir(filepath.Join(cfgDir, "tls"))
 	// 监听本地 SIP 端口（呼入通道）：UDP 与 TCP 各起监听
 	localPort := sip.FindFreeSIPPort()
 	listenAddr := fmt.Sprintf("0.0.0.0:%d", localPort)
@@ -367,21 +369,20 @@ func shutdown(app *core.App, tel core.Telephony) {
 	}
 }
 
-// handleLaunchArgs 处理 sip:// 协议拉起：解析注册信息 → 更新配置 → 触发注册。
+// handleLaunchArgs 处理 sip:// / sips:// 协议拉起：解析注册信息 → 更新配置 → 触发注册。
 // onDone 在 GUI 就绪后显示主界面（由调用方注入）。
 func handleLaunchArgs(app *core.App, cfg *config.Config, args []string, onDone func()) {
 	for _, a := range args {
-		i := strings.Index(a, "sip://")
-		if i < 0 {
+		raw, ok := protocol.SplitURL(a)
+		if !ok {
 			continue
 		}
-		raw := a[i:]
 		acc, err := protocol.ParseSipURL(raw)
 		if err != nil {
-			logx.Logger().Warn("sip:// 链接解析失败", "url", raw, "err", err)
+			logx.Logger().Warn("sip:// / sips:// 链接解析失败", "url", raw, "err", err)
 			continue
 		}
-		logx.Logger().Info("sip:// 协议拉起", "server", acc.Server, "account", acc.Account)
+		logx.Logger().Info("协议拉起", "url", raw, "server", acc.Server, "account", acc.Account, "transport", acc.Transport)
 
 		// 更新账户配置并触发注册
 		newAcc := cfg.Account
@@ -400,14 +401,4 @@ func handleLaunchArgs(app *core.App, cfg *config.Config, args []string, onDone f
 			onDone()
 		}
 	}
-}
-
-// findSipURL 从命令行参数中提取 sip:// URL。
-func findSipURL(args []string) string {
-	for _, a := range args {
-		if i := strings.Index(a, "sip://"); i >= 0 {
-			return a[i:]
-		}
-	}
-	return ""
 }

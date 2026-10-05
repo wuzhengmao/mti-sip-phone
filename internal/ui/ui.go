@@ -107,6 +107,8 @@ type App struct {
 	rportCheck        *widget.Check
 	chkOptCheck       *widget.Check // 服务端心跳检测（User-Agent 带 optchk，REQ-ACC-020）
 	accTransport      *widget.Select
+	tlsVerifyCheck    *widget.Check // 校验 TLS 服务器证书（REQ-ACC-006）
+	tlsNote           *widget.Label // 「只加密信令」提示（仅传输=tls 时显示）
 	accAccount        *widget.Entry
 	accAuthUser       *widget.Entry
 	accPassword       *widget.Entry
@@ -521,7 +523,19 @@ func (a *App) buildSettingsPage() {
 	a.accServerAddr.SetPlaceHolder("SIP 服务器，如 10.168.4.40:15060（端口可省略，默认 5060）")
 	a.accExpires = newFormEntry()
 	a.accExpires.SetPlaceHolder("300")
-	a.accTransport = widget.NewSelect([]string{"udp", "tcp"}, nil)
+	a.accTransport = widget.NewSelect([]string{"udp", "tcp", "tls"}, func(sel string) {
+		if a.loadingForm {
+			return
+		}
+		a.updateTLSRow(sel)
+		a.updateChkOptRow(sel)
+	})
+	// TLS（REQ-ACC-006）：只加密信令，媒体仍是明文 RTP（SRTP 是另一个需求），
+	// 界面上写清楚，免得用户以为通话内容也被加密了
+	a.tlsVerifyCheck = widget.NewCheck("校验服务器证书（自签证书请勿勾选）", nil)
+	a.tlsNote = widget.NewLabelWithStyle(
+		"SIPS 只加密信令，通话媒体仍是明文 RTP",
+		fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
 	a.accAccount = newFormEntry()
 	a.accAccount.SetPlaceHolder("账号")
 	a.accAuthUser = newFormEntry()
@@ -547,7 +561,10 @@ func (a *App) buildSettingsPage() {
 	// 服务端心跳检测（默认开启，REQ-ACC-020）：开启后注册报文的 User-Agent
 	// 带 optchk 标记，服务端据此定期发 OPTIONS 探测；OPTIONS 用 sipgo 默认
 	// 行为回 405 即可（实测服务端接受）。改变的是注册报文内容，随「保存并注册」生效。
-	a.chkOptCheck = widget.NewCheck("启用服务端心跳检测", nil)
+	// 服务端心跳检测（REQ-ACC-020 修订）：**仅 UDP 传输可用**——连接型传输
+	// （tcp/tls）注册报文不带 optchk、服务端也不会按心跳探测，所以非 UDP 时置灰
+	//（保留已选值，切回 udp 不用重选，见 updateChkOptRow）。
+	a.chkOptCheck = widget.NewCheck("启用服务端心跳检测（仅 UDP）", nil)
 
 	// 表单项采用「label 在上、输入框在下」的堆叠布局，
 	// 避免 Grid 双列在窄窗口下把主窗口撑宽（REQ-UI-019）
@@ -572,6 +589,8 @@ func (a *App) buildSettingsPage() {
 		formItem("SIP服务器", a.accServerAddr),
 		formItem("代理服务器", a.accProxy),
 		formItem("传输", a.accTransport),
+		a.tlsVerifyCheck,
+		a.tlsNote,
 		formItem("账号", a.accAccount),
 		formItem("认证 ID", a.accAuthUser),
 		formItem("密码", a.accPassword),
@@ -847,6 +866,28 @@ func formItem(label string, obj fyne.CanvasObject) fyne.CanvasObject {
 		widget.NewLabel(label),
 		container.NewHScroll(obj),
 	)
+}
+
+// updateTLSRow 传输方式联动（REQ-ACC-006）：只有「传输 = tls」时才显示
+// 「校验服务器证书」与「只加密信令」提示——其余传输下这两项没有意义。
+func (a *App) updateTLSRow(transport string) {
+	if config.NormalizeTransport(transport) == config.TransportTLS {
+		a.tlsVerifyCheck.Show()
+		a.tlsNote.Show()
+		return
+	}
+	a.tlsVerifyCheck.Hide()
+	a.tlsNote.Hide()
+}
+
+// updateChkOptRow 传输方式联动（REQ-ACC-020 修订）：服务端心跳检测**只有 UDP
+// 传输才可用**，tcp/tls 下置灰（连同 sip 层的心跳计数与超时重注册一起停用）。
+func (a *App) updateChkOptRow(transport string) {
+	if config.NormalizeTransport(transport) == config.TransportUDP {
+		a.chkOptCheck.Enable()
+		return
+	}
+	a.chkOptCheck.Disable()
 }
 
 // showSettings 切换到设置页（仅非通话状态可用，REQ-UI-012）。
@@ -1691,8 +1732,9 @@ func (a *App) bringMainToFront() {
 
 // saveAccount 保存账户配置并触发重新注册（REQ-ACC-011）。
 func (a *App) saveAccount() {
-	// 服务器与端口合并解析：host[:port]，端口省略默认 5060
-	host, port := parseHostPort(a.accServerAddr.Text, 5060)
+	// 服务器与端口合并解析：host[:port]，端口省略按传输取默认
+	//（tls → 5061，其余 5060；REQ-ACC-006）
+	host, port := parseHostPort(a.accServerAddr.Text, config.DefaultPortForTransport(a.accTransport.Selected))
 	expires := 300
 	if v := a.accExpires.Text; v != "" {
 		fmt.Sscanf(v, "%d", &expires)
@@ -1710,7 +1752,8 @@ func (a *App) saveAccount() {
 		STUNEnabled: a.accStunCheck.Checked,
 		STUNServer:  a.accStunServer.Text,
 		Proxy:       a.accProxy.Text,
-		Transport:   a.accTransport.Selected,
+		Transport:   config.NormalizeTransport(a.accTransport.Selected),
+		TLSVerify:   a.tlsVerifyCheck.Checked,
 		Account:     a.accAccount.Text,
 		AuthUser:    a.accAuthUser.Text,
 		Password:    a.accPassword.Text,
@@ -1735,6 +1778,7 @@ func (a *App) loadAccountIntoForm() {
 	a.accEnabled.SetChecked(acc.Enabled)
 	a.rportCheck.SetChecked(acc.RPort)
 	a.chkOptCheck.SetChecked(acc.ChkOpt)
+	a.updateChkOptRow(acc.Transport)
 	a.accServerAddr.SetText(fmt.Sprintf("%s:%d", acc.Server, acc.Port))
 	a.accExpires.SetText(fmt.Sprintf("%d", acc.Expires))
 	a.accProxy.SetText(acc.Proxy)
@@ -1749,7 +1793,9 @@ func (a *App) loadAccountIntoForm() {
 	} else {
 		a.accStunServer.Disable()
 	}
-	a.accTransport.SetSelected(acc.Transport)
+	a.accTransport.SetSelected(config.NormalizeTransport(acc.Transport))
+	a.tlsVerifyCheck.SetChecked(acc.TLSVerify)
+	a.updateTLSRow(acc.Transport)
 	a.accAccount.SetText(acc.Account)
 	a.accAuthUser.SetText(acc.AuthUser)
 	a.accPassword.SetText(acc.Password)

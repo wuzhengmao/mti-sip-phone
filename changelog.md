@@ -6,6 +6,33 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
+## [1.0.13] - 待发布
+
+### 修复
+
+- **TCP/TLS 来电接听后约 0.5 秒自动失败**（REQ-ACC-006）：MicroSIP 呼入、app 点接听，通话建立不起来（日志 `发送 200 OK 失败: transaction terminated`）。根因在 sipgo 的事务生命周期：`DialogServerSession.RespondSDP` 发完 200 后要按 RFC 6026 **阻塞等 ACK**，而 sipgo 的 `Server.TerminateGracefully` 对**可靠传输（TCP/TLS）会在 handler 返回时立即终止 INVITE 事务**（UDP 因为不可靠，会把事务留到重传定时器）——我们的 `handleIncoming` 在 `dlg.StateRead()`（接听时状态变 Established）一响就返回了，事务随之终止、等 ACK 被打断成 "transaction terminated"，接听流程把这通刚接通的电话当失败清理掉。现在 handler 收到非 Ended 的状态后**继续等本通真正结束**（`<-ctx.Done()`）。这条 UDP 侧测不出来（事务被保留，纯属侥幸），已加 `TestIncomingOverTLS`（TLS 来电 → 自动接听 → 建立成功 → 本端挂断的 BYE 送到对端）钉住。
+- **TCP/TLS 下振铃中挂断（CANCEL）发不出去**（REQ-ACC-006）：app 呼叫对端、对方还在振铃时挂断，本端挂了但**对端一直振铃**。CANCEL 必须按 **INVITE 的路径**发（RFC 3261 §9.1：目的地址、Call-ID、CSeq、Via branch 都与 INVITE 一致），而 sipgo 构造 CANCEL 时走的是 dialog 的 `buildReq`，会把**响应里的 Record-Route** 当成 Route 头塞进去——CANCEL 因此被发到 Record-Route 指向的地址（真机那条腿连不上），静默丢失。现在挂断振铃中的呼出时，先把**临时响应**（1xx）上的 Record-Route 摘干净（2xx 的不能摘，那是补发 ACK/BYE 要用的路由集），CANCEL 即回到 INVITE 的原始目的地。⚠️ 摘必须用 `stripRecordRoutes`：sipgo 的 `RemoveHeader` **大小写敏感、且只删第一条**，真机的响应上可能有多条。回归测试 `TestCancelWhileRingingOverTLS`。
+- **接通许久后对端挂断、本端不知道（TCP/TLS）**（REQ-ACC-006 真机缺陷）：服务端日志 `ERROR:core:tcp_connect_blocking_timeout ... [server=10.168.5.10:59436] (111) Connection refused` / `proto_tls: connect failed` / `tm:msg_send ... failed`——服务端要送对端的 BYE 时**连接表里已经没有那条连接**，只能按 Contact 地址重新拨号，而 NAT 后面的地址外面拨不进来。原因是**连接被服务端的空闲超时关掉了**：OpenSIPS 的 `tcp_connection_lifetime` 是分钟级，而我们的续注册周期是 `0.7×expires`（默认 210 秒），两次注册之间连接就凉了（所以"刚接通一切正常、时间一长就不行"）。现在**客户端做信令保活**：TCP/TLS 传输下每 30 秒在注册用的那条连接上发一个 **CRLF**（RFC 5626 §3.5.1 的 keepalive，服务端回 CRLF/"pong"，非 SIP 载荷、读钩子直接忽略），刷新服务端的空闲计时。测试：`TestConnKeepaliveSendsCRLF`（真实 sipgo 服务端 + 连接字节 tee，断言 CRLF 确实发出）、`TestKeepaliveLoopSkipsUDP`。**这一步是客户端该做的标准动作，不依赖服务端配置**。
+- **排查便利：ACK/BYE 发送失败的日志由 Debug 提到 Warn**：这两条以前在 info 级日志下**完全看不见**（真机上表现为"接通 30 秒后被对端挂断，本端日志毫无线索"——实际是 ACK 发不出去）。现在失败会直接打出目标地址与错误。
+- **TCP 的 Contact 补上 `transport=tcp`**：Contact 是"对端以后怎么找到我"，而 `sip:` URI 不带 `transport` 参数时**默认按 UDP**（呼出 INVITE 的 R-URI 一直带着它，Contact 漏了）。UDP 仍然不加参数（缺省即 UDP）。
+- **服务端心跳检测整套只在 UDP 传输生效**（REQ-ACC-020 修订）：连接型传输（TCP/TLS）另有保活机制可用，所以 ①注册报文的 User-Agent **只有 udp 才带 `optchk` 标记**；②sip 层的**心跳计数与间隔学习**（传输层读钩子）与**超时重新注册**（netwatch 的 2.5 周期判定）**在 tcp/tls 下一并停用**（此前只要开关打开就无条件计数）；③设置页「启用服务端心跳检测**（仅 UDP）**」在 tcp/tls 下**置灰不可选**，切回 udp 自动恢复，已选值保留不被改写。测试：`TestUserAgentOptChkOnlyUDP`、`TestHeartbeatOnlyForUDP`。
+- 排查便利：呼叫失败原因只在拿到**最终响应**（≥200）时用它（曾把"CANCEL 发送失败"显示成 `183 Session Progress`，底层错误被吞掉）；信令日志的方向行带上**传输与本地/远端地址**（如 `[SIP 发出 TLS 192.168.3.15:53605 → 10.168.4.40:15061]`），排查"这条消息到底发到哪条腿/哪个连接上"时非常关键。
+
+> 说明：TLS/NAT 真机联调期间试过两批**客户端侧绕过**——注册 Contact 加 `;ob` / RFC 5626 outbound（`reg-id`/`+sip.instance`/`Supported: outbound`），以及"in-dialog 请求按 `r2=on` 那条 Record-Route 选腿并改写传输"。真机抓包定位到根因是 **OpenSIPS 路由配置**把 in-dialog 请求（ACK/BYE）按 **UDP** 发往我们连接的端口（抓包里是 `UDP 15060 → 10.168.5.10:52369` + 紧跟 `ICMP Port unreachable`），属服务端配置问题，**客户端的这些变通已全部回滚**，不留在代码里。
+
+### 新增
+
+- **SIP 信令 TLS(SIPS) 传输**（REQ-ACC-006）：传输方式新增 **`tls`**——配置页「传输」下拉、配置文件 `account.transport`、协议链接三条入口（`sip://…?transport=tls`、以及新增的 **`sips://账号:密码@服务器:端口`** 前缀，sips:// 即 TLS、端口缺省 **5061**；前缀比查询参数优先）。注册、呼出（INVITE/ACK/BYE）、呼入信令全走 TLS：R-URI 与 Contact 用 **`sips:`**、Contact 带 **`transport=tls`**、Via 协议为 **TLS**。
+  - **本端 TLS 监听**（接收 TLS 呼入）：传输为 tls 时**按需启动**（不用 TLS 的构建不生成证书、不多占端口），端口在 40000–50000 里另找一个空闲 TCP 端口（TLS 跑在 TCP 上，不能与明文 TCP 监听共用端口）；证书是**自动生成的自签名证书**（RSA 2048，SAN 含本机各网卡 IP、hostname 与 localhost，有效期 10 年），持久化在实例数据目录 `tls/local-{cert,key}.pem`（重启不变、多实例各一份，服务端要固定信任也有东西可加）。
+  - **服务器证书默认不校验**（内网/自建服务器多半自签，开箱即用优先）：配置页新增「校验服务器证书」勾选（仅传输=tls 时显示），勾上后按**系统根证书**校验证书链与主机名；核验开关**即时生效**（不重建 UA）。**不做客户端证书（mTLS）**。
+  - **只加密信令**：媒体仍是明文 RTP（SRTP 是另一个需求 REQ-MEDIA-009），配置页在 TLS 选项旁写明这句，避免误解。
+  - `sip://` 与 `sips://` 都注册为系统协议（Windows 两个方案各一个 ProgID + UrlAssociations，Linux .desktop 两个 MimeType + mimeapps 两条默认项）；协议拉起、单实例参数转发都识别 `sips://`。
+  - 测试页「URI 拉起软电话」新增「传输」下拉（udp/tcp/tls）：tls 生成 `sips://…:5061` 链接，tcp 生成 `sip://…?transport=tcp`。
+  - 内部：新增 `internal/sip/tls.go`（客户端 TLS 配置 + 自签证书生成/复用）、`internal/sip/keepalive.go`（TCP/TLS 信令保活，每 30 秒 CRLF）、`internal/sip/dialogroute.go`（CANCEL 的 Record-Route 清理，见「修复」）；`Account.TLSVerify`（零值 = 不校验）；`config.NormalizeTransport`/`DefaultPortForTransport` 统一传输判定；dialog 缓存（dcc/dsc）按传输方式与 Contact 重建（sipgo 要求每种传输一个实例；**通话进行中不换**，避免 in-dialog 请求匹配不上）；网络变化后的"丢弃旧长连接"（REQ-CALL-009）从只认 tcp 扩展到 tls。
+  - 测试：`TestRegisterOverTLS`（注册走 TLS，R-URI/Contact 均为 sips:、Via 为 TLS）、`TestDialOverTLS`（INVITE/ACK/BYE 走 TLS）、`TestIncomingTLSConnection`（对端按 Contact 连本端 TLS 监听并拿到响应）、`TestIncomingOverTLS`/`TestCancelWhileRingingOverTLS`（见「修复」）、`TestClientTLSVerifyToggle`（默认不校验可连自签、开启校验后拒自签）、`TestSelfSignedCertReuse`（证书复用与私钥权限）、`TestContactForTransport`、`TestParseSipsURL`/`TestSplitURL`、`TestTransportNormalize`。
+  - 需求文档同步：REQ-ACC-006 细则、REQ-ACC-002（传输加 TLS）、REQ-PROTO-001/002（sips://）。
+  - **真机验证**：对真实 OpenSIPS（10.168.4.40 的 TLS 监听 **15061**，自签证书 CN=sip.mti-sh.cn）注册成功，Contact 为 `sips:2999@192.168.3.15:<端口>;transport=tls`；经服务器呼出「打给自己」时，服务器沿 TLS 把 INVITE 送回了本端 TLS 监听（单通话限制回 486，属预期）；另用两个沙箱实例完成一次完整 TLS 通话（拨出 → 振铃 → 接听 → 通话建立 → 双方挂断），SIP 信令记录里 INVITE/BYE 的请求行与 Via 都是 `sips:`/`TLS`。呼入方向（对端拨入、本端接听、对端挂断）受服务端路由配置影响，见「修复」末尾的说明。
+
 ## [1.0.12] - 2026-10-05
 
 ### 新增
