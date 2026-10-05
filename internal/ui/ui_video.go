@@ -750,9 +750,17 @@ func (a *App) renderVideoFrame(local bool) {
 		if a.videoOn && a.callSending && a.previewOn {
 			// 本地帧尺寸变化时让整个叠加层重排一次（回显区按摄像头宽高比算，
 			// 只 Refresh 画面本身不会触发父容器重新布局）
-			if w, h := ref.img.Rect.Dx(), ref.img.Rect.Dy(); w != a.videoSurface.localW || h != a.videoSurface.localH {
+			w, h := ref.img.Rect.Dx(), ref.img.Rect.Dy()
+			if w != a.videoSurface.localW || h != a.videoSurface.localH {
 				a.videoSurface.localW, a.videoSurface.localH = w, h
 				defer a.videoSurface.Refresh()
+			}
+			// 振铃期窗口里只有本地回显（ringFull）：窗口尺寸按**本地画面**适配
+			// ——否则窗口会停在默认尺寸或上一通电话留下的尺寸（表现为"振铃期
+			// 窗口跟本地画面不匹配"，接通后被对端画面纠正）。旋转本地画面时
+			// 帧尺寸随宽高互换变化，这里同样会重设窗口形状。
+			if a.videoSurface.ringFull {
+				a.applyVideoSize(w, h)
 			}
 			a.videoSurface.local.Image = ref.img
 			a.videoSurface.local.Show()

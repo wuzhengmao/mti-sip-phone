@@ -302,8 +302,8 @@
         <label class="chk"><input type="checkbox" id="vidLocal" checked> 同时订阅本地画面</label>
         <!-- 订阅后是否保持软电话的视频窗口显示（REQ-VIDEO-009 修订；默认不勾 = 隐藏窗口） -->
         <label class="chk"><input type="checkbox" id="vidKeepWindow"> 保持软电话视频窗口显示</label>
+        <!-- 订阅 / 取消订阅合并成一个按钮（用户要求）：按当前订阅状态切换 -->
         <button id="btnSubVideo" class="green">订阅视频</button>
-        <button id="btnUnsubVideo" class="ghost">取消订阅</button>
       </div>
       <div class="row">
         <label style="min-width:auto">远端</label>
@@ -915,7 +915,30 @@
   sdk.on('connected', refreshTransformButtons);
   refreshTransformButtons();
 
+  // 订阅状态（订阅/取消订阅共用一个按钮，用户要求）
+  var videoSubscribed = false;
+  function setVideoSubState(on) {
+    videoSubscribed = on;
+    $('btnSubVideo').textContent = on ? '取消订阅' : '订阅视频';
+    $('btnSubVideo').className = on ? 'ghost' : 'green';
+  }
+
   $('btnSubVideo').onclick = function () {
+    if (videoSubscribed) {
+      // —— 取消订阅 ——
+      sdk.unsubscribeVideo().then(function () {
+        setVideoSubState(false);
+        setTransformButtonsEnabled(false); // 退订后置灰不可点（状态留在软电话侧）
+        refreshTransformButtons();
+        resetStats();
+        $('videoBadge').textContent = '未订阅';
+        $('videoBadge').className = 'badge';
+        addLog('ok', '已取消订阅（画面已清空，软电话恢复显示视频窗口）');
+      }).catch(function (e) {
+        addLog('err', '取消订阅失败: ' + e.message);
+      });
+      return;
+    }
     var opts = {
       remote: $('remoteVideo'),                      // 必传
       local: channelOpts($('localVideo'), $('vidLocal').checked), // 不勾选 = 不订阅本地
@@ -933,6 +956,7 @@
       (opts.keepWindow ? '，保持软电话窗口' : '');
     addLog('info', '订阅视频（' + desc + '）');
     sdk.subscribeVideo(opts).then(function (res) {
+      setVideoSubState(true);
       setTransformButtonsEnabled(true); // 订阅期间可操作
       refreshTransformButtons();        // 状态以软电话为准（同步过来）
       resetStats();
@@ -950,19 +974,6 @@
       }
     }).catch(function (e) {
       addLog('err', '订阅失败: ' + e.message);
-    });
-  };
-
-  $('btnUnsubVideo').onclick = function () {
-    sdk.unsubscribeVideo().then(function () {
-      setTransformButtonsEnabled(false); // 退订后置灰不可点（状态留在软电话侧）
-      refreshTransformButtons();
-      resetStats();
-      $('videoBadge').textContent = '未订阅';
-      $('videoBadge').className = 'badge';
-      addLog('ok', '已取消订阅（画面已清空，软电话恢复显示视频窗口）');
-    }).catch(function (e) {
-      addLog('err', '取消订阅失败: ' + e.message);
     });
   };
 
