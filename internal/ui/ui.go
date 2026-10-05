@@ -208,6 +208,8 @@ type App struct {
 	remoteHasVideo  bool          // 已收到过对端画面（决定视频窗口是否显示）
 	localVideoEver  bool          // 已收到过本地帧（仅用于日志）
 	videoSized      bool          // 窗口尺寸是否已按对端比例初始化
+	videoSizedW     int           // 上次据此定尺寸的对端画面宽（分辨率变化时要重新适配）
+	videoSizedH     int           // 同上，高
 	videoFullscreen bool
 	webVideoOn      bool // 有网页正在接收视频画面（REQ-VIDEO-009，此时不显示视频窗口）
 	ringbackOn      bool // 正在放本地回铃音（没有早期媒体时自己放，避免重复放）
@@ -1075,6 +1077,9 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		moveCallWindowToCorner(a.callW)
 		a.startTimer() // 通话时长从 0 开始
 	}
+	// 视频回显摆位随通话阶段变化（振铃期铺满窗口 / 接通后回右上角小窗），
+	// 每次状态切换都按新口径同步一次（用户要求）。
+	a.applyLocalVideoVisibility()
 }
 
 // shouldShowMainAfterCall 通话结束时要不要显示主窗体（REQ-UI-030 的规则，

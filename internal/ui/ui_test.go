@@ -141,18 +141,44 @@ func TestWantVideoWindowWhileSendingLocal(t *testing.T) {
 		t.Fatal("回显关闭且无对端画面时不应显示视频窗口")
 	}
 
-	// 对端画面到了：照常显示
+	// 对端画面到了：**通话建立后**照常显示
 	a.remoteHasVideo = true
 	a.callHasVideo = true
+	a.uiState = uiInCall
 	if !a.wantVideoWindow() {
-		t.Fatal("收到对端画面后应显示视频窗口")
+		t.Fatal("收到对端画面（已接通）后应显示视频窗口")
+	}
+}
+
+// TestWantVideoWindowRingPhase 振铃期的两套口径（用户要求）：
+//   - 本端不推流（摄像头禁用/不可用）：振铃期不显示窗口，**接通后**才显示；
+//   - 本端在推流：振铃期就显示窗口，但里面只有本地回显（对端画面等接通后，
+//     由 renderVideoFrame 拦截），所以这里仍应返回 true。
+func TestWantVideoWindowRingPhase(t *testing.T) {
+	// 摄像头禁用 + 已经收到早期媒体画面：振铃期不显示
+	a := &App{videoOn: true, activeCallID: "c1", uiState: uiRinging,
+		callHasVideo: true, remoteHasVideo: true}
+	if a.wantVideoWindow() {
+		t.Fatal("摄像头禁用时振铃期不应显示视频窗口（早期媒体画面不展示）")
+	}
+	// 接通后显示
+	a.uiState = uiInCall
+	if !a.wantVideoWindow() {
+		t.Fatal("接通后应显示视频窗口")
+	}
+
+	// 本端在推流 + 回显开着：振铃期即显示（里面只有本地回显）
+	a = &App{videoOn: true, activeCallID: "c1", uiState: uiRinging,
+		callSending: true, previewOn: true}
+	if !a.wantVideoWindow() {
+		t.Fatal("本端推流时振铃期应显示视频窗口（只放本地回显）")
 	}
 }
 
 // TestWantVideoWindowWithWebSubscription 网页订阅视频期间不显示视频窗口
 // （REQ-VIDEO-009：画面改在网页看），退订后立即恢复。
 func TestWantVideoWindowWithWebSubscription(t *testing.T) {
-	a := &App{videoOn: true, activeCallID: "c1", callHasVideo: true, remoteHasVideo: true}
+	a := &App{videoOn: true, activeCallID: "c1", uiState: uiInCall, callHasVideo: true, remoteHasVideo: true}
 	if !a.wantVideoWindow() {
 		t.Fatal("有远端画面时应显示视频窗口")
 	}

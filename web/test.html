@@ -209,6 +209,8 @@
           <button id="btnReject" class="red">拒接</button>
           <button id="btnMute" class="yellow" style="display:none">保持</button>
           <button id="btnHangup" class="red">挂断</button>
+          <!-- 视频开关（视频通话时显示）：跟在挂断之后（用户要求；原来挤在扬声器那行） -->
+          <button id="btnVideoToggle" class="icon-btn" title="视频" style="display:none"></button>
         </div>
         <!-- 扬声器 / 麦克风各占一行（用户要求）：左边开关按钮，右边音量滑块 + 百分比。
              拖动即调，**0% = 禁用**（等同开关的「关」）；与软电话通话面板的滚轮是
@@ -218,7 +220,6 @@
             <button id="btnSpeaker" class="icon-btn" title="扬声器"></button>
             <input type="range" id="volSpeaker" min="0" max="100" step="5" value="100">
             <span class="vol-val" id="volSpeakerVal">100%</span>
-            <button id="btnVideoToggle" class="icon-btn" title="视频" style="display:none"></button>
           </div>
           <div class="media-line">
             <button id="btnMic" class="icon-btn" title="麦克风"></button>

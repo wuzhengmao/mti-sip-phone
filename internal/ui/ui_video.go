@@ -65,15 +65,25 @@ func (l previewLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	if len(objs) == 0 {
 		return
 	}
-	w := size.Width / previewScale
-	h := size.Height / previewScale
-	if l.s != nil && l.s.localW > 0 && l.s.localH > 0 {
-		h = w * float32(l.s.localH) / float32(l.s.localW)
+	var rect fyne.Position
+	var sz fyne.Size
+	if l.s != nil && l.s.ringFull {
+		// 振铃期（本端推流、尚未接通）：本地回显**铺满整个窗口**——这时没有
+		// 对端画面可看，把本地画面放大给人看；描边是给右上角小窗用的，这里不要。
+		rect = fyne.NewPos(0, 0)
+		sz = size
+		if len(objs) > 1 && objs[1] != nil {
+			objs[1].Hide()
+		}
+	} else {
+		w := size.Width / previewScale
+		h := size.Height / previewScale
+		if l.s != nil && l.s.localW > 0 && l.s.localH > 0 {
+			h = w * float32(l.s.localH) / float32(l.s.localW)
+		}
+		rect = fyne.NewPos(size.Width-w-previewGap, previewGap)
+		sz = fyne.NewSize(w, h)
 	}
-	x := size.Width - w - previewGap
-	y := float32(previewGap)
-	rect := fyne.NewPos(x, y)
-	sz := fyne.NewSize(w, h)
 	for i := 0; i < 2 && i < len(objs); i++ {
 		if objs[i] == nil || !objs[i].Visible() {
 			continue
@@ -126,6 +136,9 @@ type videoSurface struct {
 
 	// localW/localH 本地回显帧的尺寸（**已含旋转**），供 previewLayout 排回显区
 	localW, localH int
+	// ringFull 振铃期（本端推流、尚未接通）本地回显**铺满整个窗口**：
+	// 那时没有对端画面可看，先把本地画面放大给人看；接通后回到右上角小窗。
+	ringFull bool
 }
 
 func newVideoSurface(onDoubleTap func()) *videoSurface {
@@ -245,7 +258,14 @@ func (a *App) wantVideoWindow() bool {
 		return false
 	}
 	if a.callSending && a.previewOn {
+		// 本端在推流且回显开着：拨出即显示（**振铃期只放本地回显**，
+		// 对端画面等接通后，见 renderVideoFrame）
 		return true
+	}
+	// 本端不发流（摄像头禁用/不可用）时没有本地回显可看：**接通后**才显示窗口
+	//（用户要求：振铃期的早期媒体/回铃画面不进窗口）
+	if a.uiState != uiInCall {
+		return false
 	}
 	return a.callHasVideo && a.remoteHasVideo
 }
@@ -387,6 +407,13 @@ func (a *App) applyLocalVideoVisibility() {
 		b.Refresh()
 	}
 	a.videoSurface.toggleBtn.SetIcon(iconForLocalVideo(a.previewOn))
+	// 振铃期（本端推流、尚未接通）：本地回显铺满窗口；接通后回到右上角小窗
+	//（用户要求）。状态变化都要重排一次，Layout 才会按新口径摆放。
+	ringFull := a.uiState != uiInCall && a.videoOn && a.callSending && a.previewOn
+	if a.videoSurface.ringFull != ringFull {
+		a.videoSurface.ringFull = ringFull
+		a.videoSurface.Refresh()
+	}
 	a.videoSurface.local.Refresh()
 	a.videoSurface.border.Refresh()
 	a.videoSurface.toggleBtn.Refresh()
@@ -446,8 +473,16 @@ func videoFitSize(fw, fh int) (float32, float32) {
 }
 
 // applyVideoSize 按对端视频分辨率初始化窗口尺寸（需求 6）。
+// applyVideoSize 按对端画面尺寸调整窗口大小（**分辨率变化时**才重设——
+// 首帧、以及通话中对端换分辨率/换流都会走到这里；每帧都调会反复定位窗口）。
+//
+// ⚠️ 调用点必须只在"尺寸变了"时做重活（Resize + placeVideoWindow 内部要
+// EnumWindows + SetWindowPos），所以这里比对上次的尺寸后早退。
 func (a *App) applyVideoSize(fw, fh int) {
-	if a.videoSized || a.videoW == nil || fw <= 0 || fh <= 0 {
+	if a.videoW == nil || fw <= 0 || fh <= 0 {
+		return
+	}
+	if a.videoSized && fw == a.videoSizedW && fh == a.videoSizedH {
 		return
 	}
 	w, h := videoFitSize(fw, fh)
@@ -456,6 +491,7 @@ func (a *App) applyVideoSize(fw, fh int) {
 	a.videoW.Resize(fyne.NewSize(w, h))
 	placeVideoWindow(a.videoW)
 	a.videoSized = true
+	a.videoSizedW, a.videoSizedH = fw, fh
 	logx.Logger().Info("视频窗口尺寸已按原视频设置",
 		"remote", fw, "x", fh, "window", int(w), "x", int(h),
 		"max", videoMaxW, "x", videoMaxH)
@@ -730,20 +766,29 @@ func (a *App) renderVideoFrame(local bool) {
 	if !a.videoOn {
 		return
 	}
+	// 对端画面**接通后才放**（用户要求）：振铃期窗口里只有本地回显，
+	// 早期媒体/回铃画面不显示——帧照常存下（remoteHasVideo 标记照常置位），
+	// 接通后由首帧或 call.established 的同步把它显示出来。
+	if a.uiState != uiInCall {
+		a.videoSurface.remote.Hide()
+		return
+	}
 	a.videoSurface.remote.Image = ref.img
 	a.videoSurface.remote.Show()
 	a.videoSurface.remote.Refresh()
+
+	// 尺寸适配：分辨率**变化**时重设窗口（首帧、对端换分辨率/换流；不变则直接早退）
+	a.applyVideoSize(ref.img.Rect.Dx(), ref.img.Rect.Dy())
 
 	if !a.remoteHasVideo {
 		a.remoteHasVideo = true
 		logx.Logger().Info("远端视频首帧已到达界面", "callId", callIDOf(ref),
 			"size", imgSize(ref))
-		// 首次收到对端画面：按比例定窗口大小再显示窗口。
+		// 首次收到对端画面：定好窗口大小后显示窗口。
 		//
 		// ⚠️ 这几个调用只能放在"首次"分支里：showVideoWindow 会 SetTitle +
 		// Show + moveVideoWindowAboveCallPanel（内部 EnumWindows 找窗口 + SetWindowPos），
 		// 每帧来一遍会直接把 UI 拖垮。状态变化时另有 call.video / 开关回调触发。
-		a.applyVideoSize(ref.img.Rect.Dx(), ref.img.Rect.Dy())
 		a.applyLocalVideoVisibility()
 		a.syncVideoWindow()
 	}

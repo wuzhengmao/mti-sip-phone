@@ -367,15 +367,110 @@ func (v *VideoEngine) setNegotiated(c VideoCodec, peerPT uint8, answerFMTP strin
 
 // Start 启动视频收发（确定远端地址后调用）。
 func (v *VideoEngine) Start() {
-	v.wg.Add(2)
+	v.wg.Add(3)
 	go v.recvLoop()
 	go v.decodeLoop()
+	go v.placeholderLoop()
 	v.rtcp.start()
 	v.punchHole()
 	// 诊断：8 秒后还没收到对端任何视频包就打一条线索（只打一次，挂断则不打）。
 	// 「视频窗口开了但对方画面一直不来」时，它能立刻区分「对端没发」与
 	// 「本端没收到/被过滤」，省掉一轮抓包。
 	time.AfterFunc(8*time.Second, v.diagNoRemoteVideo)
+}
+
+// --- 占位画面（摄像头不可用/被禁用时的发送源）---
+
+// placeholderW/H 占位画面尺寸；帧率与码率都很低——内容是一块静止的深灰，
+// 目的只是让对端把这条腿当"在发视频"，不是给人看的。
+const (
+	placeholderW   = 320
+	placeholderH   = 240
+	placeholderFPS = 5
+	placeholderBps = 256_000
+)
+
+// placeholderLoop 摄像头不可用（禁用/打不开）但本次通话要发送视频时，
+// 持续发送一路低帧率的**占位画面**（静止深灰），本端本地回显不受影响
+// （摄像头没开，本来就没有回显）。
+//
+// 为什么必须发（实测，2026-10-05）：对端（FreeSWITCH 等）先把媒体发到 SDP
+// 里宣告的地址，只有当它**收到本端该腿的有效媒体**之后，才会把发送目标切换成
+// 实际观察到的源地址（对称 RTP / 媒体锁定）。摄像头禁用时本端在视频流上一个包
+// 都不发，对端就始终把画面发往我们收不到的地址——本机内网地址（NAT 场景下对端
+// 不可达；出向端口还会被 NAT 改写，无法预先宣告），表现是"看不见对方画面、
+// 连视频窗口都不出现"。发一路占位画面即可让对端正常回送画面。
+//
+// 只在没有摄像头时运行：有摄像头时由采集循环发真帧（`sendEnabled` 为真→这里让位）。
+func (v *VideoEngine) placeholderLoop() {
+	defer v.wg.Done()
+	t := time.NewTicker(time.Second / placeholderFPS)
+	defer t.Stop()
+
+	var (
+		enc      video.Encoder
+		encCodec string
+		frame    *video.YUV420P
+		idx      int
+	)
+	defer func() {
+		if enc != nil {
+			enc.Close()
+		}
+	}()
+
+	for {
+		select {
+		case <-v.stop:
+			return
+		case <-t.C:
+		}
+		if !v.enabled.Load() || v.sendEnabled.Load() || v.holdTx.Load() {
+			continue // 关闭视频 / 有摄像头在发真帧 / 对端保持：不需要占位画面
+		}
+		rc, ok := v.NegotiatedCodec()
+		if !ok || !v.hasRemote() {
+			continue // 还没协商出编码 / 还不知道对端地址
+		}
+		if enc == nil || encCodec != rc.Name {
+			if enc != nil {
+				enc.Close()
+				enc, frame = nil, nil
+			}
+			w, h := placeholderW, placeholderH
+			if rc.Name == videoCodecH263 {
+				// H.263 只吃标准尺寸，缩到能容纳的最大档（同采集路径）
+				w, h = standardH263Size(w, h)
+			}
+			e, err := video.NewEncoder(rc.Name, w, h, placeholderFPS, placeholderBps)
+			if err != nil {
+				logx.Logger().Warn("占位画面编码器创建失败", "codec", rc.Name, "err", err)
+				continue
+			}
+			f := video.NewYUV420P(w, h)
+			for i := range f.Y {
+				f.Y[i] = 0x40 // 深灰
+			}
+			for i := range f.U {
+				f.U[i] = 0x80
+			}
+			for i := range f.V {
+				f.V[i] = 0x80
+			}
+			enc, encCodec, frame = e, rc.Name, f
+			logx.Logger().Info("摄像头不可用，改为发送占位画面（静止深灰，让对端正常回送画面）",
+				"codec", rc.Name, "size", fmt.Sprintf("%dx%d", w, h), "fps", placeholderFPS)
+		}
+		// 首个画面即关键帧，之后每秒一个（对端中途请求关键帧也走 forceKey）
+		force := v.forceKey.Swap(false) || idx == 0 || idx%int(placeholderFPS) == 0
+		data, _, err := enc.Encode(frame, force)
+		idx++
+		if err != nil {
+			logx.Logger().Debug("占位画面编码失败", "err", err)
+			continue
+		}
+		v.sendFrame(data)
+	}
 }
 
 // diagNoRemoteVideo 启动后迟迟收不到对端视频时的诊断（见 Start）。
