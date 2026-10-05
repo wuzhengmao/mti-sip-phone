@@ -317,6 +317,7 @@ func (a *App) buildMainWindow() {
 
 	// 拨号盘定制主题：更大按键、更明显边框
 	a.fyne.Settings().SetTheme(&dialTheme{})
+	a.watchThemeChanges()
 
 	a.buildDialPage()
 	a.buildSettingsPage()
@@ -1080,6 +1081,33 @@ func (a *App) setCallUI(state int, call *core.Call) {
 	// 视频回显摆位随通话阶段变化（振铃期铺满窗口 / 接通后回右上角小窗），
 	// 每次状态切换都按新口径同步一次（用户要求）。
 	a.applyLocalVideoVisibility()
+}
+
+// watchThemeChanges 主题（深/浅色）切换后，让**长驻的自绘文本**重新取色。
+//
+// 自绘文本把主题前景色缓存在 canvas.Text 里（见 plainText.themed）：通话面板、
+// 悬停提示这些只建一次的控件不重新取色时，切换主题后文字仍是旧颜色，要退出
+// 重启才恢复（用户实测）。这里在设置变化时主动刷新一次（设置变化的场景还包括
+// 缩放变化等，多刷一次这几个文本开销可忽略）。
+func (a *App) watchThemeChanges() {
+	a.fyne.Settings().AddListener(func(fyne.Settings) {
+		fyne.Do(func() {
+			// 注意逐个判空：把 nil 指针放进 fyne.CanvasObject 会得到非 nil 接口，
+			// 直接调 Refresh() 会崩（这些控件是懒创建的）。
+			if a.callStateLabel != nil {
+				a.callStateLabel.Refresh()
+			}
+			if a.callTimerLabel != nil {
+				a.callTimerLabel.Refresh()
+			}
+			if a.callName != nil {
+				a.callName.Refresh()
+			}
+			if a.callTip != nil {
+				a.callTip.Refresh()
+			}
+		})
+	})
 }
 
 // shouldShowMainAfterCall 通话结束时要不要显示主窗体（REQ-UI-030 的规则，

@@ -61,7 +61,7 @@ func newTooltipLayer() *tooltipLayer {
 	l := &tooltipLayer{}
 	l.bg = canvas.NewRectangle(tooltipBgColor())
 	l.bg.CornerRadius = 4
-	l.label = newPlainText("", tooltipFont, theme.ForegroundColor(), false)
+	l.label = newThemedText("", tooltipFont, false)
 	l.box = container.New(tooltipBoxLayout{l}, l.bg, l.label)
 	l.box.Hide()
 	l.ExtendBaseWidget(l)
@@ -178,7 +178,7 @@ type hoverNote struct {
 
 func newHoverNote(s string, size float32, note string, tip *tooltipLayer) *hoverNote {
 	h := &hoverNote{tip: tip, note: note}
-	h.text = newPlainText(s, size, theme.ForegroundColor(), false)
+	h.text = newThemedText(s, size, false)
 	h.ExtendBaseWidget(h)
 	return h
 }

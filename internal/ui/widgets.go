@@ -23,8 +23,9 @@ import (
 // 按像素宽度截断并补省略号，避免文字画到相邻控件上。
 type plainText struct {
 	widget.BaseWidget
-	text *canvas.Text
-	full string // 原始文本（截断后仍保留，宽度变大时可还原）
+	text   *canvas.Text
+	full   string // 原始文本（截断后仍保留，宽度变大时可还原）
+	themed bool   // 颜色跟随主题前景色：主题（深/浅）切换时重新取色
 }
 
 func newPlainText(s string, size float32, col color.Color, bold bool) *plainText {
@@ -36,12 +37,33 @@ func newPlainText(s string, size float32, col color.Color, bold bool) *plainText
 	return t
 }
 
+// newThemedText 用**主题前景色**创建自绘文本（长驻控件用：通话面板的
+// 状态/时长、悬停提示图层等只建一次；若把创建当时的颜色缓存下来，深/浅色
+// 主题切换后会一直是旧颜色、要重启才恢复——用户实测）。
+func newThemedText(s string, size float32, bold bool) *plainText {
+	t := newPlainText(s, size, theme.ForegroundColor(), bold)
+	t.themed = true
+	return t
+}
+
+// Refresh 跟随主题的文本在每次刷新时重新取前景色（主题切换后驱动会刷新
+// 控件树，见 App 里注册的 Settings 监听）。
+func (t *plainText) Refresh() {
+	if t.themed {
+		t.text.Color = theme.ForegroundColor()
+		t.text.Refresh()
+	}
+	t.BaseWidget.Refresh()
+}
+
 func (t *plainText) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(t.text)
 }
 
 // SetColor 更新文字颜色（注册状态文字要跟着圆点颜色走）。
+// 显式指定颜色后不再跟随主题（否则刷新时会被主题前景色顶掉）。
 func (t *plainText) SetColor(c color.Color) {
+	t.themed = false
 	t.text.Color = c
 	t.text.Refresh()
 }
