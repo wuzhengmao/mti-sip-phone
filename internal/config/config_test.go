@@ -69,3 +69,44 @@ func TestInstanceDir(t *testing.T) {
 		t.Fatalf("槽位目录应已创建: %v", err)
 	}
 }
+
+// TestVideoEnabledDefaultOn 视频通话总开关默认启用（REQ-VIDEO-014）：
+// 旧配置文件里没有 video.disabled 字段时必须仍是启用状态（升级上来的用户
+// 不会被"静默关掉视频"）；显式写了 disabled=true 才关闭。
+func TestVideoEnabledDefaultOn(t *testing.T) {
+	if !Default().Video.Enabled() {
+		t.Fatal("默认配置应启用视频通话")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	legacy := `{"version":1,"account":{"server":"10.0.0.1","account":"1001"},"video":{"cameraId":"","width":640,"height":480}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("写测试配置失败: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if !cfg.Video.Enabled() {
+		t.Fatal("旧配置缺少 disabled 字段时应按默认启用视频通话")
+	}
+	if !cfg.Video.CameraUsable() {
+		t.Fatal("视频启用时摄像头应可用")
+	}
+
+	off := `{"version":1,"video":{"disabled":true}}`
+	if err := os.WriteFile(path, []byte(off), 0o600); err != nil {
+		t.Fatalf("写测试配置失败: %v", err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if cfg.Video.Enabled() {
+		t.Fatal("配置里显式关闭视频通话时不应被默认值覆盖")
+	}
+	if cfg.Video.CameraUsable() {
+		t.Fatal("视频关闭时摄像头应算不可用")
+	}
+}

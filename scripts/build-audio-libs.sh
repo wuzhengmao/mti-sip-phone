@@ -18,10 +18,10 @@ fi
 # 目标平台的 gcc：x86 的 SIMD 走编译器 intrinsics，不依赖外部汇编器。
 #
 # 用法：
-#   ./scripts/build-audio-lib.sh                    # 只构建本机原生目标
-#   ./scripts/build-audio-lib.sh windows-amd64      # 指定目标
-#   ./scripts/build-audio-lib.sh all                # 全部目标（缺工具链的自动跳过）
-#   ./scripts/build-audio-lib.sh --clean windows-amd64
+#   ./scripts/build-audio-libs.sh                    # 只构建本机原生目标
+#   ./scripts/build-audio-libs.sh windows-amd64      # 指定目标
+#   ./scripts/build-audio-libs.sh all                # 全部目标（缺工具链的自动跳过）
+#   ./scripts/build-audio-libs.sh --clean windows-amd64
 #
 # 注意：不带参数时**只**构建本机原生目标。build.sh / build.bat 交叉产出的
 # windows-amd64 / windows-386 / linux-<对侧arch> 想要带 Opus，必须先用
@@ -350,7 +350,7 @@ if [ "$TARGETS_DEFAULTED" = 1 ]; then
     echo
     echo "提示：本次只构建了本机原生目标（${TARGETS# }）。build.sh / build.bat 交叉产出的"
     echo "      windows-amd64 / windows-386 / linux-<对侧arch> 想带 Opus，须先执行："
-    echo "      sh scripts/build-audio-lib.sh all"
+    echo "      sh scripts/build-audio-libs.sh all"
 fi
 echo
 echo "下一步：build.bat / build.sh 会自动探测 third_party/audio/<target> 并加上 -tags audio。"

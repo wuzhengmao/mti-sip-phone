@@ -630,6 +630,9 @@
      * 关闭视频/挂断/退订时 SDK 会把画面清成黑底。
      * 参数越界会被软电话钳制到合法范围（返回值里是生效值）。
      *
+     * **视频通话被关闭时订阅失败**（软电话配置里的「启用视频通话」未勾选）：
+     * Promise 以错误 reject（`error.code === 'video_unsupported'`）。
+     *
      * @param {{remote: (HTMLVideoElement|Object), local?: (HTMLVideoElement|Object),
      *          maxWidth?: number, maxHeight?: number, fps?: number, quality?: number,
      *          onStats?: function}} options
@@ -664,6 +667,13 @@
         }
         this._videoSubActive = true;
         return this._decorateSubscription(res);
+      }, (err) => {
+        // 订阅失败（如软电话关闭了视频通话，REQ-VIDEO-014）：忘掉订阅参数，
+        // 否则断线重连时会拿它偷偷重试一次
+        if (this._subOpts === params) {
+          this._subOpts = null;
+        }
+        throw err;
       });
     }
 

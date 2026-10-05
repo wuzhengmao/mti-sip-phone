@@ -194,3 +194,34 @@ func TestVideoWebEventOnDisconnect(t *testing.T) {
 		t.Fatalf("断开后订阅状态应清空，实际 %+v", st)
 	}
 }
+
+// TestVideoSubscribeDisabled 关闭「启用视频通话」总开关后订阅视频失败
+// （REQ-VIDEO-014）：错误码 video_unsupported，且不建立订阅关系。
+func TestVideoSubscribeDisabled(t *testing.T) {
+	ts, app, tel := newTestServerAll(t)
+	defer ts.Close()
+	if err := tel.SetVideoCallEnabled(false); err != nil {
+		t.Fatalf("关闭视频总开关失败: %v", err)
+	}
+	if app.VideoUsable() {
+		t.Fatalf("总开关关闭后 VideoUsable 应为 false")
+	}
+
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+	sendRequest(t, conn, Message{
+		ID:     json.RawMessage("1"),
+		Method: MethodVideoSubscribe,
+		Params: json.RawMessage(`{"remote":{}}`),
+	})
+	resp := waitResponse(t, conn)
+	if resp.OK == nil || *resp.OK {
+		t.Fatalf("视频关闭时订阅应失败，实际响应: %+v", resp)
+	}
+	if resp.Error == nil || resp.Error.Code != CodeVideoUnsupported {
+		t.Fatalf("错误码应为 %s，实际: %+v", CodeVideoUnsupported, resp.Error)
+	}
+	if st := app.WebVideoState(); st.Active {
+		t.Fatalf("失败的订阅不该建立订阅关系，实际 %+v", st)
+	}
+}

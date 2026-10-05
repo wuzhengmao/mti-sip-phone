@@ -192,11 +192,13 @@ type App struct {
 	updShown           bool              // 提示窗当前是否显示（Fyne 无 Visible 查询）
 
 	// ---- 视频（REQ-VIDEO-*）----
-	videoCallBtn   *compactButton // 主窗体「视频呼叫」按钮（需求 3）
-	videoAnswerBtn *compactButton // 来电弹窗「视频接听」按钮（需求 4）
-	videoBtn       *compactButton // 通话面板「关闭视频」开关（需求 8）
-	camSelect      *widget.Select // 设置页摄像头选择（需求 2）
-	camHint        *widget.Label  // 摄像头说明行（本构建不支持时改成提示文字）
+	callRow        *fyne.Container  // 主窗体「呼叫 + 视频呼叫」按钮行（视频按钮显隐要重排）
+	videoCallBtn   *compactButton   // 主窗体「视频呼叫」按钮（需求 3）
+	videoAnswerBtn *compactButton   // 来电弹窗「视频接听」按钮（需求 4）
+	videoBtn       *compactButton   // 通话面板「关闭视频」开关（需求 8）
+	videoCallCheck *widget.Check    // 设置页「启用视频通话」总开关（REQ-VIDEO-014）
+	camSelect      *widget.Select   // 设置页摄像头选择（需求 2）
+	camHint        *widget.Label    // 摄像头说明行（本构建不支持时改成提示文字）
 	camIDs         map[string]string
 
 	videoW          fyne.Window   // 视频窗口（懒创建）
@@ -488,17 +490,18 @@ func (a *App) buildDialPage() {
 	// 呼叫按钮上方一行：版本更新提示（REQ-UPD-003，默认隐藏）
 	a.buildUpdateBar()
 
-	// 呼叫按钮占满剩余宽度，视频按钮固定宽停在右侧
-	callRow := container.NewBorder(nil, nil, nil, a.videoCallBtn, a.callBtn)
-	if !a.core.VideoSupported() {
-		// 未启用视频的构建：隐藏视频入口，呼叫按钮恢复占满
+	// 呼叫按钮占满剩余宽度，视频按钮固定宽停在右侧（Border 布局跳过不可见
+	// 对象，视频按钮隐藏时呼叫按钮自然恢复占满）。视频入口的显隐由
+	// applyVideoFeatureUI 统一维护：本构建没有视频、或配置里关掉了视频通话
+	//（REQ-VIDEO-014）都隐藏。
+	a.callRow = container.NewBorder(nil, nil, nil, a.videoCallBtn, a.callBtn)
+	if !a.core.VideoUsable() {
 		a.videoCallBtn.Hide()
-		callRow = container.NewBorder(nil, nil, nil, nil, a.callBtn)
 	}
 
 	a.dialPage = container.NewBorder(
 		topBar,
-		container.NewVBox(a.updateBar, callRow),
+		container.NewVBox(a.updateBar, a.callRow),
 		nil, nil,
 		container.NewVBox(
 			inputRow,
@@ -596,16 +599,21 @@ func (a *App) buildSettingsPage() {
 		refreshDevicesBtn,
 	)
 
-	// ---- 视频设备（REQ-VIDEO-002/005）----
+	// ---- 视频设备（REQ-VIDEO-002/005/014）----
+	// 总开关「启用视频通话」（默认勾选）：取消后视频功能整体隐藏——主窗体的
+	// 视频呼叫按钮、通话记录/通信录行内的视频按钮都不显示，来电不显示
+	// 「视频接听」，SDP 不含 m=video，网页订阅视频返回失败。
+	a.videoCallCheck = widget.NewCheck("启用视频通话", a.onVideoCallEnabledChanged)
 	a.camSelect = widget.NewSelect([]string{}, nil)
 	a.camIDs = make(map[string]string)
 	refreshCamBtn := widget.NewButtonWithIcon("刷新设备", theme.ViewRefreshIcon(), a.refreshDevices)
 	// 说明文字必须开自动折行：主窗体是固定宽度，标签的 MinSize 按整行文字宽度
 	// 计算会把窗口撑宽（与「网页接入」的 wsHint 同样处理）。
-	a.camHint = widget.NewLabel("选择「禁用」后：发起视频呼叫不发送本地视频，来电也不显示「视频接听」按钮，但仍可查看对方的视频")
+	a.camHint = widget.NewLabel(cameraHintDefault)
 	a.camHint.Wrapping = fyne.TextWrapWord
 	videoCard := container.NewVBox(
 		widget.NewLabelWithStyle("视频设备", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		a.videoCallCheck,
 		formItem("摄像头", a.camSelect),
 		a.camHint,
 		refreshCamBtn,
@@ -973,8 +981,9 @@ func (a *App) onVideoCallButton() {
 // cameraUsable 摄像头当前是否可用于发送本地视频（REQ-VIDEO-005）。
 func (a *App) cameraUsable() bool {
 	// 没有摄像头后端的构建（Windows 386）也要算"不可用"：否则会显示
-	//「视频接听」按钮（点了却没有本地画面）。
-	if !a.core.VideoSupported() || !a.core.CameraSupported() {
+	//「视频接听」按钮（点了却没有本地画面）。视频总开关关闭（REQ-VIDEO-014）
+	// 同样算不可用——此时整个视频功能都不该出现。
+	if !a.core.VideoUsable() || !a.core.CameraSupported() {
 		return false
 	}
 	return a.cfg.Video.CameraUsable()
@@ -2013,13 +2022,28 @@ func (a *App) applyDeviceLists(mics, speakers []core.AudioDevice, placeholder st
 // refreshCameras 后台枚举摄像头并回填下拉框（REQ-VIDEO-002）。
 // 与 refreshDevices 同样的模式：枚举可能耗时（V4L2 逐个探测 /
 // DirectShow 枚举），必须放到后台 goroutine，回主线程再更新控件。
+//
+// 同时负责「启用视频通话」总开关（REQ-VIDEO-014）在界面上的体现：
+// 开关本身在构建无视频时置灰，摄像头选择在开关关闭时不可用。
 func (a *App) refreshCameras() {
 	if a.camSelect == nil {
 		return
 	}
+	// 勾选框状态与配置同步（回填期间屏蔽 OnChanged 自动保存）
+	if a.videoCallCheck != nil {
+		a.loadingForm = true
+		a.videoCallCheck.SetChecked(a.cfg.Video.Enabled())
+		a.loadingForm = false
+		if a.core.VideoSupported() {
+			a.videoCallCheck.Enable()
+		} else {
+			a.videoCallCheck.Disable() // 本构建没有视频能力：开关无意义
+		}
+	}
 	if !a.core.VideoSupported() {
 		a.camSelect.Disable()
 		a.applyCameraList(nil, "此构建未启用视频")
+		a.camHint.SetText("")
 		return
 	}
 	if !a.core.CameraSupported() {
@@ -2031,12 +2055,55 @@ func (a *App) refreshCameras() {
 		a.camHint.SetText("本版本（32 位）不支持摄像头采集：视频通话只能看对方，不发送本地画面")
 		return
 	}
-	a.camHint.SetText("")
+	if a.core.VideoCallEnabled() {
+		a.camSelect.Enable()
+		a.camHint.SetText("")
+	} else {
+		// 总开关关闭：摄像头不可选，但仍照常枚举并回显当前选择——
+		// 关一下开关不该把用户选好的摄像头"弄丢"。
+		a.camSelect.Disable()
+		a.camHint.SetText(cameraHintDisabled)
+	}
 	go func() {
 		cams := a.core.VideoDevices()
 		fyne.Do(func() { a.applyCameraList(cams, "未检测到摄像头") })
 	}()
 }
+
+// onVideoCallEnabledChanged 「启用视频通话」总开关（REQ-VIDEO-014）：
+// 立即生效（不需要重启）并保存配置。
+func (a *App) onVideoCallEnabledChanged(on bool) {
+	if a.loadingForm {
+		return
+	}
+	a.cfg.Video.Disabled = !on
+	if err := a.core.SetVideoCallEnabled(on); err != nil {
+		logx.Logger().Warn("切换视频通话总开关失败", "err", err)
+	}
+	a.persistConfig()
+	a.applyVideoFeatureUI()
+}
+
+// applyVideoFeatureUI 按视频功能是否可用刷新视频入口：
+// 主窗体的「视频呼叫」按钮显隐 + 配置页「视频设备」卡片的可用性。
+//
+// 通话记录 / 通信录列表行内的视频呼叫按钮**不在这里刷**：那两个页面与配置页
+// 在主窗体里互斥，且它们的行在每次进页面时都会重建（reload），用户下一次
+// 进入时自然就是新状态。
+func (a *App) applyVideoFeatureUI() {
+	if a.videoCallBtn != nil && a.callRow != nil {
+		if a.core.VideoUsable() {
+			a.videoCallBtn.Show()
+		} else {
+			a.videoCallBtn.Hide()
+		}
+		a.callRow.Refresh()
+	}
+	a.refreshCameras()
+}
+
+// cameraHintDisabled 总开关关闭时摄像头选择下方的提示（REQ-VIDEO-014）。
+const cameraHintDisabled = "视频通话已关闭：勾选上方「启用视频通话」后可用"
 
 // applyCameraList 回填摄像头下拉框：列表首项为「系统默认」，末项为「禁用」。
 func (a *App) applyCameraList(cams []core.VideoDevice, placeholder string) {
@@ -2101,6 +2168,9 @@ func (a *App) applyCameraList(cams []core.VideoDevice, placeholder string) {
 const (
 	cameraDefaultLabel  = "系统默认"
 	cameraDisabledLabel = "禁用（不发送本地视频）"
+	// cameraHintDefault 摄像头选择下方的说明文字（构建无视频 / 总开关关闭时
+	// refreshCameras 会把它换成对应的提示，正常可用时清空）。
+	cameraHintDefault = "选择「禁用」后：发起视频呼叫不发送本地视频，来电也不显示「视频接听」按钮，但仍可查看对方的视频"
 )
 
 // newBorderlessWindow 创建一个无边框窗口。

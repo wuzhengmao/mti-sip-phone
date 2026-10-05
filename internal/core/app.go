@@ -503,6 +503,9 @@ func (a *App) MuteSpeaker(callID string, muted bool) error {
 // ErrVideoUnsupported 当前构建不支持视频。
 var ErrVideoUnsupported = errors.New("当前构建未启用视频支持")
 
+// ErrVideoDisabled 视频通话总开关已关闭（配置页的「启用视频通话」，REQ-VIDEO-014）。
+var ErrVideoDisabled = errors.New("视频通话已关闭")
+
 // SetVideoSink 注册视频帧出口的主槽（界面层启动时调用一次）。
 func (a *App) SetVideoSink(s VideoSink) { a.video.setPrimary(s) }
 
@@ -517,9 +520,28 @@ func (a *App) RemoveVideoSink(s VideoSink) { a.video.remove(s) }
 // 之后增删订阅者无需重新取（见 videoDemux）。
 func (a *App) VideoFrameSink() VideoSink { return a.video }
 
-// VideoSupported 当前构建是否具备视频能力。
+// VideoSupported 本构建/平台是否具备视频能力（不含用户的开关）。
 func (a *App) VideoSupported() bool {
 	return a.tel != nil && a.tel.VideoSupported()
+}
+
+// VideoCallEnabled 用户是否启用了视频通话（配置总开关，默认启用）。
+func (a *App) VideoCallEnabled() bool {
+	return a.tel != nil && a.tel.VideoCallEnabled()
+}
+
+// VideoUsable 视频功能整体是否可用（构建支持 + 总开关启用，REQ-VIDEO-014）。
+// **视频入口的显隐、SDP 是否带 m=video、网页能否订阅视频都以它为准。**
+func (a *App) VideoUsable() bool {
+	return a.VideoSupported() && a.VideoCallEnabled()
+}
+
+// SetVideoCallEnabled 开/关视频通话总开关（配置页勾选项，立即生效）。
+func (a *App) SetVideoCallEnabled(on bool) error {
+	if a.tel == nil {
+		return ErrTelephonyNotReady
+	}
+	return a.tel.SetVideoCallEnabled(on)
 }
 
 // CameraSupported 本构建/平台是否有摄像头采集能力。

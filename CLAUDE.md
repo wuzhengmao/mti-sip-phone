@@ -48,7 +48,7 @@ build.bat
 export CC="<WinLibs mingw64/bin/gcc.exe 路径>"   # build.bat 输出里可见
 export CGO_ENABLED=1
 go test ./internal/media/ ./internal/wsapi/ ./internal/sip/ ./internal/ui/ ./internal/updater/
-# 带 Opus 的包还要 -tags audio（需先跑 scripts/build-audio-lib.bat 生成静态库，
+# 带 Opus 的包还要 -tags audio（需先跑 scripts/build-audio-libs.bat 生成静态库，
 # 并把 third_party/audio/<目标>/{include,lib} 经 CGO_CFLAGS/CGO_LDFLAGS 传入）：
 go test -tags audio ./internal/media/
 
@@ -168,7 +168,7 @@ web/
               notifyUpdate，查询在软电话侧）
 release/      发布到更新站点的配置与元数据：release.conf（站点/应用 ID/令牌）、
               app.json（应用级元数据，经站点 metadata 接口写入）、icon.svg（图标，经 icon 接口写入）
-scripts/      第三方库构建（build-video-libs.*、build-audio-lib.*）与一键发布（release.sh/.bat）
+scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）与一键发布（release.sh/.bat）
 docs/         design.md（架构设计：分层与依赖、各模块职责、关键决策、目录地图——新同学先看这份）、
               requirements.md（需求）、ws-protocol.md（WS 协议）、auto-update.md（自动更新与
               更新站点接入：规范摘要、REST API、参考实现、接入清单）；changelog.md 在仓库根目录
@@ -220,7 +220,7 @@ FFmpeg 的 configure **刻意不启用 libvpx/libopenh264**（只解码），因
 
 **音频 Opus（`internal/media/codec_opus.go`，cgo + libopus）**：编码用官方 libopus（FFmpeg
 自带的 `ff_opus_encoder` 标着 `AV_CODEC_CAP_EXPERIMENTAL`，官方不认为可用于生产，故不用）。
-静态库由 `scripts/build-audio-lib.sh` / `.bat` 生成到 `third_party/audio/<target>/{include,lib}`
+静态库由 `scripts/build-audio-libs.sh` / `.bat` 生成到 `third_party/audio/<target>/{include,lib}`
 （已 gitignore，音频第三方库的统一入口，以后加 G.722 等也走这里）。配置与视频**完全独立**：
 探测到 `lib/libopus.a` 就加 `-tags audio` 并注入 `CGO_CFLAGS`/`CGO_LDFLAGS`，缺失则降级为
 **无 Opus**（SDP 不宣告，仍走 PCMA/PCMU），两个库都在时标签是 `-tags video,audio`（音频扩展统一用 `audio`，以后加 G.722 等同标签）。
@@ -581,7 +581,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   `scripts/build-video-libs.sh` 的 `abspath` 同理）；`build.bat` 用 `%CD%` 本来就是
   Windows 形式。手工跑 `go test -tags …` 时同理，别用 `$(pwd)`。
 - **音频静态库：libopus 是 autotools 工程（视频那三个库都不是），构建时要绕开三个坑**，
-  都在 `scripts/build-audio-lib.sh` 里（前两个是 Windows 专有）：
+  都在 `scripts/build-audio-libs.sh` 里（前两个是 Windows 专有）：
   1. **MAKE 传裸命令名 + `--disable-dependency-tracking`**：Makefile 递归调用 `$(MAKE)`，
      Windows 上递归是 CreateProcess 按 **Windows PATH** 查程序名，而 git-bash 里 `make`
      只是 shell 层解析（PATH 里实际只有 `mingw32-make.exe`），直接给 `make` 会报

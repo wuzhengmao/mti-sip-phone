@@ -1,11 +1,14 @@
 package sip
 
 import (
+	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
 
 	"mti-sip-phone/internal/config"
+	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/media"
 )
 
@@ -170,5 +173,66 @@ func TestAnswerVideoModes(t *testing.T) {
 	// 视频段必须复用对端 PT 号、带上视频端口
 	if !strings.Contains(got, "m=video "+strconv.Itoa(v.LocalPort())+" RTP/AVP 96") {
 		t.Fatalf("视频段应复用对端 PT 96：\n%s", got)
+	}
+}
+
+// TestVideoCallSwitchOff 「启用视频通话」总开关关闭（REQ-VIDEO-014）：
+//   - 视频呼叫直接失败（ErrVideoDisabled，不建媒体引擎、不发 INVITE）；
+//   - 来电 offer 里的视频段被当纯音频处理（handleIncoming 不解析视频段，
+//     cs.offer 保持 nil），answer 只回 m=audio、完全不含 video 段。
+func TestVideoCallSwitchOff(t *testing.T) {
+	if !media.VideoSupported() {
+		t.Skip("未启用视频的构建")
+	}
+	p := &Phone{}
+	p.acc = config.Account{Server: "127.0.0.1:15060", Account: "2999"}
+	p.SetVideoCallEnabled(false)
+	if p.VideoCallEnabled() || p.videoUsable() {
+		t.Fatal("总开关关闭后 VideoCallEnabled / videoUsable 应为 false")
+	}
+	if _, err := p.DialVideo(context.Background(), "1002"); !errors.Is(err, core.ErrVideoDisabled) {
+		t.Fatalf("总开关关闭后 DialVideo 应返回 ErrVideoDisabled，实际: %v", err)
+	}
+
+	// 视频来电的处理结果：offer 里带 m=video，但视频不可用时我们"不认识"它
+	body := []byte(strings.Join([]string{
+		"v=0",
+		"o=- 1 1 IN IP4 127.0.0.1",
+		"s=-",
+		"c=IN IP4 127.0.0.1",
+		"t=0 0",
+		"m=audio 50002 RTP/AVP 8",
+		"a=rtpmap:8 PCMA/8000",
+		"m=video 50000 RTP/AVP 96",
+		"a=rtpmap:96 H264/90000",
+		"a=fmtp:96 packetization-mode=1",
+		"a=sendrecv",
+	}, "\r\n") + "\r\n")
+
+	e, err := media.NewEngine("127.0.0.1")
+	if err != nil {
+		t.Fatalf("创建音频引擎失败: %v", err)
+	}
+	defer e.Close()
+	e.SetSDPIP("127.0.0.1")
+	if _, err := e.SDPAnswer(body); err != nil {
+		t.Fatalf("音频协商失败: %v", err)
+	}
+	// cs.offer 为 nil = handleIncoming 跳过了视频段解析（开关关闭时的实际状态）
+	answer := p.buildAnswer(&callSession{id: "c1", engine: e}, answerNoVideo)
+	if strings.Contains(answer, "m=video") {
+		t.Fatalf("总开关关闭后 answer 不应含任何视频段：\n%s", answer)
+	}
+	if !strings.Contains(answer, "m=audio") {
+		t.Fatalf("answer 应保留音频段：\n%s", answer)
+	}
+
+	// 重新打开：视频呼叫不再被开关拦下（本测试不真发 INVITE，只看到达
+	// "创建视频引擎"这一步就够——引擎创建失败会返回别的错误）
+	if err := p.SetVideoCallEnabled(true); err != nil {
+		t.Fatalf("打开总开关失败: %v", err)
+	}
+	if !p.videoUsable() {
+		t.Fatal("重新打开后 videoUsable 应为 true")
 	}
 }

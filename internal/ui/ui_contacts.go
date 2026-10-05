@@ -978,7 +978,9 @@ func newContactsRow(st *contactsState, e contactEntry) *contactsRow {
 		func() { a.onContactCall(e.c, false) })
 	callBtn.SetCornerRadius(contactsRowButtonRadius)
 	actions := container.NewHBox(callBtn)
-	if a.core != nil && a.core.VideoSupported() {
+	// 视频呼叫按钮：视频功能不可用（本构建没有 / 用户在配置里关掉了，
+	// REQ-VIDEO-014）时不显示
+	if a.core != nil && a.core.VideoUsable() {
 		videoBtn := newCompactButton(IconVideoOn, colorHoldBlue, contactsRowIconSize,
 			func() { a.onContactCall(e.c, true) })
 		videoBtn.SetCornerRadius(contactsRowButtonRadius)

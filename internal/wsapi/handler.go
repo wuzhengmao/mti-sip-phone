@@ -217,6 +217,12 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		resp = okMessage(msg.ID, map[string]any{"callId": p.CallID})
 
 	case MethodVideoSubscribe:
+		// 视频功能不可用（本构建没有视频 / 用户关闭了「启用视频通话」总开关，
+		// REQ-VIDEO-014）：订阅直接失败，不建立订阅关系。
+		if !s.app.VideoUsable() {
+			resp = errMessage(msg.ID, CodeVideoUnsupported, videoUnavailableErr(s.app))
+			break
+		}
 		// 按通道给参数：{"remote":{...}} 必订（缺省用默认参数），
 		// {"local":{...}} 可选——不传 local 就是不订阅本地回显。
 		// 两条通道可以各要各的分辨率/帧率/质量（本地回显通常小一号）。
@@ -428,6 +434,15 @@ func (s *Server) reply(c *wsConn, msg Message) {
 	_ = writeMsg(writeCtx, c.conn, msg)
 }
 
+// videoUnavailableErr 视频不可用时给网页的错误：区分"本构建没有视频"
+// 与"用户在配置里关掉了视频通话"（REQ-VIDEO-014），网页提示文案不同。
+func videoUnavailableErr(app *core.App) error {
+	if !app.VideoSupported() {
+		return core.ErrVideoUnsupported
+	}
+	return core.ErrVideoDisabled
+}
+
 // codeOf 将 Go error 映射为协议错误码。
 func codeOf(err error) string {
 	switch {
@@ -435,6 +450,8 @@ func codeOf(err error) string {
 		return CodeNotReady
 	case errors.Is(err, core.ErrCallNotFound):
 		return CodeCallNotFound
+	case errors.Is(err, core.ErrVideoUnsupported), errors.Is(err, core.ErrVideoDisabled):
+		return CodeVideoUnsupported
 	case errors.Is(err, core.ErrUpdateNotNewer):
 		return CodeUpdateNotNewer
 	case errors.Is(err, core.ErrUpdateInvalid):

@@ -52,9 +52,15 @@ type Telephony interface {
 	// ---- 视频（REQ-VIDEO-*）----
 	// 未启用视频的构建里这些方法仍然存在，但会返回 ErrVideoUnsupported。
 
-	// VideoSupported 当前构建是否具备视频能力（界面据此隐藏视频入口）。
+	// VideoSupported 本构建/平台**是否具备**视频能力（编译期决定，不含用户的
+	// 「启用视频通话」开关）。判断"视频功能能不能用"请用 VideoUsable。
 	VideoSupported() bool
+	// VideoCallEnabled 用户是否启用了视频通话（配置总开关，默认启用，REQ-VIDEO-014）。
+	VideoCallEnabled() bool
+	// SetVideoCallEnabled 开/关视频通话总开关（立即生效，持久化由调用方做）。
+	SetVideoCallEnabled(on bool) error
 	// DialVideo 发起视频呼叫（offer 同时含 m=audio 与 m=video）。
+	// 视频不可用（本构建不支持 / 总开关关闭）时返回 ErrVideoUnsupported / ErrVideoDisabled。
 	DialVideo(ctx context.Context, target string) (string, error)
 	// AnswerVideo 视频接听（打开摄像头，双向视频）。
 	AnswerVideo(callID string) error

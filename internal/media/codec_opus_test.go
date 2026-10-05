@@ -11,7 +11,7 @@ import (
 )
 
 // 运行：go test -tags audio ./internal/media/
-// 需要先跑 scripts/build-audio-lib.sh 生成 third_party/audio/<目标>/lib/libopus.a，
+// 需要先跑 scripts/build-audio-libs.sh 生成 third_party/audio/<目标>/lib/libopus.a，
 // 并把 include/lib 经 CGO_CFLAGS/CGO_LDFLAGS 传给 go（build.sh / build.bat 会自动做）。
 
 // opusSine 生成 8kHz、freq Hz、幅度 amp 的正弦波。

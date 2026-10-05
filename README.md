@@ -26,7 +26,7 @@ Linux 上用 mingw-w64 交叉构建（glfw 的 C 源码与 mingw 专用头随 go
 
 ```bash
 # 版本号：构建脚本从 internal/core/buildinfo.go 读基础版本。开发构建自动加 -rc
-# （如 1.0.11-rc，非正式版）；正式版：SIP_PHONE_RELEASE=1 build.bat（发布脚本会设）。
+# （如 1.0.12-rc，非正式版）；正式版：SIP_PHONE_RELEASE=1 build.bat（发布脚本会设）。
 
 # Windows：一键构建（自动探测 WinLibs gcc），产物输出到 dist/：
 build.bat
@@ -66,9 +66,9 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 （Windows 用 `scripts\release.bat`，内部走 git-bash）：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.11-rc），不上传
-./scripts/release.sh --pre             # 预发布：上传 1.0.11-rc（站点标记为预发布）
-./scripts/release.sh                   # 正式版：以 1.0.11 编译并上传
+./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.12-rc），不上传
+./scripts/release.sh --pre             # 预发布：上传 1.0.12-rc（站点标记为预发布）
+./scripts/release.sh                   # 正式版：以 1.0.12 编译并上传
 ```
 
 - 站点地址 / 应用 ID / 上传令牌（可选站点证书）在 `release/release.conf`，环境变量可覆盖。
