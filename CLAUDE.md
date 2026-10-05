@@ -6,9 +6,11 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.11**（已定版并合并到 master，待发布到更新站点；含多实例沙箱槽位、
-摄像头禁用时的占位画面与 183 早期媒体即启动视频、视频订阅 keepWindow、振铃期窗口
-口径与分辨率自适应、深/浅色主题切换跟随等）。版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
+当前版本 **1.0.12**（已定版并发布到更新站点；含 **G.722 宽频编解码（按需 16 kHz 管线，纯 Go）**、
+视频通话总开关、音频库脚本改名 build-audio-libs、多实例沙箱槽位、摄像头禁用占位画面与
+183 早期媒体即启动视频、视频订阅 keepWindow、振铃期窗口口径与分辨率自适应、深/浅色主题切换跟随等）。
+版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），
+正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
 真实环境：OpenSIPS 2.4.11（10.168.4.40:15060，账号 2999），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
 
@@ -738,7 +740,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   `"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --headless=new --disable-gpu
   --enable-logging=stderr --v=1 --virtual-time-budget=6000 --dump-dom http://127.0.0.1:8765/`
   → `grep -i uncaught` 看有没有 JS 运行期错误，`--dump-dom` 里能看到 JS 填出来的内容
-  （如「当前版本：1.0.11-rc（windows/amd64）」）说明 SDK 连上并跑通了。改 SDK 时另外用脚本
+  （如「当前版本：1.0.12-rc（windows/amd64）」）说明 SDK 连上并跑通了。改 SDK 时另外用脚本
   对一遍「`this.xxx()` 调用是否都有定义」——**大段删代码时最容易连带删掉无关方法**
   （这次就是删更新查询时把 `_emit` / `_startHeartbeat` 一起删了，页面直接白屏）。
 - **rtp_rx.wav**：根目录与 internal/sip/ 下的抓包调试产物，已被 .gitignore 忽略，勿误提交。
