@@ -223,6 +223,9 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		var p struct {
 			Remote *videoParamReq `json:"remote"`
 			Local  *videoParamReq `json:"local"`
+			// KeepWindow 订阅后是否仍保持软电话的视频窗口显示（REQ-VIDEO-009 修订）：
+			// 缺省 false = 隐藏窗口（原有行为，画面在网页看）
+			KeepWindow bool `json:"keepWindow"`
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil {
 			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("参数格式错误"))
@@ -236,9 +239,11 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 			remoteP = p.Remote.params()
 		}
 		// 越界参数不报错，钳制到合法范围（返回生效值）
-		effLocal, effRemote := s.video.Subscribe(c, p.Local != nil, localP, remoteP)
+		effLocal, effRemote := s.video.Subscribe(c, p.Local != nil, localP, remoteP, p.KeepWindow)
 		data := map[string]any{
 			"remote": effRemote,
+			// 订阅后是否保持软电话视频窗口显示（回显生效值，便于页面自检）
+			"keepWindow": p.KeepWindow,
 			// 当前通话快照：网页可立刻显示视频状态，无需等 call.video 事件
 			"call": activeCall(s.app),
 			// 当前旋转/镜像：订阅时以软电话为准（桌面那边可能已经转过）

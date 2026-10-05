@@ -73,7 +73,7 @@
 | `system.setAutoAnswer` | `{ "enabled": true }` | `{ "enabled": true }` | 自动接听开关（REQ-CALL-014）：与软电话界面上的「自动接听」按钮**共用一份状态**，变更后广播 `system.autoAnswer`，桌面按钮与网页据此同步。视频来电自动接听时按「视频接听」接通（REQ-VIDEO-004） |
 | `system.setUpdateConfig` | `{ "url": "https://update.example.com", "appId": "mti-sip-phone", "intervalMinutes": 5, "prerelease": false }` | 生效后的完整配置 `{url, appId, intervalMinutes, prerelease}` | 写入软电话的**自动更新配置**（REQ-UPD-018）：软电话据此自己定时查询更新站点（**url 留空 = 不检查**，周期 1–1440 分钟，prerelease 默认 false）。字段**都是可选的**，只改传入的那些；写入后落盘、立即生效（配了站点马上查一次）并广播 `system.updateConfig`。url 非 http/https 或周期越界返回 `invalid_params` |
 | `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64", "force": false }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.11" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选；`force: true` = **强制推送**，跳过"版本必须更高"的检查（REQ-UPD-015，页面对着手动推送/回滚用；SDK 的定时查询不带它） |
-| `video.subscribe` | `{ "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 }, "local": { "maxWidth": 160, "maxHeight": 120 } }` | 见下 | 订阅视频画面（REQ-VIDEO-009）：**必定订阅远端画面**（`remote` 不传也有默认参数），`local` 可选——不传就是**不订阅本地回显**；两条通道各带各的参数（本地回显通常小一号）。订阅期间**软电话自动关闭视频窗口**，画面以二进制帧推送（见 4.1） |
+| `video.subscribe` | `{ "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 }, "local": { "maxWidth": 160, "maxHeight": 120 }, "keepWindow": false }` | 见下 | 订阅视频画面（REQ-VIDEO-009）：**必定订阅远端画面**（`remote` 不传也有默认参数），`local` 可选——不传就是**不订阅本地回显**；两条通道各带各的参数（本地回显通常小一号）。**`keepWindow`**（默认 `false`）：订阅后是否仍**保持软电话的视频窗口显示**——不传/false 时软电话自动关闭视频窗口（画面在网页看），传 `true` 则窗口继续显示（两处同时看）。画面以二进制帧推送（见 4.1） |
 | `video.unsubscribe` | `{}` | `{ "local": false, "remote": false }` | 取消本连接的全部视频订阅（两条通道都已退订）；软电话恢复显示视频窗口 |
 | `video.setTransform` | `{ "channel": "remote", "rotate": true }` / `{ "channel": "local", "mirror": true }` / `{ "channel": "remote", "rotation": 90 }` | `{ "remote": { "rotation": 90, "mirror": false }, "local": { "rotation": 0, "mirror": false } }` | 画面旋转/水平镜像（REQ-VIDEO-012）：`rotate: true` = 顺时针 +90°，`rotation` 直接设角度，`mirror` 设水平镜像；`channel` 为 `remote`（远端画面，可省）或 `local`（本地回显）。**状态存在软电话侧、桌面与网页共用一份**，谁改都广播 `video.transform` |
 
@@ -157,6 +157,7 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 {
   "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 },
   "local": { "maxWidth": 160, "maxHeight": 120, "fps": 10, "quality": 75 },
+  "keepWindow": false,
   "call": { "id": "abc", "hasVideo": true, "video": { "negotiated": true, "sending": true, "width": 640, "height": 480 } }
 }
 ```
@@ -164,6 +165,7 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 - 请求里 `remote` / `local` 都是**参数对象、可缺字段**：`{}` 或整个缺省都表示"用默认值"。
 - 返回的是**生效参数**（每条通道一份）：越界值会被钳制到合法范围（`maxWidth`/`maxHeight` ∈ [64, 1920]，`fps` ∈ [1, 30]，`quality` ∈ [30, 95]），不报错。
 - **远端恒订阅**（不传 `remote` 也照样订阅，否则会出现"桌面窗口被隐藏、远端画面却没人看"的糊涂状态）；`local` 不传 = 不订阅本地回显，此时返回里没有 `local` 字段。
+- **`keepWindow`**：默认为 `false`——订阅后软电话**关闭视频窗口**（画面在网页看）；传 `true` 时窗口**继续显示**。多页面同时订阅时按"任一订阅者没要求保持就隐藏"汇总（见 `video.web` 的 `hideWindow`）。
 - `call` 为当前进行中的通话快照（无通话时为 `null`）。
 - 订阅是**连接级**的：连接断开自动退订；订阅一直有效（跨通话），通话开始后画面自动推来。
 
@@ -181,7 +183,7 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `call.muted` | `{ "callId", "muted" }` | 保持（静音）状态变化 |
 | `call.audio` | `{ "callId", "call" }` | 麦克风/扬声器开关与音量变化（`call.micMuted` / `call.speakerMuted` / `call.micGain` / `call.speakerVolume`，REQ-UI-023 / REQ-MEDIA-006）。**连续调节（桌面滚轮、网页拖滑块）时事件会被合并**：最多 150ms 一条（首次立即发、最后一次必发）——页面不要按"一条事件 = 一步"来计数 |
 | `call.video` | `{ "callId", "call" }` | 视频状态变化（协商成功/开关切换/拿到对端分辨率）；状态见 `call.video` |
-| `video.web` | `{ "active", "local", "remote", "viewers" }` | 网页视频订阅状态变化（任一连接订阅/退订时广播）。`active: true` 表示有网页在看画面，此时软电话**不显示视频窗口** |
+| `video.web` | `{ "active", "local", "remote", "viewers", "hideWindow" }` | 网页视频订阅状态变化（任一连接订阅/退订时广播）。`active: true` 表示有网页在看画面；`hideWindow: true` 表示软电话**不显示视频窗口**（任一订阅者没要求 `keepWindow` 就为真，全部要求保持时才为假） |
 | `video.transform` | `{ "remote": { "rotation", "mirror" }, "local": { "rotation", "mirror" } }` | 画面旋转/水平镜像变化（桌面视频窗口或网页任一侧改动都会广播）；重连时也可从 `system.state` 的 `video` 字段取当前值 |
 | `register.state` | `{ "state", "account", "reason" }` | 注册状态变化 |
 | `system.updateConfig` | `{ "url", "appId", "intervalMinutes", "prerelease" }` | 自动更新配置变化（本机配置页保存或网页 `system.setUpdateConfig` 写入都会广播，REQ-UPD-018）；重连时也可从 `system.state` 的 `updateConfig` 字段取当前值 |

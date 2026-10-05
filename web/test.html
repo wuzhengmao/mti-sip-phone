@@ -300,6 +300,8 @@
       </div>
       <div class="row">
         <label class="chk"><input type="checkbox" id="vidLocal" checked> 同时订阅本地画面</label>
+        <!-- 订阅后是否保持软电话的视频窗口显示（REQ-VIDEO-009 修订；默认不勾 = 隐藏窗口） -->
+        <label class="chk"><input type="checkbox" id="vidKeepWindow"> 保持软电话视频窗口显示</label>
         <button id="btnSubVideo" class="green">订阅视频</button>
         <button id="btnUnsubVideo" class="ghost">取消订阅</button>
       </div>
@@ -923,10 +925,12 @@
     if ($('vidMaxH').value) { opts.maxHeight = parseInt($('vidMaxH').value, 10); }
     if ($('vidFps').value) { opts.fps = parseInt($('vidFps').value, 10); }
     if ($('vidQuality').value) { opts.quality = parseInt($('vidQuality').value, 10); }
+    if ($('vidKeepWindow').checked) { opts.keepWindow = true; } // 订阅后仍显示软电话视频窗口
 
     var desc = '远端 ' + (opts.maxWidth || '自动') + '×' + (opts.maxHeight || '自动') +
       ' / ' + (opts.fps || '默认') + 'fps / 质量 ' + (opts.quality || '默认') +
-      (opts.local ? '，含本地画面' : '，仅远端');
+      (opts.local ? '，含本地画面' : '，仅远端') +
+      (opts.keepWindow ? '，保持软电话窗口' : '');
     addLog('info', '订阅视频（' + desc + '）');
     sdk.subscribeVideo(opts).then(function (res) {
       setTransformButtonsEnabled(true); // 订阅期间可操作

@@ -1286,7 +1286,7 @@ func (a *App) subscribeEvents() {
 	// **订阅之后再取一次快照**：网页可能在 UI 订阅事件之前就连上并订阅了视频
 	//（软电话重启时页面会自动重连重订阅），漏掉那个 video.web 事件的后果是
 	//"网页在看画面，桌面视频窗口却也打开了"（用户实测）。旋转/镜像状态同理。
-	a.webVideoOn = a.core.WebVideoState().Active
+	a.webVideoOn = a.core.WebVideoState().HideWindow
 	a.applyVideoTransforms(a.core.VideoTransforms())
 	// 更新状态同理（REQ-UPD-017）：软电话启动后**立即**查一次更新站点，
 	// 那次检查往往在界面订阅事件之前就完成——事件收不到，用户就永远看不到
@@ -1390,15 +1390,18 @@ func (a *App) onEvent(ev core.Event) {
 	case "video.web":
 		// 网页端视频订阅状态变化（REQ-VIDEO-009）：有网页在看画面时
 		// 软电话自动关闭视频窗口；网页退订后按当前内容恢复显示。
+		// 订阅方显式要求 keepWindow 时窗口保持显示（REQ-VIDEO-009 修订，
+		// 由 core 汇总成 HideWindow：任一订阅者没要求保持就隐藏）。
 		//
 		// ⚠️ 负载是 core.WebVideoState 结构体——总线是进程内的，事件不经
 		// JSON 序列化，**不能**断言成 map[string]any（那样断言恒失败，
 		// 表现为"订阅了但桌面窗口不关"）。只有 WS 客户端收到的是 JSON 对象。
 		st, ok := ev.Data.(core.WebVideoState)
-		if ok && st.Active != a.webVideoOn {
-			a.webVideoOn = st.Active
+		if ok && st.HideWindow != a.webVideoOn {
+			a.webVideoOn = st.HideWindow
 			logx.Logger().Info("网页视频订阅状态变化",
-				"active", st.Active, "local", st.Local, "remote", st.Remote, "viewers", st.Viewers)
+				"active", st.Active, "hideWindow", st.HideWindow, "local", st.Local,
+				"remote", st.Remote, "viewers", st.Viewers)
 			a.syncVideoWindow()
 		}
 

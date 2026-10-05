@@ -201,7 +201,7 @@ func (h *videoHub) hasSubscriber(local bool) bool {
 // **订阅必定包含远端画面**（用户明确要求）：远端恒为订阅，`local` 只表示
 // 要不要本地画面。否则会出现"只订阅本地 → 桌面窗口被隐藏、远端画面却没人看"
 // 的糊涂状态。两条通道各自带参数（本地回显通常要小一号）。
-func (h *videoHub) Subscribe(c *wsConn, local bool, localP, remoteP videoParams) (videoParams, videoParams) {
+func (h *videoHub) Subscribe(c *wsConn, local bool, localP, remoteP videoParams, keepWindow bool) (videoParams, videoParams) {
 	remoteP = remoteP.clamp()
 	localP = localP.clamp()
 	h.mu.Lock()
@@ -211,8 +211,9 @@ func (h *videoHub) Subscribe(c *wsConn, local bool, localP, remoteP videoParams)
 	}
 	h.mu.Unlock()
 
-	// 通知核心层：网页在看画面 → 软电话隐藏视频窗口（REQ-VIDEO-009）
-	h.app.SetWebVideoViewer(c.id, local, true)
+	// 通知核心层：网页在看画面 → 软电话默认隐藏视频窗口（REQ-VIDEO-009）；
+	// 订阅方要求 keepWindow 时保持窗口显示（REQ-VIDEO-009 修订）
+	h.app.SetWebVideoViewer(c.id, local, true, keepWindow)
 	h.startOnce.Do(func() { go h.loop() })
 	logx.Logger().Info("网页订阅视频", "id", c.id, "local", local,
 		"remote", fmt.Sprintf("%dx%d@%dfps q%d", remoteP.MaxW, remoteP.MaxH, remoteP.FPS, remoteP.Quality),

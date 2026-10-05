@@ -199,16 +199,27 @@ func TestWantVideoWindowWithWebSubscription(t *testing.T) {
 // 表现为"网页订阅了但桌面视频窗口不关"（编译运行都不报错）。
 func TestOnVideoWebEvent(t *testing.T) {
 	// 只验证「事件 → webVideoOn 状态翻转」（真实的窗口显隐需要 Fyne 运行时，
-	// 判定逻辑由 TestWantVideoWindowWithWebSubscription 覆盖）
+	// 判定逻辑由 TestWantVideoWindowWithWebSubscription 覆盖）。
+	// 订阅后是否隐藏窗口由 core 汇总成 HideWindow（REQ-VIDEO-009 修订：
+	// 订阅方 keepWindow 时可保持窗口显示），界面只看这个字段。
 	a := &App{}
-	a.onEvent(core.Event{Name: "video.web", Data: core.WebVideoState{Active: true, Remote: true, Viewers: 1}})
+	a.onEvent(core.Event{Name: "video.web", Data: core.WebVideoState{
+		Active: true, Remote: true, Viewers: 1, HideWindow: true,
+	}})
 	if !a.webVideoOn {
-		t.Fatal("收到 active=true 的 video.web 事件后应进入网页订阅状态")
+		t.Fatal("收到 hideWindow=true 的 video.web 事件后应隐藏视频窗口")
+	}
+	// 订阅方要求保持窗口（keepWindow）：Active 仍为真，但不隐藏
+	a.onEvent(core.Event{Name: "video.web", Data: core.WebVideoState{
+		Active: true, Remote: true, Viewers: 1, HideWindow: false,
+	}})
+	if a.webVideoOn {
+		t.Fatal("订阅方要求保持窗口时（hideWindow=false）不应隐藏视频窗口")
 	}
 	a.videoOn = false // 退订方向会走"恢复显示窗口"分支，测试里没有 Fyne 应用，先让它不成立
 	a.onEvent(core.Event{Name: "video.web", Data: core.WebVideoState{}})
 	if a.webVideoOn {
-		t.Fatal("收到 active=false 后应退出网页订阅状态")
+		t.Fatal("收到 hideWindow=false 后应退出隐藏状态")
 	}
 }
 

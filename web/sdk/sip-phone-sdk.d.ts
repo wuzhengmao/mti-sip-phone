@@ -193,6 +193,7 @@ declare class SipPhoneSDK {
    *     remote: document.getElementById('remoteVideo'),  // 必传
    *     local:  document.getElementById('localVideo'),   // 可选：不传 = 不订阅本地回显
    *     fps: 30, quality: 75,
+   *     keepWindow: false,                               // 可选：订阅后是否仍显示软电话视频窗口（默认 false）
    *     onStats: (channel, stats) => { ... }
    *   });
    *
@@ -346,6 +347,12 @@ interface SipVideoSubscribeOptions {
   quality?: number;
   /** 两路共用的统计回调（每秒一次） */
   onStats?: (channel: SipVideoChannelName, stats: SipVideoStats) => void;
+  /**
+   * 订阅后是否**仍保持软电话的视频窗口显示**（REQ-VIDEO-009 修订）。
+   * 默认 false = 订阅后软电话隐藏视频窗口（画面在网页看）；
+   * 传 true = 软电话的视频窗口继续显示（两处同时看）。
+   */
+  keepWindow?: boolean;
 }
 
 /** 单条通道的生效参数 */
