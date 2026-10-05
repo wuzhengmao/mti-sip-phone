@@ -40,3 +40,32 @@ func TestChkOptDefaultOn(t *testing.T) {
 		t.Fatal("配置里显式关闭 optchk 时不应被默认值覆盖")
 	}
 }
+
+// TestInstanceDir 多实例沙箱目录（REQ-NFR-007）：
+// 槽位 0 = 原目录（**位置不变**，向后兼容）；槽位 ≥1 = <原目录>/instances/<N>/ 且被创建。
+func TestInstanceDir(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("APPDATA", base)         // Windows：os.UserConfigDir 读 APPDATA
+	t.Setenv("XDG_CONFIG_HOME", base) // Linux
+
+	root, err := ConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := InstanceDir(0); err != nil || got != root {
+		t.Fatalf("槽位 0 应返回原目录 %q，实际 %q err=%v", root, got, err)
+	}
+	if got, err := InstanceDir(-1); err != nil || got != root {
+		t.Fatalf("负槽位应按主实例处理，实际 %q err=%v", got, err)
+	}
+	dir, err := InstanceDir(2)
+	if err != nil {
+		t.Fatalf("创建沙箱目录失败: %v", err)
+	}
+	if want := filepath.Join(root, "instances", "2"); dir != want {
+		t.Fatalf("槽位 2 目录应为 %q，实际 %q", want, dir)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("槽位目录应已创建: %v", err)
+	}
+}

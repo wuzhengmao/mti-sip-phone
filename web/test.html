@@ -189,6 +189,12 @@
         <input type="text" id="uriPassword" placeholder="认证密码">
       </div>
       <div class="row">
+        <!-- 实例槽位（多实例沙箱，REQ-NFR-007）：0/留空 = 主实例；
+             1–99 = 用独立数据目录的沙箱实例（需在主实例里先开启「允许多实例」） -->
+        <label>实例槽位</label>
+        <input type="number" id="uriInstance" min="0" max="99" placeholder="0 = 主实例">
+      </div>
+      <div class="row">
         <button id="btnGenUri" class="ghost">生成拉起链接</button>
       </div>
       <div class="state-line" id="uriLine" style="display:none">
@@ -994,11 +1000,19 @@
     if (!server || !account) { addLog('err', '请输入服务器与账号'); return; }
     if (server.indexOf(':') < 0) { server += ':5060'; }
     var uri = 'sip://' + account + ':' + encodeURIComponent(password) + '@' + server;
+    // 实例槽位（REQ-NFR-007）：留空/0 = 主实例（不带参数）；1–99 加 ?instance=N，
+    // 该实例在跑就把参数转发给它、没跑就用它的独立数据目录启动
+    var slot = parseInt($('uriInstance').value, 10);
+    if (slot > 0) {
+      if (slot > 99) { addLog('err', '实例槽位范围 0–99'); return; }
+      uri += '?instance=' + slot;
+    }
     var link = $('sipLink');
     link.href = uri;
     link.textContent = uri;
     $('uriLine').style.display = '';
-    addLog('info', '已生成拉起链接，点击后浏览器会唤起软电话（首次需确认允许）');
+    addLog('info', '已生成拉起链接' + (slot > 0 ? '（实例 ' + slot + '）' : '（主实例）') +
+      '，点击后浏览器会唤起软电话（首次需确认允许）');
   };
 
   $('btnAnswer').onclick = function () {

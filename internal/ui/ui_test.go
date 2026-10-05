@@ -358,3 +358,31 @@ func TestShouldShowMainAfterCall(t *testing.T) {
 		}
 	}
 }
+
+// TestInstanceColumnShift 多实例（沙箱槽位）的窗口列偏移（REQ-NFR-007）：
+// 主实例不偏移；槽位 N 整列左移 N × 列宽（列宽 = 视频窗口最大宽 + 边距，
+// 取最大宽是因为面板/更新提示窗/视频窗口都要落在自己那一列里，互不重叠）。
+func TestInstanceColumnShift(t *testing.T) {
+	saved := instanceSlot
+	defer func() { instanceSlot = saved }()
+
+	instanceSlot = 0
+	if got := instanceColumnShiftPx(1); got != 0 {
+		t.Fatalf("主实例不应偏移，实际 %d", got)
+	}
+	SetInstanceSlot(2)
+	if instanceSlot != 2 {
+		t.Fatalf("SetInstanceSlot 未生效：%d", instanceSlot)
+	}
+	want := int32(2 * instanceColumnWidth) // scale = 1
+	if got := instanceColumnShiftPx(1); got != want {
+		t.Fatalf("槽位 2 的偏移应为 %d，实际 %d", want, got)
+	}
+	if got := instanceColumnShiftPx(1.5); got != int32(float32(want)*1.5) {
+		t.Fatalf("缩放 1.5 时偏移应为 %d，实际 %d", int32(float32(want)*1.5), got)
+	}
+	SetInstanceSlot(-3) // 非法值忽略：仍是上一个有效槽位
+	if instanceSlot != 2 {
+		t.Fatalf("非法槽位不应改写当前值：%d", instanceSlot)
+	}
+}

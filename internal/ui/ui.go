@@ -123,11 +123,11 @@ type App struct {
 	wsPortEntry       *widget.Entry // 本地 WS 监听端口（默认 8765，修改后重启生效）
 
 	// 自动更新（REQ-UPD-017）：软电话自己按周期查更新站点
-	updSiteEntry      *widget.Entry // 更新站点地址，空 = 不检查
-	updAppIDEntry     *widget.Entry // 应用 ID
-	updIntervalEntry  *widget.Entry // 检查周期（分钟）
-	updPrereleaseChk  *widget.Check // 是否接受预览版
-	updStatusLabel    *widget.Label // 最近一次检查结果/说明
+	updSiteEntry     *widget.Entry // 更新站点地址，空 = 不检查
+	updAppIDEntry    *widget.Entry // 应用 ID
+	updIntervalEntry *widget.Entry // 检查周期（分钟）
+	updPrereleaseChk *widget.Check // 是否接受预览版
+	updStatusLabel   *widget.Label // 最近一次检查结果/说明
 
 	// 通话面板控件（呼叫/振铃/通话三态共用）
 	callName       *callNameBox // 对端号码/名称（含 ★ 与备注悬停，REQ-UI-037）
@@ -634,7 +634,8 @@ func (a *App) buildSettingsPage() {
 	// ---- 常规 ----
 	// 开机自动启动（REQ-UI-022）：默认启用，切换立即保存并注册/移除系统自启项
 	a.autoStartCheck = widget.NewCheck("开机自动启动", a.saveAutoStart)
-
+	// 多实例（沙箱槽位，REQ-NFR-007）没有配置开关：槽位只能由启动参数/
+	// sip:// 链接显式指定（不带就是主实例），不存在"忘了关"的风险，故不放配置项。
 	generalCard := container.NewVBox(
 		widget.NewLabelWithStyle("常规", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		a.autoStartCheck,
@@ -1081,6 +1082,33 @@ func (a *App) setCallUI(state int, call *core.Call) {
 	// 视频回显摆位随通话阶段变化（振铃期铺满窗口 / 接通后回右上角小窗），
 	// 每次状态切换都按新口径同步一次（用户要求）。
 	a.applyLocalVideoVisibility()
+}
+
+// ---- 多实例（沙箱槽位）的窗口排布（REQ-NFR-007）----
+//
+// 右下角窗口（通话面板、更新提示窗、视频窗口）默认都吸附同一个角，多实例时
+// 会互相叠住。所以**按槽位从右往左排**：槽位 N 的整列左移 N 列——实例 1 的
+// 窗口显示在主实例左边（用户要求）。
+var instanceSlot int
+
+// SetInstanceSlot 设置本进程的实例槽位（main 启动时调用一次；0/负数等同主实例）。
+func SetInstanceSlot(n int) {
+	if n > 0 {
+		instanceSlot = n
+	}
+}
+
+// instanceColumnWidth 每个实例占的列宽（DIP）：**按通话面板宽 + 边距**（用户要求）。
+// 通话面板因此紧挨着排（实例 1 的面板贴在主实例面板左边）；**视频窗口的右边缘
+// 与自己的面板对齐**（跟着面板整列走），两个实例的视频窗口允许重叠——用户可自行拖动。
+const instanceColumnWidth = 260 + 16 // 260 = callPanelWidth（见 topmost_*.go）
+
+// instanceColumnShiftPx 槽位带来的整列左移量（物理像素；主实例为 0）。
+func instanceColumnShiftPx(scale float32) int32 {
+	if instanceSlot <= 0 {
+		return 0
+	}
+	return int32(float32(instanceSlot) * instanceColumnWidth * scale)
 }
 
 // watchThemeChanges 主题（深/浅色）切换后，让**长驻的自绘文本**重新取色。

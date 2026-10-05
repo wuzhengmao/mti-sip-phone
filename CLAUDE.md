@@ -303,6 +303,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **`coder/websocket` 单条消息默认读上限 32KB**（`read.go` 的 `defaultReadLimit`）：通信录导入是一整份 CSV，超限会**直接断开连接、没有任何业务错误**。服务端在 `Accept` 后 `conn.SetReadLimit(4<<20)` 放开（仅回环监听，没有滥用面）。 不过**网页的一键导入导出走的是 HTTP**（`GET /api/contacts.csv`、`POST /api/contacts/import`），完全绕开这个限制；WS 的那两个方法保留给需要走 WS 的客户端。
 - **需求变更同步更新 docs/requirements.md 与 changelog.md。**
 - 单通话限制：呼叫/振铃/通话中禁止新呼出（返回错误）；新来电直接 486 USER_BUSY。
+- **多实例（沙箱槽位，REQ-NFR-007）**：默认单实例（不带参数就是主实例，行为一字不变）；`-instance N`（1–99）或 `sip://…?instance=N` 可再启动实例。**槽位 0 = 主实例，用原目录与原行为**；槽位 ≥1 用 `<配置目录>/instances/N/`（配置/记录/通信录/日志/锁各自一份），首次启动生成空白配置、WS 端口从 8775 起。沙箱实例**不做** sip:// 协议与开机自启注册（只由主实例做，否则会互相覆盖），sip:// 拉起仍转发给主实例。
 - WS 端口可配置（默认 8765），被占用自动 +1 并保存；无 token 鉴权（仅回环）。
 - SDP 编解码优先级：PCMA > PCMU > Opus；Opus 本端 offer 固定 PT 96（rtpmap `opus/48000/2`），answer 仍复用对端 PT；**RTP 端口按 RFC 3550 取偶数、RTCP = RTP + 1**（`bindRTPRTCP` 命中奇数就重选，音频/视频两对端口都走它），SDP 用 `a=rtcp` 宣告 RTCP 端口。
 - 视频 PT 固定（**只作用于本端 offer**）：H264=99 / H263-1998=98 / VP8=100 / VP9=101；优先级顺序不变
