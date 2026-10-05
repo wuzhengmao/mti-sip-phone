@@ -1203,6 +1203,20 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 						cs.engine.SetKeepalive(true) // 持续发送静音保活 NAT 映射
 						p.attachAudio(cs.engine)
 						cs.engine.Start()
+						// 视频：183 里带 m=video 就**提前协商并启动**——对端（实测
+						// MicroSIP/FreeSWITCH 一侧）从 183 起就在发，而且本端越早在
+						// 这个流上发东西，对端越早把发送目标锁到我们的真实地址：
+						// 实测"对端画面在接通后 8 秒才来"→ 早期媒体阶段就开始发后
+						// 缩短到 1 秒级。早期阶段不因缺视频段而回收引擎（等 2xx 定案）。
+						if cs.video != nil {
+							if early, perr := media.ParseSDP(res.Body()); perr == nil {
+								if vinfo, verr := early.Media("video"); verr == nil && !vinfo.Rejected {
+									if cs.video.ApplyAnswer(vinfo) {
+										p.startVideo(cs, cs.videoSend)
+									}
+								}
+							}
+						}
 						logx.Logger().Info("早期媒体已建立（回铃音）", "callId", cs.id)
 					}
 				}

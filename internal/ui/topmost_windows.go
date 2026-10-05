@@ -220,6 +220,9 @@ func moveCallWindowToCorner(w fyne.Window) {
 
 // placeVideoWindow 把视频窗口摆到**通话面板正上方、右边缘对齐**（只移动）。
 //
+// 多实例（REQ-NFR-007）：视频跟着**本实例的面板**走（右边缘对齐面板）——面板已按
+// 槽位整列左移，所以这里不需要再算槽位；两个实例的视频窗口允许重叠（用户可拖动）。
+//
 // 尺寸**不在这里设**：窗口有标题栏，SetWindowPos 的宽高是**窗口矩形**，
 // 按客户区尺寸设下去会让客户区少掉一条标题栏的高度——宽高比随之改变，
 // canvas.Image 的 ImageFillContain 就在左右补出黑边（用户实测"左右各一条黑边"）。
@@ -342,11 +345,13 @@ func moveUpdateWindowToCorner(w fyne.Window) {
 // 立即定位），同步 sleep 重试会把 UI 线程连同 Fyne 事件循环一起卡住——
 // 窗口尚未创建时永远等不到，去装饰与定位全部失效（历史上表现为
 // 更新提示窗带标题栏、尺寸不对、未吸附右下角）。
-func moveWindowToCorner(w fyne.Window, titlePrefix string, wDip, hDip float32, position func(hwnd, width, height uintptr)) {
+func moveWindowToCorner(w fyne.Window, titlePrefix string, wDip, hDip float32, position func(hwnd, width, height uintptr, xShift int32)) {
 	// 目标物理尺寸 = DIP 尺寸 × 系统缩放
 	scale := w.Canvas().Scale()
 	width := uintptr(wDip * scale)
 	height := uintptr(hDip * scale)
+	// 多实例（沙箱槽位）：整列按槽位左移，实例之间不互相叠住（REQ-NFR-007）
+	xShift := instanceColumnShiftPx(scale)
 
 	go func() {
 		var hwnd uintptr
@@ -360,11 +365,11 @@ func moveWindowToCorner(w fyne.Window, titlePrefix string, wDip, hDip float32, p
 			logx.Logger().Warn("未找到窗口句柄，跳过右下角定位", "title", titlePrefix)
 			return
 		}
-		position(hwnd, width, height)
+		position(hwnd, width, height, xShift)
 		for _, delay := range []time.Duration{150 * time.Millisecond, 350 * time.Millisecond, 800 * time.Millisecond} {
 			time.Sleep(delay)
 			if h := findWindowByTitlePrefix(titlePrefix); h != 0 {
-				position(h, width, height)
+				position(h, width, height, xShift)
 			}
 		}
 	}()
@@ -382,16 +387,16 @@ func moveWindowToCorner(w fyne.Window, titlePrefix string, wDip, hDip float32, p
 // 客户区高出一条标题栏（"幽灵标题栏"），内容整体下移、**第一行被顶出可视区**。
 // 现象极具迷惑性：来电振铃时三行正常（ringFill 定时重绘掩盖了），一点接听就只剩两行。
 // 保留标题栏后 GLFW 的缓存始终有效，画布 == 客户区，问题从源头消失。
-func positionCallWindow(hwnd, width, height uintptr) {
+func positionCallWindow(hwnd, width, height uintptr, xShift int32) {
 	setToolWindowStyle(hwnd) // 兜底：面板同样不占任务栏（见 showWindowAsTool）
-	positionCornerWindow(hwnd, width, height)
+	positionCornerWindow(hwnd, width, height, xShift)
 }
 
 // positionUpdateWindow 定位更新提示窗（同通话面板，尺寸另配）：
 // 尺寸交给 Fyne（对齐通话面板），任务栏样式已在显示时处理（见 showWindowAsTool）。
-func positionUpdateWindow(hwnd, width, height uintptr) {
+func positionUpdateWindow(hwnd, width, height uintptr, xShift int32) {
 	setToolWindowStyle(hwnd) // 兜底：万一还没改过（正常已在显示前改好）
-	positionCornerWindow(hwnd, width, height)
+	positionCornerWindow(hwnd, width, height, xShift)
 }
 func showUpdateWindow(w fyne.Window) {
 	showWindowAsTool(w, updateWindowTitlePrefix)
@@ -488,7 +493,7 @@ type guid struct {
 // **只移动、不改尺寸**：通话面板与更新提示窗都已是 Fyne 的 splash 窗口
 // （GLFW 从创建起就按无边框处理），尺寸由 Fyne 的 Resize/SetFixedSize 决定，
 // 这里若再按客户区尺寸设窗口矩形，无边框下虽等价、却容易与 Fyne 的意图打架。
-func positionCornerWindow(hwnd, width, height uintptr) {
+func positionCornerWindow(hwnd, width, height uintptr, xShift int32) {
 
 	user32 := syscall.NewLazyDLL("user32.dll")
 	setWindowPos := user32.NewProc("SetWindowPos")
@@ -513,7 +518,7 @@ func positionCornerWindow(hwnd, width, height uintptr) {
 		w, h = wr.right-wr.left, wr.bottom-wr.top
 	}
 	flags := uintptr(swpShowWin) | swpNoSize
-	x := workRect.right - w - callPanelMargin
+	x := workRect.right - w - callPanelMargin - xShift
 	y := workRect.bottom - h - callPanelMargin
 	setWindowPos.Call(hwnd, hwndTopMost, uintptr(x), uintptr(y), uintptr(w), uintptr(h), flags)
 }

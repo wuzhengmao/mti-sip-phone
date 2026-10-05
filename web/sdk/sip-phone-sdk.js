@@ -646,6 +646,11 @@
       if (local) {
         params.local = channelParams(local, options);
       }
+      // 订阅后是否仍保持软电话的视频窗口显示（REQ-VIDEO-009 修订）：
+      // 默认 false = 隐藏窗口（画面在网页看）；传 true 时窗口继续显示。
+      if (options.keepWindow) {
+        params.keepWindow = true;
+      }
 
       this._subOpts = params; // 记住订阅参数：断线重连后自动恢复
       return this._request('video.subscribe', params).then((res) => {

@@ -19,7 +19,7 @@ import (
 // 该文件按构建标签 !headless 编译——headless 构建不含界面层，供无
 // CGO 交叉工具链的环境做纯 Go 构建（fyne 的 OpenGL 绑定依赖 CGO，
 // 交叉编译 GUI 产物需要目标平台的 gcc 工具链）。
-func runGUI(app *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath string, ctx context.Context, restart func() error) {
+func runGUI(app *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath string, ctx context.Context, restart func() error, slot int) {
 	// 重启回调（REQ-UI-017 本地端口修改 / REQ-UPD-005 自动更新）：
 	// 标记重启并取消 ctx → 本函数返回 → main 的退出收尾释放单实例锁、
 	// 拉起新进程（见 main.go 的 spawnNewProcessIfRequested）。
@@ -31,6 +31,8 @@ func runGUI(app *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath 
 			logx.Logger().Error("重启失败", "err", err)
 		}
 	}
+	// 多实例（沙箱槽位，REQ-NFR-007）：窗口按槽位从右往左排，实例之间不叠住
+	ui.SetInstanceSlot(slot)
 	gui := ui.New(app, audioMgr, cfg, cfgPath, onRestart)
 	// 退出信号 → 请求 Fyne 退出（Run 返回后主流程收尾）
 	go func() {

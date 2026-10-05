@@ -82,7 +82,7 @@ func TestWebVideoViewerState(t *testing.T) {
 		t.Fatalf("初始状态应为空，实际 %+v", st)
 	}
 
-	app.SetWebVideoViewer(1, false, true) // 只订阅远端
+	app.SetWebVideoViewer(1, false, true, false) // 只订阅远端
 	st := <-sub
 	if st.Name != "video.web" {
 		t.Fatalf("期望 video.web 事件，实际 %s", st.Name)
@@ -93,7 +93,7 @@ func TestWebVideoViewerState(t *testing.T) {
 	}
 
 	// 连接 2 只订阅本地：并集为 both
-	app.SetWebVideoViewer(2, true, false)
+	app.SetWebVideoViewer(2, true, false, false)
 	st = <-sub
 	got = st.Data.(WebVideoState)
 	if !got.Active || !got.Local || !got.Remote || got.Viewers != 2 {
@@ -101,7 +101,7 @@ func TestWebVideoViewerState(t *testing.T) {
 	}
 
 	// 幂等：同一连接重复登记且结果不变时不重复发事件
-	app.SetWebVideoViewer(2, true, false)
+	app.SetWebVideoViewer(2, true, false, false)
 	select {
 	case ev := <-sub:
 		t.Fatalf("状态未变化却发了事件：%+v", ev)
@@ -242,12 +242,12 @@ func TestLocalVideoWanted(t *testing.T) {
 		t.Fatal("无订阅者时不应要本地帧")
 	}
 
-	app.SetWebVideoViewer(1, false, true) // 只看远端
+	app.SetWebVideoViewer(1, false, true, false) // 只看远端
 	if app.LocalVideoWanted() {
 		t.Fatal("只订阅远端时不应要本地帧")
 	}
 
-	app.SetWebVideoViewer(2, true, true) // 其中一个连接订阅了本地
+	app.SetWebVideoViewer(2, true, true, false) // 其中一个连接订阅了本地
 	if !app.LocalVideoWanted() {
 		t.Fatal("有连接订阅本地画面时应要本地帧")
 	}
@@ -255,5 +255,33 @@ func TestLocalVideoWanted(t *testing.T) {
 	app.RemoveWebVideoViewer(2)
 	if app.LocalVideoWanted() {
 		t.Fatal("本地订阅者断开后不应再要本地帧")
+	}
+}
+
+// TestWebVideoViewerKeepWindow 订阅方要求"保持软电话视频窗口显示"时
+// （REQ-VIDEO-009 修订，video.subscribe 的 keepWindow）：只要有一个订阅者
+// 没要求保持（默认），窗口就隐藏；**全部**要求保持才不隐藏。
+func TestWebVideoViewerKeepWindow(t *testing.T) {
+	bus := NewBus()
+	app := New(config.Default(), nil, bus)
+
+	app.SetWebVideoViewer(1, false, true, true) // 要求保持窗口
+	if st := app.WebVideoState(); st.HideWindow || !st.Active {
+		t.Fatalf("只有要求保持的订阅者时不应隐藏窗口：%+v", st)
+	}
+
+	app.SetWebVideoViewer(2, false, true, false) // 另一个订阅者没要求 → 隐藏
+	if st := app.WebVideoState(); !st.HideWindow {
+		t.Fatalf("任一订阅者没要求保持时应隐藏窗口：%+v", st)
+	}
+
+	app.RemoveWebVideoViewer(2)
+	if st := app.WebVideoState(); st.HideWindow {
+		t.Fatalf("回到「全部要求保持」后不应隐藏窗口：%+v", st)
+	}
+
+	app.RemoveWebVideoViewer(1)
+	if st := app.WebVideoState(); st.Active || st.HideWindow {
+		t.Fatalf("全部断开后状态应为空：%+v", st)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,11 +42,11 @@ type WSConfig struct {
 
 // LogConfig 日志配置。
 type LogConfig struct {
-	Level   string `json:"level"`   // debug / info / warn / error
-	Dir     string `json:"dir"`     // 日志目录，为空时使用 <配置目录>/logs
-	File    bool   `json:"file"`    // 是否写入文件，默认 true
-	Console bool   `json:"console"` // 是否输出控制台，默认 false（写文件时不输出控制台）
-	SIPTrace bool  `json:"sipTrace"` // 是否记录 SIP 信令（收发报文全文），默认 false
+	Level    string `json:"level"`    // debug / info / warn / error
+	Dir      string `json:"dir"`      // 日志目录，为空时使用 <配置目录>/logs
+	File     bool   `json:"file"`     // 是否写入文件，默认 true
+	Console  bool   `json:"console"`  // 是否输出控制台，默认 false（写文件时不输出控制台）
+	SIPTrace bool   `json:"sipTrace"` // 是否记录 SIP 信令（收发报文全文），默认 false
 }
 
 // AudioConfig 音频设备配置。
@@ -64,12 +65,12 @@ const CameraDisabled = "disabled"
 type VideoConfig struct {
 	// CameraID 摄像头设备 ID；空 = 系统默认设备；CameraDisabled = 禁用。
 	// Windows 侧驱动 ID 每次启动都可能变化，同时保存 CameraName 做兜底匹配。
-	CameraID   string `json:"cameraId"`
-	CameraName string `json:"cameraName"`
-	Width      int    `json:"width"`       // 采集宽，默认 640
-	Height     int    `json:"height"`      // 采集高，默认 480
-	FPS        int    `json:"fps"`         // 帧率，默认 25
-	BitrateKbps int   `json:"bitrateKbps"` // 码率（kbps），默认 512
+	CameraID    string `json:"cameraId"`
+	CameraName  string `json:"cameraName"`
+	Width       int    `json:"width"`       // 采集宽，默认 640
+	Height      int    `json:"height"`      // 采集高，默认 480
+	FPS         int    `json:"fps"`         // 帧率，默认 25
+	BitrateKbps int    `json:"bitrateKbps"` // 码率（kbps），默认 512
 }
 
 // CameraUsable 摄像头是否可用（未被禁用）。
@@ -125,17 +126,21 @@ func (u UpdateConfig) Enabled() bool { return strings.TrimSpace(u.URL) != "" }
 
 // Config 应用配置。
 type Config struct {
-	Version    int         `json:"version"` // 配置结构版本
-	Account    Account     `json:"account"`
-	WS         WSConfig    `json:"ws"`
-	Log        LogConfig   `json:"log"`
-	Audio      AudioConfig `json:"audio"`
-	Video      VideoConfig `json:"video"`
-	UI         UIConfig    `json:"ui"`
+	Version    int          `json:"version"` // 配置结构版本
+	Account    Account      `json:"account"`
+	WS         WSConfig     `json:"ws"`
+	Log        LogConfig    `json:"log"`
+	Audio      AudioConfig  `json:"audio"`
+	Video      VideoConfig  `json:"video"`
+	UI         UIConfig     `json:"ui"`
 	Update     UpdateConfig `json:"update"`
 	AutoStart  bool         `json:"autoStart"`  // 开机自动启动，默认 true
 	RecentDial []string     `json:"recentDial"` // 最近呼叫号码（去重，最多 5 个，供拨号下拉）
 }
+
+// InstanceWSBaseOffset 沙箱实例的 WS 端口起点相对默认端口的偏移（用户要求 +10）：
+// 槽位 ≥1 的实例默认从 8765+10 起找空闲端口（找不到再 +1），避免与主实例抢 8765。
+const InstanceWSBaseOffset = 10
 
 // Default 返回默认配置。
 func Default() *Config {
@@ -159,9 +164,9 @@ func Default() *Config {
 			File:  true,
 		},
 		Video: VideoConfig{
-			Width:   640,
-			Height:  480,
-			FPS:     25,
+			Width:  640,
+			Height: 480,
+			FPS:    25,
 			// 640×480@25 下 512kbps 偏紧，观感发糊；默认给 1Mbps
 			BitrateKbps: 1024,
 		},
@@ -299,4 +304,26 @@ func ConfigDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "mti-sip-phone"), nil
+}
+
+// InstanceDir 指定"实例槽位"的数据目录（多实例沙箱）：
+//
+//	槽位 0（主实例）→ 原来的目录（**位置与内容都不变**，向后兼容）；
+//	槽位 ≥1（沙箱实例）→ <主目录>/instances/<N>/（配置、通话记录、通信录、
+//	日志、单实例锁全在这份目录里，各实例互不影响）。
+//
+// 沙箱目录不存在时创建（空白默认配置由调用方落盘）。
+func InstanceDir(slot int) (string, error) {
+	base, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	if slot <= 0 {
+		return base, nil
+	}
+	dir := filepath.Join(base, "instances", strconv.Itoa(slot))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("创建实例目录失败: %w", err)
+	}
+	return dir, nil
 }

@@ -123,11 +123,11 @@ type App struct {
 	wsPortEntry       *widget.Entry // 本地 WS 监听端口（默认 8765，修改后重启生效）
 
 	// 自动更新（REQ-UPD-017）：软电话自己按周期查更新站点
-	updSiteEntry      *widget.Entry // 更新站点地址，空 = 不检查
-	updAppIDEntry     *widget.Entry // 应用 ID
-	updIntervalEntry  *widget.Entry // 检查周期（分钟）
-	updPrereleaseChk  *widget.Check // 是否接受预览版
-	updStatusLabel    *widget.Label // 最近一次检查结果/说明
+	updSiteEntry     *widget.Entry // 更新站点地址，空 = 不检查
+	updAppIDEntry    *widget.Entry // 应用 ID
+	updIntervalEntry *widget.Entry // 检查周期（分钟）
+	updPrereleaseChk *widget.Check // 是否接受预览版
+	updStatusLabel   *widget.Label // 最近一次检查结果/说明
 
 	// 通话面板控件（呼叫/振铃/通话三态共用）
 	callName       *callNameBox // 对端号码/名称（含 ★ 与备注悬停，REQ-UI-037）
@@ -208,6 +208,8 @@ type App struct {
 	remoteHasVideo  bool          // 已收到过对端画面（决定视频窗口是否显示）
 	localVideoEver  bool          // 已收到过本地帧（仅用于日志）
 	videoSized      bool          // 窗口尺寸是否已按对端比例初始化
+	videoSizedW     int           // 上次据此定尺寸的对端画面宽（分辨率变化时要重新适配）
+	videoSizedH     int           // 同上，高
 	videoFullscreen bool
 	webVideoOn      bool // 有网页正在接收视频画面（REQ-VIDEO-009，此时不显示视频窗口）
 	ringbackOn      bool // 正在放本地回铃音（没有早期媒体时自己放，避免重复放）
@@ -315,6 +317,7 @@ func (a *App) buildMainWindow() {
 
 	// 拨号盘定制主题：更大按键、更明显边框
 	a.fyne.Settings().SetTheme(&dialTheme{})
+	a.watchThemeChanges()
 
 	a.buildDialPage()
 	a.buildSettingsPage()
@@ -631,7 +634,8 @@ func (a *App) buildSettingsPage() {
 	// ---- 常规 ----
 	// 开机自动启动（REQ-UI-022）：默认启用，切换立即保存并注册/移除系统自启项
 	a.autoStartCheck = widget.NewCheck("开机自动启动", a.saveAutoStart)
-
+	// 多实例（沙箱槽位，REQ-NFR-007）没有配置开关：槽位只能由启动参数/
+	// sip:// 链接显式指定（不带就是主实例），不存在"忘了关"的风险，故不放配置项。
 	generalCard := container.NewVBox(
 		widget.NewLabelWithStyle("常规", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		a.autoStartCheck,
@@ -1075,6 +1079,63 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		moveCallWindowToCorner(a.callW)
 		a.startTimer() // 通话时长从 0 开始
 	}
+	// 视频回显摆位随通话阶段变化（振铃期铺满窗口 / 接通后回右上角小窗），
+	// 每次状态切换都按新口径同步一次（用户要求）。
+	a.applyLocalVideoVisibility()
+}
+
+// ---- 多实例（沙箱槽位）的窗口排布（REQ-NFR-007）----
+//
+// 右下角窗口（通话面板、更新提示窗、视频窗口）默认都吸附同一个角，多实例时
+// 会互相叠住。所以**按槽位从右往左排**：槽位 N 的整列左移 N 列——实例 1 的
+// 窗口显示在主实例左边（用户要求）。
+var instanceSlot int
+
+// SetInstanceSlot 设置本进程的实例槽位（main 启动时调用一次；0/负数等同主实例）。
+func SetInstanceSlot(n int) {
+	if n > 0 {
+		instanceSlot = n
+	}
+}
+
+// instanceColumnWidth 每个实例占的列宽（DIP）：**按通话面板宽 + 边距**（用户要求）。
+// 通话面板因此紧挨着排（实例 1 的面板贴在主实例面板左边）；**视频窗口的右边缘
+// 与自己的面板对齐**（跟着面板整列走），两个实例的视频窗口允许重叠——用户可自行拖动。
+const instanceColumnWidth = 260 + 16 // 260 = callPanelWidth（见 topmost_*.go）
+
+// instanceColumnShiftPx 槽位带来的整列左移量（物理像素；主实例为 0）。
+func instanceColumnShiftPx(scale float32) int32 {
+	if instanceSlot <= 0 {
+		return 0
+	}
+	return int32(float32(instanceSlot) * instanceColumnWidth * scale)
+}
+
+// watchThemeChanges 主题（深/浅色）切换后，让**长驻的自绘文本**重新取色。
+//
+// 自绘文本把主题前景色缓存在 canvas.Text 里（见 plainText.themed）：通话面板、
+// 悬停提示这些只建一次的控件不重新取色时，切换主题后文字仍是旧颜色，要退出
+// 重启才恢复（用户实测）。这里在设置变化时主动刷新一次（设置变化的场景还包括
+// 缩放变化等，多刷一次这几个文本开销可忽略）。
+func (a *App) watchThemeChanges() {
+	a.fyne.Settings().AddListener(func(fyne.Settings) {
+		fyne.Do(func() {
+			// 注意逐个判空：把 nil 指针放进 fyne.CanvasObject 会得到非 nil 接口，
+			// 直接调 Refresh() 会崩（这些控件是懒创建的）。
+			if a.callStateLabel != nil {
+				a.callStateLabel.Refresh()
+			}
+			if a.callTimerLabel != nil {
+				a.callTimerLabel.Refresh()
+			}
+			if a.callName != nil {
+				a.callName.Refresh()
+			}
+			if a.callTip != nil {
+				a.callTip.Refresh()
+			}
+		})
+	})
 }
 
 // shouldShowMainAfterCall 通话结束时要不要显示主窗体（REQ-UI-030 的规则，
@@ -1281,7 +1342,7 @@ func (a *App) subscribeEvents() {
 	// **订阅之后再取一次快照**：网页可能在 UI 订阅事件之前就连上并订阅了视频
 	//（软电话重启时页面会自动重连重订阅），漏掉那个 video.web 事件的后果是
 	//"网页在看画面，桌面视频窗口却也打开了"（用户实测）。旋转/镜像状态同理。
-	a.webVideoOn = a.core.WebVideoState().Active
+	a.webVideoOn = a.core.WebVideoState().HideWindow
 	a.applyVideoTransforms(a.core.VideoTransforms())
 	// 更新状态同理（REQ-UPD-017）：软电话启动后**立即**查一次更新站点，
 	// 那次检查往往在界面订阅事件之前就完成——事件收不到，用户就永远看不到
@@ -1385,15 +1446,18 @@ func (a *App) onEvent(ev core.Event) {
 	case "video.web":
 		// 网页端视频订阅状态变化（REQ-VIDEO-009）：有网页在看画面时
 		// 软电话自动关闭视频窗口；网页退订后按当前内容恢复显示。
+		// 订阅方显式要求 keepWindow 时窗口保持显示（REQ-VIDEO-009 修订，
+		// 由 core 汇总成 HideWindow：任一订阅者没要求保持就隐藏）。
 		//
 		// ⚠️ 负载是 core.WebVideoState 结构体——总线是进程内的，事件不经
 		// JSON 序列化，**不能**断言成 map[string]any（那样断言恒失败，
 		// 表现为"订阅了但桌面窗口不关"）。只有 WS 客户端收到的是 JSON 对象。
 		st, ok := ev.Data.(core.WebVideoState)
-		if ok && st.Active != a.webVideoOn {
-			a.webVideoOn = st.Active
+		if ok && st.HideWindow != a.webVideoOn {
+			a.webVideoOn = st.HideWindow
 			logx.Logger().Info("网页视频订阅状态变化",
-				"active", st.Active, "local", st.Local, "remote", st.Remote, "viewers", st.Viewers)
+				"active", st.Active, "hideWindow", st.HideWindow, "local", st.Local,
+				"remote", st.Remote, "viewers", st.Viewers)
 			a.syncVideoWindow()
 		}
 

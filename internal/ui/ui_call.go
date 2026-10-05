@@ -78,8 +78,8 @@ func (a *App) buildCallPanelIfNeeded() {
 	// （高 43px），与第一行的自绘名称（高 19px、左边缘 0）既对不齐左边缘、
 	// 也让每行高度不一致（用户实测"第一行和第二行左边没对齐、第一行高度变小"）。
 	textSize := fyne.CurrentApp().Settings().Theme().Size(theme.SizeNameText)
-	a.callStateLabel = newPlainText("", textSize, theme.ForegroundColor(), false)
-	a.callTimerLabel = newPlainText("00:00", textSize, theme.ForegroundColor(), false)
+	a.callStateLabel = newThemedText("", textSize, false)
+	a.callTimerLabel = newThemedText("00:00", textSize, false)
 
 	// 紧凑按钮（尺寸取平台常量，REQ-UI-025 修订）：fyne Button 跟随主题
 	// 内边距高达 48px，用自定义 compactButton 缩小面板按钮

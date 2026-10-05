@@ -38,19 +38,41 @@ import (
 // headless 无界面模式：跳过 GUI（仅 WS 服务），用于 Linux 服务器等无显示环境。
 var headless = flag.Bool("headless", false, "无界面模式（不启动 GUI）")
 
+// instanceSlot 实例槽位（多实例沙箱）：0/缺省 = 主实例（用原目录）；
+// ≥1 = 沙箱实例，用独立数据目录（见 config.InstanceDir）。sip:// 链接也可用
+// 查询参数 instance=N 指定（见 internal/protocol）。
+var instanceSlot = flag.Int("instance", 0, "实例槽位（多实例沙箱，0=主实例）")
+
 func main() {
 	flag.Parse()
 
 	// 1. 解析 sip:// 协议拉起参数（Windows 下形如 "proto:sip://..."）
 	sipURL := findSipURL(os.Args[1:])
 
-	// 2. 配置与日志
-	cfgDir, err := config.ConfigDir()
+	// 1.1 实例槽位：`-instance N` 优先，其次 sip:// 的 instance=N（缺省 0 = 主实例）。
+	slot := *instanceSlot
+	if slot <= 0 && sipURL != "" {
+		if acc, err := protocol.ParseSipURL(sipURL); err == nil {
+			slot = acc.Instance
+		}
+	}
+	if slot < 0 || slot > 99 {
+		fmt.Fprintf(os.Stderr, "实例槽位非法: %d（应为 0–99）\n", slot)
+		os.Exit(1)
+	}
+
+	// 2. 配置与日志（沙箱实例用独立目录，配置/记录/通信录/日志互不影响）
+	cfgDir, err := config.InstanceDir(slot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "获取配置目录失败: %v\n", err)
 		os.Exit(1)
 	}
 	cfgPath := filepath.Join(cfgDir, "config.json")
+
+	// ⚠️ 要在 Load **之前**记下"配置文件是否存在"：config.Load 在文件缺失时会
+	// 立刻落盘一份默认配置（WS 端口 8765），之后再判就来不及改沙箱的端口起点了。
+	_, statErr := os.Stat(cfgPath)
+	cfgExisted := !os.IsNotExist(statErr)
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -68,7 +90,23 @@ func main() {
 	}
 	defer logx.Close()
 
-	// 3. 单实例：锁文件在配置目录
+	// 沙箱实例：首次启动（还没有配置文件）时按「固定偏移 +10」给 WS 端口一个
+	// 起点（默认 8765 → 8775，被占用仍会自动 +1 并存入本实例自己的配置），
+	// 免得与主实例抢 8765。已有配置（用户改过端口）时不覆盖。
+	if slot >= 1 && !cfgExisted {
+		cfg.WS.Port = config.Default().WS.Port + config.InstanceWSBaseOffset
+		// 沙箱实例本来就不做系统级自启注册（只由主实例负责），配置项也一并
+		// 初始化为关，免得它的设置页显示"已开启"却其实没注册。
+		cfg.AutoStart = false
+		if err := cfg.Save(cfgPath); err != nil {
+			logx.Logger().Warn("沙箱实例：改写 WS 端口起点失败", "err", err)
+		} else {
+			logx.Logger().Info("沙箱实例：首次启动，WS 端口起点已设为默认+10",
+				"instance", slot, "config", cfgPath, "wsPort", cfg.WS.Port)
+		}
+	}
+
+	// 3. 单实例：锁文件在配置目录（沙箱实例有自己的锁，与其他槽位互不干扰）
 	lockPath := filepath.Join(cfgDir, "instance.lock")
 	releaseLock, err := single.Run(lockPath, os.Args[1:])
 	if err != nil {
@@ -105,10 +143,15 @@ func main() {
 		return nil
 	}
 
-	logx.Logger().Info("mti-sip-phone 启动", "version", core.Version, "config", cfgPath)
+	logx.Logger().Info("mti-sip-phone 启动",
+		"version", core.Version, "config", cfgPath, "instance", slot)
 
-	// 4. 注册 sip:// 系统协议（幂等；失败不阻断启动）
-	if exeErr != nil {
+	// 4. 注册 sip:// 系统协议与开机自启：**只有主实例做**（沙箱实例的系统级
+	// 注册会与主实例互相覆盖——尤其自启项：沙箱的空白配置默认开启自启，
+	// 会把主实例注册的那条改写成不带槽位的启动项）。
+	if slot != 0 {
+		// 沙箱实例跳过系统级注册
+	} else if exeErr != nil {
 		logx.Logger().Warn("无法获取可执行文件路径，跳过协议注册", "err", exeErr)
 	} else {
 		if err := protocol.RegisterProtocol(exePath); err != nil {
@@ -268,7 +311,7 @@ func main() {
 	// 9. GUI（无界面模式跳过；runGUI 按构建标签拆分——
 	// headless 构建不含界面层，供纯 Go 交叉编译）。
 	if !*headless {
-		runGUI(app, audioMgr, cfg, cfgPath, ctx, restart)
+		runGUI(app, audioMgr, cfg, cfgPath, ctx, restart, slot)
 		stop()
 		shutdown(app, tel) // 退出前注销 SIP（REQ-ACC-009）
 		closeCallLog()     // 先放掉数据库，避免新进程启动时撞上旧库的写锁

@@ -11,12 +11,14 @@ package single
 import (
 	"bufio"
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"mti-sip-phone/internal/logx"
@@ -49,6 +51,18 @@ func Run(lockPath string, args []string) (release func(), err error) {
 
 // ErrAlreadyRunning 第二实例（已有实例在运行）。
 var ErrAlreadyRunning = fmt.Errorf("已有实例在运行")
+
+// lockID 由锁文件路径派生的稳定短标识（Windows 命名互斥体用）。
+// 多实例沙箱各槽位的锁路径不同 → 标识不同 → 互不干扰；Windows 路径大小写
+// 不敏感，先转小写再哈希。
+func lockID(lockPath string) string {
+	abs, err := filepath.Abs(lockPath)
+	if err != nil {
+		abs = lockPath
+	}
+	sum := sha1.Sum([]byte(strings.ToLower(abs)))
+	return hex.EncodeToString(sum[:8])
+}
 
 // forwardFile 第二实例与第一实例间的转发文件。
 func forwardFile(lockPath string) string { return lockPath + ".fwd" }

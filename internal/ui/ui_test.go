@@ -141,18 +141,44 @@ func TestWantVideoWindowWhileSendingLocal(t *testing.T) {
 		t.Fatal("回显关闭且无对端画面时不应显示视频窗口")
 	}
 
-	// 对端画面到了：照常显示
+	// 对端画面到了：**通话建立后**照常显示
 	a.remoteHasVideo = true
 	a.callHasVideo = true
+	a.uiState = uiInCall
 	if !a.wantVideoWindow() {
-		t.Fatal("收到对端画面后应显示视频窗口")
+		t.Fatal("收到对端画面（已接通）后应显示视频窗口")
+	}
+}
+
+// TestWantVideoWindowRingPhase 振铃期的两套口径（用户要求）：
+//   - 本端不推流（摄像头禁用/不可用）：振铃期不显示窗口，**接通后**才显示；
+//   - 本端在推流：振铃期就显示窗口，但里面只有本地回显（对端画面等接通后，
+//     由 renderVideoFrame 拦截），所以这里仍应返回 true。
+func TestWantVideoWindowRingPhase(t *testing.T) {
+	// 摄像头禁用 + 已经收到早期媒体画面：振铃期不显示
+	a := &App{videoOn: true, activeCallID: "c1", uiState: uiRinging,
+		callHasVideo: true, remoteHasVideo: true}
+	if a.wantVideoWindow() {
+		t.Fatal("摄像头禁用时振铃期不应显示视频窗口（早期媒体画面不展示）")
+	}
+	// 接通后显示
+	a.uiState = uiInCall
+	if !a.wantVideoWindow() {
+		t.Fatal("接通后应显示视频窗口")
+	}
+
+	// 本端在推流 + 回显开着：振铃期即显示（里面只有本地回显）
+	a = &App{videoOn: true, activeCallID: "c1", uiState: uiRinging,
+		callSending: true, previewOn: true}
+	if !a.wantVideoWindow() {
+		t.Fatal("本端推流时振铃期应显示视频窗口（只放本地回显）")
 	}
 }
 
 // TestWantVideoWindowWithWebSubscription 网页订阅视频期间不显示视频窗口
 // （REQ-VIDEO-009：画面改在网页看），退订后立即恢复。
 func TestWantVideoWindowWithWebSubscription(t *testing.T) {
-	a := &App{videoOn: true, activeCallID: "c1", callHasVideo: true, remoteHasVideo: true}
+	a := &App{videoOn: true, activeCallID: "c1", uiState: uiInCall, callHasVideo: true, remoteHasVideo: true}
 	if !a.wantVideoWindow() {
 		t.Fatal("有远端画面时应显示视频窗口")
 	}
@@ -173,16 +199,27 @@ func TestWantVideoWindowWithWebSubscription(t *testing.T) {
 // 表现为"网页订阅了但桌面视频窗口不关"（编译运行都不报错）。
 func TestOnVideoWebEvent(t *testing.T) {
 	// 只验证「事件 → webVideoOn 状态翻转」（真实的窗口显隐需要 Fyne 运行时，
-	// 判定逻辑由 TestWantVideoWindowWithWebSubscription 覆盖）
+	// 判定逻辑由 TestWantVideoWindowWithWebSubscription 覆盖）。
+	// 订阅后是否隐藏窗口由 core 汇总成 HideWindow（REQ-VIDEO-009 修订：
+	// 订阅方 keepWindow 时可保持窗口显示），界面只看这个字段。
 	a := &App{}
-	a.onEvent(core.Event{Name: "video.web", Data: core.WebVideoState{Active: true, Remote: true, Viewers: 1}})
+	a.onEvent(core.Event{Name: "video.web", Data: core.WebVideoState{
+		Active: true, Remote: true, Viewers: 1, HideWindow: true,
+	}})
 	if !a.webVideoOn {
-		t.Fatal("收到 active=true 的 video.web 事件后应进入网页订阅状态")
+		t.Fatal("收到 hideWindow=true 的 video.web 事件后应隐藏视频窗口")
+	}
+	// 订阅方要求保持窗口（keepWindow）：Active 仍为真，但不隐藏
+	a.onEvent(core.Event{Name: "video.web", Data: core.WebVideoState{
+		Active: true, Remote: true, Viewers: 1, HideWindow: false,
+	}})
+	if a.webVideoOn {
+		t.Fatal("订阅方要求保持窗口时（hideWindow=false）不应隐藏视频窗口")
 	}
 	a.videoOn = false // 退订方向会走"恢复显示窗口"分支，测试里没有 Fyne 应用，先让它不成立
 	a.onEvent(core.Event{Name: "video.web", Data: core.WebVideoState{}})
 	if a.webVideoOn {
-		t.Fatal("收到 active=false 后应退出网页订阅状态")
+		t.Fatal("收到 hideWindow=false 后应退出隐藏状态")
 	}
 }
 
@@ -319,5 +356,33 @@ func TestShouldShowMainAfterCall(t *testing.T) {
 			t.Errorf("shouldShowMainAfterCall(%v, %v) = %v，期望 %v",
 				c.wasVisible, c.stillShown, got, c.want)
 		}
+	}
+}
+
+// TestInstanceColumnShift 多实例（沙箱槽位）的窗口列偏移（REQ-NFR-007）：
+// 主实例不偏移；槽位 N 整列左移 N × 列宽（列宽 = 视频窗口最大宽 + 边距，
+// 取最大宽是因为面板/更新提示窗/视频窗口都要落在自己那一列里，互不重叠）。
+func TestInstanceColumnShift(t *testing.T) {
+	saved := instanceSlot
+	defer func() { instanceSlot = saved }()
+
+	instanceSlot = 0
+	if got := instanceColumnShiftPx(1); got != 0 {
+		t.Fatalf("主实例不应偏移，实际 %d", got)
+	}
+	SetInstanceSlot(2)
+	if instanceSlot != 2 {
+		t.Fatalf("SetInstanceSlot 未生效：%d", instanceSlot)
+	}
+	want := int32(2 * instanceColumnWidth) // scale = 1
+	if got := instanceColumnShiftPx(1); got != want {
+		t.Fatalf("槽位 2 的偏移应为 %d，实际 %d", want, got)
+	}
+	if got := instanceColumnShiftPx(1.5); got != int32(float32(want)*1.5) {
+		t.Fatalf("缩放 1.5 时偏移应为 %d，实际 %d", int32(float32(want)*1.5), got)
+	}
+	SetInstanceSlot(-3) // 非法值忽略：仍是上一个有效槽位
+	if instanceSlot != 2 {
+		t.Fatalf("非法槽位不应改写当前值：%d", instanceSlot)
 	}
 }

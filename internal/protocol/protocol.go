@@ -24,11 +24,15 @@ const Scheme = "sip"
 
 // Account 从 sip:// URI 解析出的注册信息。
 type Account struct {
-	Server   string
-	Port     int
-	Account  string
-	Password string
+	Server    string
+	Port      int
+	Account   string
+	Password  string
 	Transport string // udp / tcp，URI 查询参数 transport 指定
+	// Instance 实例槽位（查询参数 instance=N，0 = 主实例）：≥1 时用独立数据目录
+	// 启动一个沙箱实例（多实例联调/对比用，见 config.InstanceDir 与
+	// config.AllowMultiInstance）。
+	Instance int
 }
 
 // ParseSipURL 解析 sip:// URI：sip://account:password@host:port?transport=tcp
@@ -68,6 +72,13 @@ func ParseSipURL(raw string) (*Account, error) {
 	}
 	if acc.Account == "" {
 		return nil, fmt.Errorf("缺少账号（格式应为 sip://账号:密码@服务器:端口）")
+	}
+	// 多实例（沙箱槽位）：sip://账号:密码@服务器:端口?instance=2
+	// 缺省/0 = 主实例；槽位 ≥1 时由本进程使用独立数据目录启动（见 config.InstanceDir）。
+	if inst := u.Query().Get("instance"); inst != "" {
+		if n, err := strconv.Atoi(inst); err == nil && n > 0 && n <= 99 {
+			acc.Instance = n
+		}
 	}
 	return acc, nil
 }

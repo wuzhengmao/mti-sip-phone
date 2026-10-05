@@ -26,7 +26,7 @@ Linux 上用 mingw-w64 交叉构建（glfw 的 C 源码与 mingw 专用头随 go
 
 ```bash
 # 版本号：构建脚本从 internal/core/buildinfo.go 读基础版本。开发构建自动加 -rc
-# （如 1.0.5-rc，非正式版）；正式版：SIP_PHONE_RELEASE=1 build.bat（发布脚本会设）。
+# （如 1.0.11-rc，非正式版）；正式版：SIP_PHONE_RELEASE=1 build.bat（发布脚本会设）。
 
 # Windows：一键构建（自动探测 WinLibs gcc），产物输出到 dist/：
 build.bat
@@ -66,9 +66,9 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 （Windows 用 `scripts\release.bat`，内部走 git-bash）：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.5-rc），不上传
-./scripts/release.sh --pre             # 预发布：上传 1.0.5-rc（站点标记为预发布）
-./scripts/release.sh                   # 正式版：以 1.0.5 编译并上传
+./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.11-rc），不上传
+./scripts/release.sh --pre             # 预发布：上传 1.0.11-rc（站点标记为预发布）
+./scripts/release.sh                   # 正式版：以 1.0.11 编译并上传
 ```
 
 - 站点地址 / 应用 ID / 上传令牌（可选站点证书）在 `release/release.conf`，环境变量可覆盖。
@@ -80,8 +80,10 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 - 应用级信息走站点接口写入（不直接动归档目录）：`release/app.json`
   → `PUT /api/v1/apps/<应用ID>/metadata`（整份替换，字段要写全），`release/icon.svg`
   → `PUT /api/v1/apps/<应用ID>/icon`。
-- 网页端 SDK 定时查询更新站点（初始化时传 `updateUrl`），查到更高版本会经 WS 通知软电话，
-  由用户在软电话界面上确认后下载更新；页面可通过 `update.check` 事件看到查询结果。
+- **软电话自己按配置的周期查询更新站点**（配置页「自动更新」卡片：站点 / 应用 ID / 检查周期 /
+  接受预览版；站点留空 = 不检查），查到更高版本弹右下角提示窗，**下载与重启由用户在软电话
+  界面上确认**；网页可经 WS `system.setUpdateConfig` 写这份配置、用 `system.notifyUpdate`
+  强制推送指定版本（联调/回滚，不受版本高低约束）。
 
 Windows 上一键只出 Windows 产物；Linux 产物需在 Linux 机器上 `./build.sh` 之后再发布。
 开发构建的版本号带 `-rc`，正式版发布时数字相同也会收到更新通知。
@@ -94,13 +96,16 @@ Windows 上一键只出 Windows 产物；Linux 产物需在 Linux 机器上 `./b
 | 日志（分级、滚动、脱敏、SIP 信令跟踪） | ✅ 已完成 |
 | 本地 WS 控制服务 + 事件推送 | ✅ 已完成 |
 | JS SDK + 测试页面 | ✅ 已完成 |
-| SIP 注册（UDP/TCP + Digest + 续注册 + 退避重试） | ✅ 已完成（集成测试通过） |
-| SIP 呼叫（呼出/呼入/接听/拒接/挂断） | ✅ 已完成（集成测试通过） |
-| 媒体引擎（PCMA/PCMU + RTP + 抖动缓冲） | ✅ 已完成 |
-| 音频设备（枚举/选择/全双工，malgo） | ✅ 已完成（待真机通话验收） |
-| GUI（托盘 / 来电置顶窗口 / 通话置顶面板） | ✅ 已完成（待真机验收） |
-| sip:// 协议拉起 + 单实例参数转发 | ✅ 已完成（冒烟验证通过） |
-| 通话记录、DTMF、录音、SRTP、AEC 等 | ⏳ 后续版本（P1/P2） |
+| SIP 注册（UDP/TCP + Digest + 续注册 + 退避重试 + 休眠/切网恢复 + 服务端心跳） | ✅ 已完成（与真实服务端联调通过） |
+| SIP 呼叫（呼出/呼入/接听/拒接/挂断/保持/DTMF） | ✅ 已完成（与真实服务端联调通过） |
+| 媒体引擎（PCMA/PCMU/Opus + RTP + 抖动缓冲 + 音量/增益） | ✅ 已完成 |
+| 音频设备（枚举/选择/全双工，malgo） | ✅ 已完成 |
+| 视频通话（H264/VP8/VP9/H263，含网页订阅） | ✅ 已完成 |
+| GUI（托盘 / 拨号盘 / 配置页 / 来电窗口 / 通话面板 / 通话记录页 / 通信录页） | ✅ 已完成 |
+| 通话记录 / 通信录（本地 SQLite） | ✅ 已完成 |
+| sip:// 协议拉起 + 单实例参数转发 | ✅ 已完成 |
+| 自动更新（软电话自检更新站点 + 下载替换重启） | ✅ 已完成 |
+| TLS(SIPS)、SRTP、AEC/NS/AGC、G.722、录音、长时间通话稳定性 | ⏳ 后续版本（P1/P2） |
 
 **注册生命周期**：配置了账户后启动即自动注册；按服务端 expires 周期定时续注册；修改账户配置保存后以新配置重新注册；退出程序时自动注销（expires=0）。
 
@@ -140,17 +145,23 @@ cmd/sip-phone/    程序入口
 internal/
   config/         配置加载与密码加密存储
   logx/           日志（滚动文件 + 脱敏 + SIP 信令跟踪）
-  core/           应用状态机、事件总线、电话能力抽象接口
-  wsapi/          本地 WS 控制服务（事件推送 + 心跳）
-  sip/            SIP 协议栈（注册/呼叫/保持信令与竞态处理）
-  media/          媒体引擎（RTP/RTCP、PCMA/PCMU、抖动缓冲、SDP 协商）
+  core/           应用状态机、事件总线、电话能力抽象接口、通话记录/通信录的采集点
+  sip/            SIP 协议栈（注册/呼叫/保持信令与竞态处理、注册看护）
+  media/          媒体引擎（RTP/RTCP、PCMA/PCMU/Opus、抖动缓冲、SDP 协商）
+  video/          视频编解码（FFmpeg 解码 + libvpx/OpenH264 编码，cgo）
   audio/          音频设备（malgo 全双工、设备枚举/选择、提示音）
-  ui/             Fyne 界面（拨号盘/设置页/通话面板/托盘）
+  calllog/        通话记录（SQLite）
+  contacts/       通信录（SQLite + 拼音搜索）
+  wsapi/          本地 WS 控制服务（事件推送 + 心跳 + 网页视频订阅）
+  updater/        自动更新（站点查询、下载、替换重启）
+  ui/             Fyne 界面（拨号盘/配置页/通话面板/通话记录页/通信录页/视频窗口/托盘）
   protocol/       sip:// 协议解析与系统协议注册
   single/         单实例 + 参数转发
   autostart/      开机自启
 web/
   test.html       测试页面（内嵌进二进制）
   sdk/            JS SDK 与类型声明
-docs/             需求、WS 协议、变更记录
+release/          更新站点发布配置与元数据
+scripts/          第三方库构建与一键发布脚本
+docs/             需求、架构设计、WS 协议、自动更新、变更记录
 ```

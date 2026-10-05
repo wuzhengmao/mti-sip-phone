@@ -77,29 +77,35 @@ func (d *videoDemux) OnVideoFrame(callID string, local bool, img *image.RGBA) {
 }
 
 // WebVideoState 网页端视频订阅状态（REQ-VIDEO-009）。
-// 任一网页连接订阅了视频画面，软电话就**不再显示视频窗口**（画面在网页看）。
+// 网页订阅了视频画面时，软电话默认**不再显示视频窗口**（画面在网页看）；
+// 订阅方显式要求 keepWindow 时（REQ-VIDEO-009 修订）才保持窗口继续显示。
 type WebVideoState struct {
 	Active  bool `json:"active"`  // 有网页正在接收视频画面
 	Local   bool `json:"local"`   // 有网页订阅本地画面
 	Remote  bool `json:"remote"`  // 有网页订阅远端画面
 	Viewers int  `json:"viewers"` // 当前订阅的连接数
+	// HideWindow 是否要隐藏软电话的视频窗口：**任一**订阅者没有要求"保持窗口
+	// 显示"（keepWindow=false，默认）就为真——只有所有订阅者都显式要求保持时才
+	// 不隐藏。界面据此决定视频窗口的显隐。
+	HideWindow bool `json:"hideWindow"`
 }
 
 // webViewer 单个连接（连接级，多连接取并集）的订阅意图。
 type webViewer struct {
-	local  bool
-	remote bool
+	local      bool
+	remote     bool
+	keepWindow bool // 订阅后是否仍保持软电话视频窗口显示（默认 false = 隐藏）
 }
 
 // SetWebVideoViewer 登记/更新一个网页连接的视频订阅（id 用连接标识，见 wsapi）。
 // 状态变化时发布 video.web 事件（界面据此显隐视频窗口）。
-func (a *App) SetWebVideoViewer(id uint64, local, remote bool) {
+func (a *App) SetWebVideoViewer(id uint64, local, remote, keepWindow bool) {
 	a.mu.Lock()
 	old := a.webVideoStateLocked()
 	if a.webViewers == nil {
 		a.webViewers = make(map[uint64]webViewer)
 	}
-	a.webViewers[id] = webViewer{local: local, remote: remote}
+	a.webViewers[id] = webViewer{local: local, remote: remote, keepWindow: keepWindow}
 	st := a.webVideoStateLocked()
 	a.mu.Unlock()
 	if st != old {
@@ -221,12 +227,21 @@ func (a *App) WebVideoState() WebVideoState {
 }
 
 // webVideoStateLocked 汇总所有连接的订阅（调用方需持有 a.mu）。
+//
+// HideWindow：任一订阅者没要求保持窗口 → 隐藏（默认行为）；只有**所有**订阅者
+// 都显式 keepWindow 时才不隐藏——多页面同时订阅时，只要有一个页面在看画面，
+// 窗口就该让位（避免"双向都在显示"的糊涂状态）。
 func (a *App) webVideoStateLocked() WebVideoState {
 	st := WebVideoState{Viewers: len(a.webViewers)}
+	hiding := false
 	for _, v := range a.webViewers {
 		st.Local = st.Local || v.local
 		st.Remote = st.Remote || v.remote
+		if !v.keepWindow {
+			hiding = true
+		}
 	}
 	st.Active = st.Local || st.Remote
+	st.HideWindow = st.Active && hiding
 	return st
 }

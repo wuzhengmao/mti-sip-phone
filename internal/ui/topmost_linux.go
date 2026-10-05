@@ -524,7 +524,8 @@ func placeCornerWindow(handle uintptr, targetW, targetH int, scale float32, cont
 	var wx, wy, ww, wh C.int
 	C.sp_workarea(d, &wx, &wy, &ww, &wh)
 
-	x := wx + ww - w - callPanelMargin
+	// 多实例（沙箱槽位）：整列按槽位左移，实例之间不互相叠住（REQ-NFR-007）
+	x := wx + ww - w - callPanelMargin - C.int(instanceColumnShiftPx(scale))
 	y := wy + wh - h - callPanelMargin
 	C.sp_move(d, win, x, y)
 	logx.Logger().Debug(name+"已吸附右下角",

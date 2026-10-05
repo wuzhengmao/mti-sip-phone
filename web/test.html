@@ -189,6 +189,12 @@
         <input type="text" id="uriPassword" placeholder="认证密码">
       </div>
       <div class="row">
+        <!-- 实例槽位（多实例沙箱，REQ-NFR-007）：0/留空 = 主实例；
+             1–99 = 用独立数据目录的沙箱实例（需在主实例里先开启「允许多实例」） -->
+        <label>实例槽位</label>
+        <input type="number" id="uriInstance" min="0" max="99" placeholder="0 = 主实例">
+      </div>
+      <div class="row">
         <button id="btnGenUri" class="ghost">生成拉起链接</button>
       </div>
       <div class="state-line" id="uriLine" style="display:none">
@@ -209,6 +215,8 @@
           <button id="btnReject" class="red">拒接</button>
           <button id="btnMute" class="yellow" style="display:none">保持</button>
           <button id="btnHangup" class="red">挂断</button>
+          <!-- 视频开关（视频通话时显示）：跟在挂断之后（用户要求；原来挤在扬声器那行） -->
+          <button id="btnVideoToggle" class="icon-btn" title="视频" style="display:none"></button>
         </div>
         <!-- 扬声器 / 麦克风各占一行（用户要求）：左边开关按钮，右边音量滑块 + 百分比。
              拖动即调，**0% = 禁用**（等同开关的「关」）；与软电话通话面板的滚轮是
@@ -218,7 +226,6 @@
             <button id="btnSpeaker" class="icon-btn" title="扬声器"></button>
             <input type="range" id="volSpeaker" min="0" max="100" step="5" value="100">
             <span class="vol-val" id="volSpeakerVal">100%</span>
-            <button id="btnVideoToggle" class="icon-btn" title="视频" style="display:none"></button>
           </div>
           <div class="media-line">
             <button id="btnMic" class="icon-btn" title="麦克风"></button>
@@ -299,8 +306,10 @@
       </div>
       <div class="row">
         <label class="chk"><input type="checkbox" id="vidLocal" checked> 同时订阅本地画面</label>
+        <!-- 订阅后是否保持软电话的视频窗口显示（REQ-VIDEO-009 修订；默认不勾 = 隐藏窗口） -->
+        <label class="chk"><input type="checkbox" id="vidKeepWindow"> 保持软电话视频窗口显示</label>
+        <!-- 订阅 / 取消订阅合并成一个按钮（用户要求）：按当前订阅状态切换 -->
         <button id="btnSubVideo" class="green">订阅视频</button>
-        <button id="btnUnsubVideo" class="ghost">取消订阅</button>
       </div>
       <div class="row">
         <label style="min-width:auto">远端</label>
@@ -912,7 +921,30 @@
   sdk.on('connected', refreshTransformButtons);
   refreshTransformButtons();
 
+  // 订阅状态（订阅/取消订阅共用一个按钮，用户要求）
+  var videoSubscribed = false;
+  function setVideoSubState(on) {
+    videoSubscribed = on;
+    $('btnSubVideo').textContent = on ? '取消订阅' : '订阅视频';
+    $('btnSubVideo').className = on ? 'ghost' : 'green';
+  }
+
   $('btnSubVideo').onclick = function () {
+    if (videoSubscribed) {
+      // —— 取消订阅 ——
+      sdk.unsubscribeVideo().then(function () {
+        setVideoSubState(false);
+        setTransformButtonsEnabled(false); // 退订后置灰不可点（状态留在软电话侧）
+        refreshTransformButtons();
+        resetStats();
+        $('videoBadge').textContent = '未订阅';
+        $('videoBadge').className = 'badge';
+        addLog('ok', '已取消订阅（画面已清空，软电话恢复显示视频窗口）');
+      }).catch(function (e) {
+        addLog('err', '取消订阅失败: ' + e.message);
+      });
+      return;
+    }
     var opts = {
       remote: $('remoteVideo'),                      // 必传
       local: channelOpts($('localVideo'), $('vidLocal').checked), // 不勾选 = 不订阅本地
@@ -922,12 +954,15 @@
     if ($('vidMaxH').value) { opts.maxHeight = parseInt($('vidMaxH').value, 10); }
     if ($('vidFps').value) { opts.fps = parseInt($('vidFps').value, 10); }
     if ($('vidQuality').value) { opts.quality = parseInt($('vidQuality').value, 10); }
+    if ($('vidKeepWindow').checked) { opts.keepWindow = true; } // 订阅后仍显示软电话视频窗口
 
     var desc = '远端 ' + (opts.maxWidth || '自动') + '×' + (opts.maxHeight || '自动') +
       ' / ' + (opts.fps || '默认') + 'fps / 质量 ' + (opts.quality || '默认') +
-      (opts.local ? '，含本地画面' : '，仅远端');
+      (opts.local ? '，含本地画面' : '，仅远端') +
+      (opts.keepWindow ? '，保持软电话窗口' : '');
     addLog('info', '订阅视频（' + desc + '）');
     sdk.subscribeVideo(opts).then(function (res) {
+      setVideoSubState(true);
       setTransformButtonsEnabled(true); // 订阅期间可操作
       refreshTransformButtons();        // 状态以软电话为准（同步过来）
       resetStats();
@@ -948,19 +983,6 @@
     });
   };
 
-  $('btnUnsubVideo').onclick = function () {
-    sdk.unsubscribeVideo().then(function () {
-      setTransformButtonsEnabled(false); // 退订后置灰不可点（状态留在软电话侧）
-      refreshTransformButtons();
-      resetStats();
-      $('videoBadge').textContent = '未订阅';
-      $('videoBadge').className = 'badge';
-      addLog('ok', '已取消订阅（画面已清空，软电话恢复显示视频窗口）');
-    }).catch(function (e) {
-      addLog('err', '取消订阅失败: ' + e.message);
-    });
-  };
-
   $('btnAnswerVideo').onclick = function () {
     if (!currentCall) { return; }
     addLog('info', '视频接听: ' + (currentCall.remote || ''));
@@ -978,11 +1000,19 @@
     if (!server || !account) { addLog('err', '请输入服务器与账号'); return; }
     if (server.indexOf(':') < 0) { server += ':5060'; }
     var uri = 'sip://' + account + ':' + encodeURIComponent(password) + '@' + server;
+    // 实例槽位（REQ-NFR-007）：留空/0 = 主实例（不带参数）；1–99 加 ?instance=N，
+    // 该实例在跑就把参数转发给它、没跑就用它的独立数据目录启动
+    var slot = parseInt($('uriInstance').value, 10);
+    if (slot > 0) {
+      if (slot > 99) { addLog('err', '实例槽位范围 0–99'); return; }
+      uri += '?instance=' + slot;
+    }
     var link = $('sipLink');
     link.href = uri;
     link.textContent = uri;
     $('uriLine').style.display = '';
-    addLog('info', '已生成拉起链接，点击后浏览器会唤起软电话（首次需确认允许）');
+    addLog('info', '已生成拉起链接' + (slot > 0 ? '（实例 ' + slot + '）' : '（主实例）') +
+      '，点击后浏览器会唤起软电话（首次需确认允许）');
   };
 
   $('btnAnswer').onclick = function () {
