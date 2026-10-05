@@ -27,7 +27,8 @@ type Account struct {
 	STUNEnabled bool   `json:"stunEnabled"` // 启用 STUN 公网地址探测（REQ-ACC-017）
 	STUNServer  string `json:"stunServer"`  // STUN 服务器地址，默认 stun.l.google.com:19302
 	Proxy       string `json:"proxy"`       // 出站 SIP 代理（host:port，可选，REQ-ACC-019）
-	Transport   string `json:"transport"`   // 传输协议：udp / tcp
+	Transport   string `json:"transport"`   // 传输协议：udp / tcp / tls（REQ-ACC-006）
+	TLSVerify   bool   `json:"tlsVerify"`   // 校验服务器证书（仅 transport=tls 生效）。默认 false = 跳过校验（REQ-ACC-006：内网自签证书场景）
 	Account     string `json:"account"`     // 账号（AOR 用户部分）
 	AuthUser    string `json:"authUser"`    // 认证 ID，为空时使用 Account
 	DisplayName string `json:"displayName"` // 显示名
@@ -192,6 +193,36 @@ func Default() *Config {
 	}
 }
 
+// SIP 传输协议（REQ-ACC-002/006）：udp / tcp / tls。
+const (
+	TransportUDP = "udp"
+	TransportTCP = "tcp"
+	TransportTLS = "tls"
+)
+
+// NormalizeTransport 规范化传输协议字符串：统一小写；空值或非法值回退 udp
+//（旧配置没有 tls 字段，零值行为与从前一致）。配置文件、界面下拉、sip:// / sips://
+// 链接解析三处共用这一份判定。
+func NormalizeTransport(t string) string {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case TransportTCP:
+		return TransportTCP
+	case TransportTLS:
+		return TransportTLS
+	default:
+		return TransportUDP
+	}
+}
+
+// DefaultPortForTransport 传输协议对应的服务端默认端口：tls 用 5061（sips），
+// 其余 5060。仅在用户没写端口时使用。
+func DefaultPortForTransport(t string) int {
+	if NormalizeTransport(t) == TransportTLS {
+		return 5061
+	}
+	return 5060
+}
+
 // Load 加载配置；文件不存在时创建默认配置并保存。
 func Load(path string) (*Config, error) {
 	cfg := Default()
@@ -243,9 +274,8 @@ func Load(path string) (*Config, error) {
 	if cfg.Account.STUNServer == "" {
 		cfg.Account.STUNServer = "stun.l.google.com:19302"
 	}
-	if cfg.Account.Transport == "" {
-		cfg.Account.Transport = "udp"
-	}
+	// 传输协议：空或非法值一律回退 udp（旧配置没有 tls，零值行为不变）
+	cfg.Account.Transport = NormalizeTransport(cfg.Account.Transport)
 	if cfg.WS.Port == 0 {
 		cfg.WS.Port = 8765
 	}

@@ -1,8 +1,9 @@
-// Package protocol 实现 sip:// 自定义协议：注册系统协议处理器并解析 URI。
+// Package protocol 实现 sip:// / sips:// 自定义协议：注册系统协议处理器并解析 URI。
 //
-// 网页通过 sip://account:password@host:port 拉起软电话，携带注册信息。
-//   - Windows：写 HKCU\Software\Classes（sip 方案 + ProgID + Capabilities 声明），
-//     成为「默认应用」候选；默认处理器由用户在系统设置中手动选择（防劫持机制）
+// 网页通过 sip://account:password@host:port 拉起软电话，携带注册信息；
+// sips://account:password@host:port 表示走 TLS 传输（REQ-ACC-006）。
+//   - Windows：写 HKCU\Software\Classes（sip、sips 两个方案 + ProgID + Capabilities
+//     声明），成为「默认应用」候选；默认处理器由用户在系统设置中手动选择（防劫持机制）
 //   - Linux：写 ~/.local/share/applications 下的 .desktop 文件 + mimeapps.list
 package protocol
 
@@ -16,30 +17,45 @@ import (
 	"strconv"
 	"strings"
 
+	"mti-sip-phone/internal/config"
 	"mti-sip-phone/internal/logx"
 )
 
-// Scheme 协议名。
-const Scheme = "sip"
+// Scheme 协议名。SchemeSips 为 TLS 版本（sips:// ⇒ transport=tls，REQ-ACC-006），
+// 两者都注册为系统协议处理器。
+const (
+	Scheme     = "sip"
+	SchemeSips = "sips"
+)
 
-// Account 从 sip:// URI 解析出的注册信息。
+// urlPrefixes URI 前缀，**sips 在前**：sips:// 里不含 "sip://" 子串，
+// 但两个前缀都要能识别，顺序保证 sips:// 不会被当成 sip:// 之外的东西。
+var urlPrefixes = []string{SchemeSips + "://", Scheme + "://"}
+
+// Account 从 sip:// / sips:// URI 解析出的注册信息。
 type Account struct {
 	Server    string
 	Port      int
 	Account   string
 	Password  string
-	Transport string // udp / tcp，URI 查询参数 transport 指定
+	Transport string // udp / tcp / tls：sips:// 前缀或查询参数 transport 指定
 	// Instance 实例槽位（查询参数 instance=N，0 = 主实例）：≥1 时用独立数据目录
 	// 启动一个沙箱实例（多实例联调/对比用，见 config.InstanceDir 与
 	// config.AllowMultiInstance）。
 	Instance int
 }
 
-// ParseSipURL 解析 sip:// URI：sip://account:password@host:port?transport=tcp
+// ParseSipURL 解析 sip:// / sips:// URI：
+//
+//	sip://account:password@host:port?transport=tcp
+//	sips://account:password@host:port        ⇒ transport=tls（默认端口 5061）
+//
 // 账号与密码支持 URL 编码。
 func ParseSipURL(raw string) (*Account, error) {
-	if !strings.HasPrefix(strings.ToLower(raw), "sip://") {
-		return nil, fmt.Errorf("不是合法的 sip:// 链接")
+	lower := strings.ToLower(raw)
+	sips := strings.HasPrefix(lower, SchemeSips+"://")
+	if !sips && !strings.HasPrefix(lower, Scheme+"://") {
+		return nil, fmt.Errorf("不是合法的 sip:// / sips:// 链接")
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -53,6 +69,11 @@ func ParseSipURL(raw string) (*Account, error) {
 		Port:    5060,
 		Account: u.User.Username(),
 	}
+	// sips:// 前缀即 TLS（与查询参数相比是更强的声明，参数改不了它）
+	if sips {
+		acc.Transport = config.TransportTLS
+		acc.Port = 5061
+	}
 	if pwd, ok := u.User.Password(); ok {
 		acc.Password = pwd
 	}
@@ -61,14 +82,11 @@ func ParseSipURL(raw string) (*Account, error) {
 			acc.Port = p
 		}
 	}
-	if tr := u.Query().Get("transport"); tr != "" {
-		tr = strings.ToLower(tr)
-		if tr == "udp" || tr == "tcp" {
-			acc.Transport = tr
-		}
+	if tr := u.Query().Get("transport"); tr != "" && !sips {
+		acc.Transport = config.NormalizeTransport(tr)
 	}
 	if acc.Transport == "" {
-		acc.Transport = "udp"
+		acc.Transport = config.TransportUDP
 	}
 	if acc.Account == "" {
 		return nil, fmt.Errorf("缺少账号（格式应为 sip://账号:密码@服务器:端口）")
@@ -81,6 +99,29 @@ func ParseSipURL(raw string) (*Account, error) {
 		}
 	}
 	return acc, nil
+}
+
+// SplitURL 从单个命令行参数中提取 sip:// / sips:// URL。
+// Windows 协议拉起时参数形如 "mti-sip-phone:sips://2999:pwd@10.168.4.40:5061"，
+// 前面可能带启动器前缀，所以按前缀查找而不是整串比较；大小写不敏感。
+func SplitURL(arg string) (string, bool) {
+	lower := strings.ToLower(arg)
+	for _, p := range urlPrefixes {
+		if i := strings.Index(lower, p); i >= 0 {
+			return arg[i:], true
+		}
+	}
+	return "", false
+}
+
+// FindURL 从命令行参数列表中取第一个 sip:// / sips:// URL（没找到返回 ""）。
+func FindURL(args []string) string {
+	for _, a := range args {
+		if u, ok := SplitURL(a); ok {
+			return u
+		}
+	}
+	return ""
 }
 
 // RegisterProtocol 注册系统协议处理器。exePath 为当前可执行文件路径。
@@ -119,22 +160,24 @@ Comment=SIP 软电话
 Exec=%s %%u
 Terminal=false
 Categories=Network;Telephony;
-MimeType=x-scheme-handler/%s;x-scheme-handler/%ss;
-`, exePath, Scheme, Scheme)
+MimeType=x-scheme-handler/%s;x-scheme-handler/%s;
+`, exePath, Scheme, SchemeSips)
 	if err := os.WriteFile(desktop, []byte(content), 0o755); err != nil {
 		return fmt.Errorf("写 .desktop 失败: %w", err)
 	}
 
-	// mimeapps.list 默认应用（优先级高于 xdg-mime default）
+	// mimeapps.list 默认应用（优先级高于 xdg-mime default）：sip 与 sips 都指向本程序
 	mimeFile := filepath.Join(home, ".config", "mimeapps.list")
-	line := fmt.Sprintf("x-scheme-handler/%s=mti-sip-phone.desktop\n", Scheme)
-	if err := upsertLine(mimeFile, "[Default Applications]", line); err != nil {
-		return err
+	for _, s := range []string{Scheme, SchemeSips} {
+		line := fmt.Sprintf("x-scheme-handler/%s=mti-sip-phone.desktop", s)
+		if err := upsertLine(mimeFile, "[Default Applications]", line); err != nil {
+			return err
+		}
 	}
 
 	// 更新桌面数据库
 	_ = exec.Command("update-desktop-database", appsDir).Run()
-	logx.Logger().Info("已注册 sip:// 协议（.desktop）", "file", desktop)
+	logx.Logger().Info("已注册 sip:// 与 sips:// 协议（.desktop）", "file", desktop)
 	return nil
 }
 

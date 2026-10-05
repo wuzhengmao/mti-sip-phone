@@ -33,13 +33,26 @@ type Phone struct {
 	ua     *sipgo.UserAgent
 	client *sipgo.Client
 	server *sipgo.Server
-	dcc    *sipgo.DialogClientCache // 呼出 dialog
-	dsc    *sipgo.DialogServerCache // 呼入 dialog
 
-	mu        sync.Mutex
-	acc       config.Account
-	localPort int    // 本地 SIP 监听端口（Contact 用）
-	publicIP  string // STUN 探测的公网 IP（NAT 穿透，Contact/SDP 用）
+	// dialog 缓存（p.mu 保护）：sipgo 要求每种传输一个实例，传输方式或本机
+	// 地址变化时重建（见 ensureDialogCaches），dialogKey 是当前的 Contact 键。
+	dcc       *sipgo.DialogClientCache // 呼出 dialog
+	dsc       *sipgo.DialogServerCache // 呼入 dialog
+	dialogKey string
+
+	mu           sync.Mutex
+	acc          config.Account
+	localPort    int    // 本地 SIP 监听端口（Contact 用）
+	localTLSPort int    // 本端 TLS 监听端口（transport=tls 时 Contact 用；0 = 未启动）
+	publicIP     string // STUN 探测的公网 IP（NAT 穿透，Contact/SDP 用）
+
+	// TLS（REQ-ACC-006）：客户端校验开关（Register 时按配置更新，出向握手实时读）
+	// 与"本端 TLS 监听"的一次性启动状态。tlsMu 只护监听状态，不跨 p.mu 持有。
+	tlsVerify  tlsVerifyFlag
+	tlsMu      sync.Mutex
+	tlsDir     string // 自签证书目录（main 启动时设置）
+	tlsStarted bool
+	tlsCancel  context.CancelFunc
 
 	regCancel context.CancelFunc
 
@@ -117,7 +130,10 @@ const (
 // 在 NAT/rport 场景下对不上而被判失败）。
 func userAgentFor(acc config.Account) string {
 	ua := UserAgentName()
-	if acc.ChkOpt {
+	// optchk 只在 **UDP** 传输时加（用户要求）：服务端的心跳探测（OPTIONS）
+	// 在连接型传输（TCP/TLS）上另有保活/连接状态可用，脚本里的心跳判定
+	// 也未必覆盖它们，标记只会让服务端多做无用探测。
+	if acc.ChkOpt && config.NormalizeTransport(acc.Transport) == config.TransportUDP {
 		ua += " optchk"
 	}
 	return ua
@@ -263,10 +279,20 @@ func (p *Phone) hostIsServer(host string) bool {
 // 内的相同 branch 请求当**重传**、不再回调 handler——按 handler 计数会把
 // 10 秒的真实心跳看成 ~40 秒，学出来的间隔与漏检判定全部失真。
 func (p *Phone) readFilter(props sip.TransportReadProps, data []byte) ([]byte, error) {
-	if bytes.HasPrefix(data, []byte("OPTIONS ")) && p.hostIsServer(hostOfAddr(props.RemoteAddr)) {
+	// 服务端心跳只对 **UDP** 生效（REQ-ACC-020 修订，用户要求）：连接型传输
+	// （TCP/TLS）注册报文不带 optchk、服务端不按心跳探测，所以计数、间隔学习与
+	// 超时重注册一并停掉；此前学到的状态由 Register 里的 resetHeartbeat 清掉。
+	if bytes.HasPrefix(data, []byte("OPTIONS ")) && p.heartbeatWanted() && p.hostIsServer(hostOfAddr(props.RemoteAddr)) {
 		p.noteHeartbeat()
 	}
 	return data, nil
+}
+
+// heartbeatWanted 当前账户是否需要服务端心跳检测：**仅 UDP 传输**且开关打开。
+func (p *Phone) heartbeatWanted() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.acc.ChkOpt && config.NormalizeTransport(p.acc.Transport) == config.TransportUDP
 }
 
 // hostOfAddr 取 net.Addr 的 host 部分（不含端口）。
@@ -302,6 +328,9 @@ func NewPhone(sink core.EventSink, audioMgr *audio.Manager, useRPort bool) (*Pho
 	ua, err := sipgo.NewUA(
 		sipgo.WithUserAgent(UserAgentName()),
 		sipgo.WithUserAgentTransportLayerOptions(sip.WithTransportLayerReadFilter(p.readFilter)),
+		// TLS（REQ-ACC-006）：配置在 UA 创建时注入（sipgo 把指针捕获进拨号
+		// 闭包，之后换不了），校验开关按原子标记实时读，见 tlsVerifyFlag
+		sipgo.WithUserAgenTLSConfig(clientTLSConfig(&p.tlsVerify)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("创建 UA 失败: %w", err)
@@ -334,19 +363,49 @@ func NewPhone(sink core.EventSink, audioMgr *audio.Manager, useRPort bool) (*Pho
 // 应分别对 UDP 与 TCP 调用（各起一个 goroutine）。
 func (p *Phone) ListenAndServe(ctx context.Context, network, addr string) error {
 	if _, portStr, err := net.SplitHostPort(addr); err == nil {
-		if port, err := strconv.Atoi(portStr); err == nil && p.localPort == 0 {
-			p.localPort = port
-			logx.Logger().Info("本地 SIP 监听端口", "network", network, "port", port)
+		if port, err := strconv.Atoi(portStr); err == nil {
+			p.mu.Lock()
+			if p.localPort == 0 {
+				p.localPort = port
+				logx.Logger().Info("本地 SIP 监听端口", "network", network, "port", port)
+			}
+			p.mu.Unlock()
 		}
 	}
 	return p.server.ListenAndServe(ctx, network, addr)
 }
 
-// contactURI 构造 Contact 头地址：账号@本机IP:监听端口。
-func (p *Phone) contactURI(user string) sip.Uri {
-	u := sip.Uri{User: user, Host: p.localHost()}
-	if p.localPort > 0 {
-		u.Port = p.localPort
+// contactFor 构造当前账户传输方式对应的 Contact 地址：
+//
+//	udp / tcp → <sip:账号@本机IP:UDP/TCP监听端口>
+//	tls       → <sips:账号@本机IP:TLS监听端口;transport=tls>
+//
+// 走 TLS 时必须是 sips: 且带 transport=tls 参数（用 sip: 会让对端按明文回连）。
+func (p *Phone) contactFor(acc config.Account) sip.Uri {
+	host := p.localHost() // 自己加锁（内部有 UDP 探测），不能与下面的取锁合并
+	p.mu.Lock()
+	port, tlsPort := p.localPort, p.localTLSPort
+	p.mu.Unlock()
+
+	u := sip.Uri{User: acc.Account, Host: host}
+	if tlsInUse(acc) {
+		u.Scheme = "sips"
+		if tlsPort > 0 {
+			u.Port = tlsPort
+		}
+		u.UriParams = sip.NewParams()
+		u.UriParams.Add("transport", config.TransportTLS)
+		return u
+	}
+	if port > 0 {
+		u.Port = port
+	}
+	// 连接型传输（TCP）：Contact 要显式写 `transport=tcp`——对端/服务端按 Contact
+	// 的 URI 决定用哪种传输回来，而 `sip:` URI 不带 transport 参数时**默认是 UDP**
+	//（NAT/TLS 那一串问题里踩过的同一个坑）。UDP 不加（缺省即 UDP）。
+	if config.NormalizeTransport(acc.Transport) == config.TransportTCP {
+		u.UriParams = sip.NewParams()
+		u.UriParams.Add("transport", config.TransportTCP)
 	}
 	return u
 }
@@ -379,11 +438,12 @@ func (p *Phone) setupHandlers() {
 	// 对端 ACK：必须匹配 dialog 并通知（sipgo 的 RespondSDP 发送 200 后
 	// 按 RFC 6026 阻塞等待 ACK；无此处理则 2xx 重传至超时且接听流程卡死）
 	p.server.OnAck(func(req *sip.Request, tx sip.ServerTransaction) {
-		if p.dsc == nil {
+		dsc := p.dialogServer()
+		if dsc == nil {
 			logx.Logger().Warn("ACK 到达但 dialog 缓存未初始化")
 			return
 		}
-		if err := p.dsc.ReadAck(req, tx); err != nil {
+		if err := dsc.ReadAck(req, tx); err != nil {
 			logx.Logger().Warn("ACK 匹配失败", "err", err)
 		}
 	})
@@ -404,6 +464,14 @@ func (p *Phone) Register(ctx context.Context, acc config.Account) error {
 	}
 	p.mu.Unlock()
 
+	// TLS（REQ-ACC-006）：校验开关即时生效（出向握手每次按它判定）；
+	// transport=tls 时确保本端 TLS 监听已启动（首次注册时才生成证书/占端口，
+	// 不用 TLS 的用户零开销），运行中从 udp/tcp 改成 tls 也走这里。
+	p.tlsVerify.on.Store(acc.TLSVerify)
+	if tlsInUse(acc) {
+		p.ensureTLSListener()
+	}
+
 	if p.regCancel != nil {
 		p.regCancel()
 	}
@@ -419,6 +487,10 @@ func (p *Phone) Register(ctx context.Context, acc config.Account) error {
 
 	go p.watchRegistration(regCtx, acc, kickCh)
 	go p.registerLoop(regCtx, acc, kickCh)
+	// 连接型传输（TCP/TLS）的信令保活：防止服务端的连接空闲超时把连接关掉，
+	// 之后它送 in-dialog 请求（对端 BYE/ACK）就只能重新拨号、而 NAT 后面拨不进来
+	//（真机：tcp_connect_blocking_timeout + Connection refused）。
+	go p.keepaliveLoop(regCtx, acc)
 	return nil
 }
 
@@ -466,6 +538,11 @@ func (p *Phone) dial(ctx context.Context, target string, withVideo bool) (string
 	if err != nil {
 		return "", err
 	}
+
+	// dialog 缓存必须在本通登记进 p.calls **之前**按当前传输方式准备好：
+	// `ensureDialogCaches` 有"有通话进行中就不换缓存"的保护，放到登记之后
+	// 会把本通自己当成"进行中的通话"，改了传输方式却继续用旧 Contact 发 INVITE。
+	p.ensureDialogCaches(acc)
 
 	// 创建媒体引擎与 SDP offer
 	engine, err := media.NewEngine(p.localIP())
@@ -591,6 +668,19 @@ func (p *Phone) Hangup(callID string) error {
 		if cs.cancel != nil {
 			// 呼出振铃中：sipgo 的 WaitAnswer 收到取消后自动发 CANCEL；
 			// 其余场景取消会话上下文用于竞态判断。
+			//
+			// CANCEL 必须按 **INVITE 的路径**发（RFC 3261 §9.1：目的地址、Call-ID、
+			// CSeq、Via branch 都与 INVITE 一致），不能带对话的路由集。但 sipgo 构造
+			// CANCEL 时走的是 dialog 的 buildReq，会把**响应里的 Record-Route** 当
+			// Route 塞进去，于是 CANCEL 被发到 Record-Route 指向的代理地址——真机上
+			// 那条腿连不上，CANCEL 静默丢失（对端一直振铃）。这里在取消前把**临时
+			// 响应**上的 Record-Route 摘掉，让 CANCEL 回到 INVITE 的原始目的地；
+			// 最终响应（2xx）的 Record-Route 不能动——它要留给补发的 ACK/BYE。
+			if cs.dialogC != nil {
+				if res := cs.dialogC.InviteResponse; res != nil && res.StatusCode < 200 {
+					stripRecordRoutes(res)
+				}
+			}
 			cs.cancel()
 		}
 		switch {
@@ -599,14 +689,14 @@ func (p *Phone) Hangup(callID string) error {
 			//（WaitAnswer 收到 ctx 取消自动发 CANCEL；2xx 后补 ACK+BYE）
 			if cs.established {
 				if err := cs.dialogC.Bye(context.Background()); err != nil {
-					logx.Logger().Debug("发送 BYE 失败", "err", err)
+					logx.Logger().Warn("发送 BYE 失败", "err", err)
 				}
 				_ = cs.dialogC.Close()
 			}
 		case cs.dialogS != nil:
 			// 200 OK 已发出（含接听流程进行中）：发送 BYE 结束通话
 			if err := cs.dialogS.Bye(context.Background()); err != nil {
-				logx.Logger().Debug("发送 BYE 失败", "err", err)
+				logx.Logger().Warn("发送 BYE 失败", "err", err)
 			}
 			_ = cs.dialogS.Close()
 		}
@@ -630,7 +720,7 @@ func (p *Phone) Reject(callID string, code int) error {
 		if cs.dialogS.LoadState() >= sip.DialogStateEstablished {
 			// 200 OK 已发出（接听进行中）：拒接已无意义，改发 BYE 挂断
 			if err := cs.dialogS.Bye(context.Background()); err != nil {
-				logx.Logger().Debug("发送 BYE 失败", "err", err)
+				logx.Logger().Warn("发送 BYE 失败", "err", err)
 			}
 		} else if err := cs.dialogS.Respond(code, statusText(code), nil); err != nil {
 			logx.Logger().Debug("发送拒接响应失败", "err", err)
@@ -941,6 +1031,7 @@ func (p *Phone) Close() error {
 			cs.cancel()
 		}
 	}
+	p.closeTLSListener() // TLS 监听协程随进程收尾（REQ-ACC-006）
 	_ = p.client.Close()
 	_ = p.ua.Close()
 	return nil
@@ -986,8 +1077,8 @@ func (p *Phone) registerLoop(ctx context.Context, acc config.Account, kickCh <-c
 		p.sink.OnRegisterState(core.RegRegistered, "")
 		// 日志携带本次注册的 Contact 地址，便于确认 STUN 公网地址是否
 		// 已生效（Contact host 为公网 IP 即 STUN 生效）
-		contact := p.contactURI(acc.Account)
-		logx.Logger().Info("注册成功", "expires", expires, "contact", contact.Addr())
+		contact := p.contactFor(acc)
+		logx.Logger().Info("注册成功", "expires", expires, "contact", contact.String())
 
 		// 续注册：到期前 30% 时重新注册（按 RFC 3261 建议）；
 		// 收到看护信号（休眠唤醒/网络变化/STUN 就绪）时立即重新注册
@@ -1015,8 +1106,13 @@ func (p *Phone) sendRegister(ctx context.Context, acc config.Account, expires in
 	// 请求行携带用户名（REQ-ACC-012）：OpenSIPS 等服务器的 registrar 从
 	// Request-URI 提取 location 表的 username，缺省会导致 username 为空。
 	recipient := sip.Uri{User: acc.Account, Host: acc.Server, Port: acc.Port}
+	// TLS：R-URI 声明 sips（RFC 3261 §10.2，registrar 域用 sips: 表示只接受 TLS）
+	if tlsInUse(acc) {
+		recipient.Scheme = "sips"
+	}
 	req := sip.NewRequest(sip.REGISTER, recipient)
-	req.SetTransport(strings.ToUpper(acc.Transport))
+	// sipgo 不会从 URI 的 sips: 推断传输层，必须显式指定（UDP/TCP/TLS）
+	req.SetTransport(strings.ToUpper(config.NormalizeTransport(acc.Transport)))
 
 	authUser := acc.AuthUser
 	if authUser == "" {
@@ -1034,8 +1130,9 @@ func (p *Phone) sendRegister(ctx context.Context, acc config.Account, expires in
 	req.AppendHeader(from)
 	req.AppendHeader(to)
 	// Contact：<sip:账号@本机IP:监听端口>;expires=N
+	//（transport=tls 时是 <sips:账号@本机IP:TLS端口;transport=tls>，见 contactFor）
 	contact := &sip.ContactHeader{
-		Address: p.contactURI(acc.Account),
+		Address: p.contactFor(acc),
 		Params:  sip.NewParams(),
 	}
 	contact.Params.Add("expires", strconv.Itoa(expires))
@@ -1136,15 +1233,58 @@ func (p *Phone) readResponse(ctx context.Context, tx sip.ClientTransaction, labe
 // 呼出流程
 // ---------------------------------------------------------------------------
 
+// ensureDialogCaches 按账户当前的传输方式准备 dialog 缓存（dcc/dsc）。
+//
+// sipgo 要求"每种传输一个实例"（缓存里存着 Contact 头与进行中的 dialog）：
+// 传输方式或本机地址变了就得换一套，否则新呼叫会带着旧传输的 Contact。
+//
+// **有通话进行中时不换**：缓存里放着那通电话的 dialog，换掉会让 in-dialog
+// 请求（ACK / BYE 匹配）找不到会话；等这一通结束后的下一次注册/呼叫再换。
+func (p *Phone) ensureDialogCaches(acc config.Account) {
+	contact := &sip.ContactHeader{Address: p.contactFor(acc)}
+	key := contact.Address.String()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.dialogKey == key && p.dcc != nil && p.dsc != nil {
+		return
+	}
+	if p.dialogKey != "" && len(p.calls) > 0 {
+		// 通话进行中：沿用旧缓存（调用方都在本通登记进 p.calls 之前调用，
+		// 所以这里的"有通话"指另一通）
+		return
+	}
+	p.dcc = sipgo.NewDialogClientCache(p.client, *contact)
+	p.dsc = sipgo.NewDialogServerCache(p.client, *contact)
+	p.dialogKey = key
+}
+
+// dialogClient / dialogServer 取当前 dialog 缓存（可能为 nil，调用方判空）。
+func (p *Phone) dialogClient() *sipgo.DialogClientCache {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dcc
+}
+
+func (p *Phone) dialogServer() *sipgo.DialogServerCache {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dsc
+}
+
 // dccInvite 创建 dialog client cache（按账户传输方式）并发起 INVITE。
 func (p *Phone) dccInvite(recipient sip.Uri, offer string, acc config.Account) (*sipgo.DialogClientSession, error) {
-	if p.dcc == nil {
-		contact := &sip.ContactHeader{Address: p.contactURI(acc.Account)}
-		p.dcc = sipgo.NewDialogClientCache(p.client, *contact)
-	}
-	if strings.EqualFold(acc.Transport, "tcp") {
+	p.ensureDialogCaches(acc)
+	// 出向请求走哪个传输由 R-URI 的 transport 参数决定（sipgo 的 dialog 层
+	// 会把它写成 req.SetTransport，见 sipgo/dialog_ua.go）——tcp / tls 都必须显式写，
+	// 否则会退回默认的 UDP。TLS 还要把 URI 换成 sips:。
+	tr := config.NormalizeTransport(acc.Transport)
+	if tr == config.TransportTCP || tr == config.TransportTLS {
 		recipient.UriParams = sip.NewParams()
-		recipient.UriParams.Add("transport", "tcp")
+		recipient.UriParams.Add("transport", tr)
+	}
+	if tr == config.TransportTLS && !strings.EqualFold(recipient.Scheme, "sips") {
+		recipient.Scheme = "sips"
 	}
 	// From / To：sipgo dialog 层不自动生成，必须显式添加（缺失会导致
 	// OpenSIPS 报 "bad from header"）。From 按 RFC 3261 携带 tag。
@@ -1162,11 +1302,20 @@ func (p *Phone) dccInvite(recipient sip.Uri, offer string, acc config.Account) (
 		sip.NewHeader("User-Agent", UserAgentName()),
 		from, to,
 	}
-	// 出站代理（REQ-ACC-019）：首条 Route 指向代理（loose routing）
+	// 出站代理（REQ-ACC-019）：首条 Route 指向代理（loose routing）；
+	// TLS 下代理地址也用 sips:（RFC 3261 §8.1.2：Route 与 R-URI 的保密级别一致）
 	if acc.Proxy != "" {
-		headers = append(headers, sip.NewHeader("Route", "<sip:"+acc.Proxy+";lr>"))
+		scheme := "sip"
+		if tr == config.TransportTLS {
+			scheme = "sips"
+		}
+		headers = append(headers, sip.NewHeader("Route", "<"+scheme+":"+acc.Proxy+";lr>"))
 	}
-	dlg, err := p.dcc.Invite(context.Background(), recipient, []byte(offer), headers...)
+	dcc := p.dialogClient()
+	if dcc == nil {
+		return nil, fmt.Errorf("dialog 缓存未初始化")
+	}
+	dlg, err := dcc.Invite(context.Background(), recipient, []byte(offer), headers...)
 	if err != nil {
 		return nil, fmt.Errorf("发送 INVITE 失败: %w", err)
 	}
@@ -1238,17 +1387,21 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 				logx.Logger().Info("取消后收到对端 2xx，补发 ACK + BYE", "callId", cs.id)
 				_ = cs.dialogC.Ack(context.Background())
 				if err := cs.dialogC.Bye(context.Background()); err != nil {
-					logx.Logger().Debug("发送 BYE 失败", "err", err)
+					logx.Logger().Warn("发送 BYE 失败", "err", err)
 				}
 				_ = cs.dialogC.Close()
 			}
 			return
 		}
-		// 非 2xx 最终响应：忙/拒绝/无应答
+		// 非 2xx：忙/拒绝/无应答，或底层错误（如取消时 CANCEL 发不出去）。
+		// 只有**最终响应**（>=200）才拿它当失败原因——InviteResponse 里可能只是
+		// 早先收到的 183（曾把"CANCEL 发送失败"显示成"183 Session Progress"，
+		// 排查时完全误导）。
 		reason := err.Error()
-		if res := cs.dialogC.InviteResponse; res != nil {
+		if res := cs.dialogC.InviteResponse; res != nil && res.StatusCode >= 200 {
 			reason = fmt.Sprintf("%d %s", res.StatusCode, res.Reason)
 		}
+		logx.Logger().Warn("呼叫失败", "callId", cs.id, "reason", reason, "err", err)
 		p.sink.OnFailed(cs.id, reason)
 		return
 	}
@@ -1280,7 +1433,7 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 		logx.Logger().Info("2xx 后检测到本地挂断，补发 ACK + BYE", "callId", cs.id)
 		_ = cs.dialogC.Ack(context.Background())
 		if err := cs.dialogC.Bye(context.Background()); err != nil {
-			logx.Logger().Debug("发送 BYE 失败", "err", err)
+			logx.Logger().Warn("发送 BYE 失败", "err", err)
 		}
 		_ = cs.dialogC.Close()
 		return
@@ -1288,7 +1441,7 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 
 	// 发送 ACK
 	if err := cs.dialogC.Ack(context.Background()); err != nil {
-		logx.Logger().Debug("发送 ACK 失败", "err", err)
+		logx.Logger().Warn("发送 ACK 失败", "err", err)
 	}
 	cs.established = true
 	// 早期媒体（183）阶段引擎可能已启动接收：复用并恢复正常发送
@@ -1348,6 +1501,10 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
+	// dialog 缓存按当前传输方式的 Contact 准备好——必须在本通登记进 p.calls
+	// **之前**（理由同 dial：缓存重建有"通话进行中不换"的保护）
+	p.ensureDialogCaches(acc)
+
 	// 解析主叫信息
 	from := req.From()
 	remote := from.Address.User
@@ -1367,12 +1524,14 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 	p.calls[callID] = cs
 	p.mu.Unlock()
 
-	// 用 dialog server 处理 INVITE
-	contact := &sip.ContactHeader{Address: p.contactURI(acc.Account)}
-	if p.dsc == nil {
-		p.dsc = sipgo.NewDialogServerCache(p.client, *contact)
+	// 用 dialog server 处理 INVITE（缓存在上面按当前传输方式准备好了）
+	dsc := p.dialogServer()
+	if dsc == nil {
+		logx.Logger().Error("处理呼入 INVITE 失败：dialog 缓存未初始化")
+		p.cleanupCall(callID, "failed")
+		return
 	}
-	dlg, err := p.dsc.ReadInvite(req, tx)
+	dlg, err := dsc.ReadInvite(req, tx)
 	if err != nil {
 		logx.Logger().Error("处理呼入 INVITE 失败", "err", err)
 		p.cleanupCall(callID, "failed")
@@ -1474,7 +1633,16 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 		if state := dlg.LoadState(); state == sip.DialogStateEnded {
 			logx.Logger().Info("对端取消呼叫（CANCEL）", "callId", callID, "state", state)
 			p.cleanupCall(callID, "remote_cancel")
+			return
 		}
+		// 其它状态（Established 等）：本通还在进行，**handler 绝不能现在返回**。
+		// sipgo 的 TerminateGracefully 对**可靠传输（TCP/TLS）**会在 handler 返回时
+		// 立即 Terminate 事务（UDP 不可靠，会保留到重传定时器），而接听流程此刻正在
+		// RespondSDP 里按 RFC 6026 阻塞等 ACK——事务一终止就报 "transaction
+		// terminated"，我们把刚接通的通话当失败清掉。真机表现：TLS 来电接听后
+		// 约 0.5 秒自动挂断（UDP 一直正常，就是靠"事务被保留"侥幸躲过）。
+		// 等本通真正结束（挂断/对端 BYE/清理都会取消 cs.ctx）。
+		<-ctx.Done()
 	}
 }
 
@@ -1697,6 +1865,8 @@ func (p *Phone) localAddr() string {
 
 // localHost 本机 Contact/SDP 主机：STUN 公网地址优先（启用时），
 // 其次本机出口 IP，最后主机名。
+// 注意：内部的 localIP() 会做一次 UDP 拨号探测、并再取一次 p.mu（localAddr），
+// 所以公共地址必须在**放开锁之后**才取。
 func (p *Phone) localHost() string {
 	p.mu.Lock()
 	pub := p.publicIP

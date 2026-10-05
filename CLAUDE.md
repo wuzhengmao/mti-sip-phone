@@ -6,19 +6,17 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.12**（已定版并发布到更新站点；含 **G.722 宽频编解码（按需 16 kHz 管线，纯 Go）**、
-视频通话总开关、音频库脚本改名 build-audio-libs、多实例沙箱槽位、摄像头禁用占位画面与
-183 早期媒体即启动视频、视频订阅 keepWindow、振铃期窗口口径与分辨率自适应、深/浅色主题切换跟随等）。
+当前版本 **1.0.13**（已定版并合并到 master；含 **SIP 信令 TLS(SIPS) 传输（REQ-ACC-006）**——传输新增 tls、sips:// 拉起、本端自签 TLS 监听、TCP/TLS 信令保活，以及真机联调修出的来电接听/振铃取消/长通话挂断等一批 TCP/TLS 信令缺陷；此前 1.0.12 的 G.722 宽频、视频总开关等一并包含）。
 版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），
 正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
-真实环境：OpenSIPS 2.4.11（10.168.4.40:15060，账号 2999），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
+真实环境：OpenSIPS 2.4.11（10.168.4.40，明文 15060 / **TLS 15061**——自签证书 CN=sip.mti-sh.cn，账号 2999 的传输在配置页切 udp/tls），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。话机在 NAT 后面（本机是 192.168.3.15，服务端看到的源地址是 **10.168.5.10**）——入向请求只能靠服务端复用本端开出去的连接送回来。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
 
 ## 技术栈
 
 | 领域 | 选型 | 说明 |
 | --- | --- | --- |
-| SIP 信令 | github.com/emiago/sipgo v1.6.0 | UDP/TCP，DialogClientSession / DialogServerSession |
+| SIP 信令 | github.com/emiago/sipgo v1.6.0 | UDP/TCP/**TLS**（TLS 自带，标准库 crypto/tls，无新依赖；REQ-ACC-006 见 `internal/sip/tls.go`），DialogClientSession / DialogServerSession |
 | 媒体 | pion/rtp、pion/rtcp、pion/sdp/v3、pion/stun、github.com/zaf/g711、libopus（cgo） | RTCP 为 v1.2.x 新 API（CompoundPacket/Goodbye，非旧版 Bye）；音频扩展编解码里 **G.722 是纯 Go**（`internal/media/g722`，任何构建都带），Opus 由 `-tags audio` 启用（cgo 静态库，见下） |
 | 音频设备 | github.com/gen2brain/malgo v0.11.26 | miniaudio 绑定，**CGO**；`-tags noaudio` 切空后端（纯 Go 构建/测试） |
 | GUI | fyne.io/fyne/v2 v2.8.1 | 要求 UI 运行在主线程 |
@@ -146,7 +144,8 @@ internal/
   contacts/   通信录 SQLite 存储（同一套单 worker 骨架；主键是规范化号码，
               写操作由 core 串行"写库 + 重建内存快照"，导入时常用标志只增不减）
   sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理；
-              netwatch.go 为注册看护：休眠唤醒/网络切换后立即重新注册，REQ-CALL-009）
+              netwatch.go 为注册看护：休眠唤醒/网络切换后立即重新注册，REQ-CALL-009；
+              tls.go 为 TLS 传输：客户端配置 + 自签证书 + 本端 TLS 监听，REQ-ACC-006）
   media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus/G.722 编解码、播放环形缓冲、SDP 协商
   media/g722/  G.722 纯 Go 算法（QMF + 双子带自适应 ADPCM；golden 向量在 testdata/）
   audio/      音频设备：malgo 后端（全双工采集/播放、设备枚举/选择、提示音）
@@ -336,6 +335,11 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - SDP 编解码优先级：PCMA > PCMU > Opus；Opus 本端 offer 固定 PT 96（rtpmap `opus/48000/2`），answer 仍复用对端 PT；**RTP 端口按 RFC 3550 取偶数、RTCP = RTP + 1**（`bindRTPRTCP` 命中奇数就重选，音频/视频两对端口都走它），SDP 用 `a=rtcp` 宣告 RTCP 端口。
 - 视频 PT 固定（**只作用于本端 offer**）：H264=99 / H263-1998=98 / VP8=100 / VP9=101；优先级顺序不变
   （H264 > VP8 > VP9 > H263-1998），m= 行按优先级列出（`RTP/AVP 99 100 101 98`）。answer 必须复用对端 PT。
+- **TLS 传输（REQ-ACC-006）的口径**：配置页「传输」多一个 `tls`；协议链接 `sips://账号:密码@服务器:端口`
+  也表示 TLS（默认端口 5061，前缀优先于 `?transport=`）。**服务器证书默认不校验**（内网自签开箱即用），
+  勾选「校验服务器证书」后按系统根证书 + 主机名校验；**不做客户端证书（mTLS）**；本端 TLS 监听的证书是
+  自动生成的自签名证书（`<实例目录>/tls/local-{cert,key}.pem`，RSA 2048、SAN 含本机各网卡 IP）。
+  **只加密信令，媒体仍是明文 RTP**（SRTP 是 REQ-MEDIA-009），界面与文档都要这么写。
 
 ## 已知陷阱（修改相关代码前必读）
 
@@ -344,7 +348,74 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   - 2xx 的 ACK 是独立事务走 OnAck handler；RespondSDP 按 RFC 6026 阻塞等待 ACK（最长 64×T1=32s），必须放后台 goroutine；
   - 事务层对 CANCEL 自动回 200+487；ServerTx 无最终响应时 TerminateGracefully 会立即 Terminate（后续 Respond 必失败）；
   - Timer_I=T4=5s：re-INVITE 事务需手动延迟 Terminate 防止重传风暴。
-- **注册看护（`internal/sip/netwatch.go`，REQ-CALL-009）的休眠检测必须用墙钟**：判断"系统刚休眠唤醒"要比较相邻两次巡检的 `UnixNano()` 差；**别写成 `ts.Sub(last)` / `time.Since`**——它们走**单调时钟**，而系统挂起期间单调时钟不走（Linux `CLOCK_MONOTONIC` 明确如此，Windows QPC 视硬件），恰好检测不到要检测的那段"丢失的时间"（写成 Sub 会静默失效，注入假时钟的单测同样测不出来，只有真机休眠能验）。另外三条约束：① 看护的 kick 通道是 buffer=1 + `select default` 非阻塞投递、**任何一方都不 close**（改成阻塞发送会把看护卡死）；② 上网基线要**进 ticker 循环前**先探一次（只记录不判定），否则注册后首个巡检周期内的网络切换永远检测不到；③ 网络变化后启用 STUN 时**重探失败要清空 `publicIP`**（回退本机地址），留着失效的公网地址注册会得到"显示已注册但不可达"。TCP 传输另需丢弃 sipgo 复用的连接（UDP 通配绑定可自愈，TCP 死连接不会被清出池）。
+- **呼入 handler 在通话结束前绝不能返回**（真机缺陷：TLS 来电接听后约 0.5 秒自动挂断）：sipgo 的
+  `Server.TerminateGracefully` 对**可靠传输（TCP/TLS）会在 handler 返回时立即 Terminate 事务**（UDP 不可靠，
+  会保留到重传定时器），而 `DialogServerSession.RespondSDP` 发完 200 后要按 RFC 6026 **阻塞等 ACK**
+  （最长 32 秒）——handler 一返回，事务就没了，等 ACK 被打断成 `transaction terminated`，接听流程把这通
+  刚接通的电话当失败清理掉。所以 `handleIncoming` 在收到非 Ended 的 dialog 状态（Established）后要
+  **继续 `<-ctx.Done()` 等本通真正结束**。这条 UDP 侧测不出来（事务被保留，纯属侥幸），只有 TLS/TCP
+  会暴露；回归测试 `TestIncomingOverTLS`。
+- **sipgo 的传输层"只认 `req.Transport()`"，不会从 URI 的 `sips:` 推断**（`transport_layer.go` 的
+  `getTransport(NetworkToLower(req.Transport()))`）：REGISTER 靠 `req.SetTransport("TLS")`，INVITE/ACK/BYE
+  走 dialog 层——`sipgo/dialog_ua.go` 只在 **R-URI 带 `transport=` 参数**时才设置它。所以加/改传输方式时，
+  `dccInvite` 里的 `recipient.UriParams.Add("transport", …)` 与 `sendRegister` 的 `SetTransport` 两处都要顾到，
+  漏一处就会静默退回默认的 UDP（握手都不发生，只是报文发去了错误的传输）。
+- **TLS 的客户端配置不能"改字段"，要用 `VerifyConnection` 读原子开关**：UA 只在启动时创建一次，sipgo 把
+  `*tls.Config` 的**指针**捕获进拨号闭包（`sip.TransportTLS.init`），之后没法替换；运行中直接改
+  `InsecureSkipVerify`/`RootCAs` 又与并发握手构成数据竞争。所以 `internal/sip/tls.go` 固定
+  `InsecureSkipVerify=true`（只关掉 Go 自己的校验），真正的校验放在 `VerifyConnection` 里按
+  `tlsVerifyFlag`（atomic.Bool）逐次决定——`VerifyConnection` **在 InsecureSkipVerify=true 时照样会被调用**
+  （`crypto/tls/handshake_client.go`，它在 if/else 之外），且 `cs.ServerName` 就是 sipgo 按目标主机填的 SNI。
+- **dialog 缓存（dcc/dsc）必须按传输方式重建，但通话进行中不能换**：sipgo 明说"每种传输一个实例"
+  （缓存里存着 Contact 头与进行中的 dialog），传输/本机地址变了要重建，否则新呼叫带着旧传输的 Contact；
+  而换掉正在跑的缓存会让 in-dialog 请求（ACK 匹配、BYE）找不到会话——`ensureDialogCaches` 因此有
+  `len(p.calls) > 0` 的刹车（首次创建不受限：呼入路径是先登记通话再建缓存）。
+- **本端 TLS 监听要另占一个端口**：TLS 跑在 TCP 上，不能与明文 TCP 监听共用端口，所以
+  `FindFreeTLSPort` 在 40000–50000 里另找一个空闲 TCP 端口，Contact 里宣告的是它（明文时是
+  `FindFreeSIPPort` 那个）。监听只在传输为 tls 时**按需启动**（`Register` 里 `ensureTLSListener`），
+  失败只影响"接收 TLS 呼入"（出向注册/呼叫照常），不要因此让启动失败。
+- **`sips://` 里不含 `sip://` 子串**：协议链接的前缀匹配（`protocol.SplitURL`/`urlPrefixes`）必须
+  **把 `sips://` 放在前面**逐个查，否则 `strings.Index(arg,"sip://")` 在 sips 链接上直接落空。
+- **CANCEL 不能带对话的路由集**（真机缺陷：振铃中挂断后对端一直振铃）：RFC 3261 §9.1 要求 CANCEL 与
+  INVITE 同目的地（Call-ID/CSeq/Via branch 也一致），而 sipgo 构造 CANCEL 时走的是 dialog 的 `buildReq`，
+  会把**响应里的 Record-Route** 当 Route 头塞进去 → CANCEL 被发到 Record-Route 指向的地址；那条腿未必
+  连得上（TLS 注册时它是明文口），CANCEL 就静默丢了。修法：挂断振铃中的呼出时（`Hangup` 里 `cs.cancel()`
+  之前）把**临时响应**（1xx）上的 Record-Route 摘掉——**2xx 的不能摘**，那是补发 ACK/BYE 要用的路由集。
+  ⚠️ 摘必须用 `stripRecordRoutes`：sipgo 的 `RemoveHeader` **大小写敏感且只删第一条**。
+  另外失败原因只在拿到**最终响应**（≥200）时用它，否则记底层错误（曾把"CANCEL 发送失败"显示成
+  `183 Session Progress`，排查时完全误导）。
+- **"接通约 30 秒被对端挂断" 还有一个服务端来源：Record-Route 里的地址不对**（2026-10-06 真机）：
+  对端每 0.5/1.5/3.5 秒重传 200 OK、32 秒（Timer H）后发 BYE，说明 **ACK 没送到**。除了本端传输选错，
+  还要看 200 OK 的 `Record-Route` —— 服务端若把 TLS 接口宣告成 **`0.0.0.0:15061`**（socket 的
+  advertised 地址没配好）或记成**对端的地址**（`record_route()` 取错），客户端按 RFC 取路由集顶层
+  Route 后就会把 ACK 发往 `0.0.0.0`（本机 loopback/不可路由）→ 静默丢失。排查口诀：**先看 200 OK
+  的 Record-Route 地址是不是服务端自己的真实地址**，再看 ACK 到底发到了哪个 `IP:端口`（信令日志
+  方向行带地址）。另外双 Record-Route 的正常形态是**只有一条带 `r2=on`**（标"接收接口"），两条都带
+  是服务端配置有问题。
+- **TCP/TLS 连接要自己做保活（CRLF），否则"接通很久后对端挂断本端不知道"**（真机缺陷，2026-10-06）：
+  服务端的连接有**空闲超时**（OpenSIPS `tcp_connection_lifetime` 分钟级），而续注册周期是 `0.7×expires`
+  （默认 210 秒）——连接会在两次注册之间被关掉；之后服务端要送 in-dialog 请求（对端 BYE/ACK）时
+  连接表里已无该连接，只能**按 Contact 重新拨号**，NAT 后面拨不进来（日志：
+  `tcp_connect_blocking_timeout ... Connection refused` → `proto_tls: connect failed` →
+  `tm:msg_send ... failed`）。所以 `keepaliveLoop` 在 TCP/TLS 下**每 30 秒发一个 CRLF**
+  （RFC 5626 §3.5.1；服务端回 CRLF/"pong"，非 SIP 载荷被读钩子忽略）刷新服务端空闲计时。
+  症状的关键特征是"**刚接通时一切正常，过一段时间才出问题**"——排查这类问题先看时间维度。
+- **NAT 后面的 TCP/TLS 客户端：服务端必须把请求送回"本端开出去的那条连接"**（真机联调结论，2026-10-06）：
+  TLS 注册在 OpenSIPS 上一切正常（注册/呼出/被叫都能通），但**对端发起的 in-dialog 请求（ACK、对端的 BYE）
+  到不了**——抓包证据是 OpenSIPS 把 ACK/BYE 按 **UDP** 发到我们那条 TLS 连接的源端口（`UDP 15060 →
+  10.168.5.10:52369`），紧跟一条 `ICMP Port unreachable`（那个端口上没有任何 socket 在监听）。根因是
+  **服务端的路由配置**（`fix_nated_contact()` 把 Contact 改写成"看到的源地址:端口"、以及/或者强制
+  `force_send_socket` 到 UDP），属服务端问题——客户端侧试过的 `;ob`/RFC 5626 outbound、按 `r2=on` 选腿
+  等变通**已全部回滚**，不要重新加回来。**排查这类问题的正解是抓包**：看请求到底从哪个 socket、以哪种
+  协议发往哪个地址:端口，一眼就能分辨"没收到"是服务端没发、发错地方、还是发错传输。
+- **NAT 后面要让服务端把注册绑定到本端连接（RFC 5626 outbound）**（真机缺陷：来电接听后进不了
+  通话状态、对端挂断本端不知道）：location 表里如果我们的条目**没有 `ob`**，服务端只对**初始**请求复用
+  我们开出去的那条连接，**in-dialog 请求（ACK / 对端 BYE）却按 Contact 地址直连**——那是 NAT 上的一条
+  出向映射，外面拨不进来，于是 ACK/BYE 全丢（`RespondSDP` 等不到 ACK → 界面不进"通话中"）。
+  修法：**Contact URI 上加 `ob` 参数**（`<sips:账号@IP:端口;transport=tls;ob>`，tcp 同样加；udp 不加）——
+  服务端认的就是 Contact 里的 `ob`（同机 MicroSIP 也只是加了 `;ob`）；再按 RFC 5626 补 `Supported: outbound`
+  与 Contact 的 `reg-id=1`/`+sip.instance`（**已回滚，见下条**）。
+- **注册看护（`internal/sip/netwatch.go`，REQ-CALL-009）的休眠检测必须用墙钟**：判断"系统刚休眠唤醒"要比较相邻两次巡检的 `UnixNano()` 差；**别写成 `ts.Sub(last)` / `time.Since`**——它们走**单调时钟**，而系统挂起期间单调时钟不走（Linux `CLOCK_MONOTONIC` 明确如此，Windows QPC 视硬件），恰好检测不到要检测的那段"丢失的时间"（写成 Sub 会静默失效，注入假时钟的单测同样测不出来，只有真机休眠能验）。另外三条约束：① 看护的 kick 通道是 buffer=1 + `select default` 非阻塞投递、**任何一方都不 close**（改成阻塞发送会把看护卡死）；② 上网基线要**进 ticker 循环前**先探一次（只记录不判定），否则注册后首个巡检周期内的网络切换永远检测不到；③ 网络变化后启用 STUN 时**重探失败要清空 `publicIP`**（回退本机地址），留着失效的公网地址注册会得到"显示已注册但不可达"。TCP/TLS 传输另需丢弃 sipgo 复用的连接（UDP 通配绑定可自愈，长连接死了不会被清出池；池键按传输分类，取 TLS 连接要用 `"tls"` 作 network）。
 - **Fyne 的键盘分发是"二选一"，别指望覆写子类能收到键**：驱动先把键入交给**当前聚焦的控件**，**只有没有控件聚焦时**才走 canvas 的 `OnTypedKey`/`OnTypedRune`（见 `internal/driver/glfw/window.go` 的键处理）。踩过：① 拨号框的按键音钩子做成"继承 `widget.SelectEntry` 覆写 `TypedRune`"——SelectEntry 聚焦时 `FocusGained` 会把焦点转给**它内部的 Entry**，覆写的方法永远收不到键（表现为输入框里敲数字没有任何回调）；所以"输入框里敲数字要响/要发 DTMF"这种需求**做不到也别做**——本项目的约定恰好相反：**输入框里输入数字不响也不发 DTMF**（用户明确要求），按键音只属于"点号码盘"与"未聚焦输入框时在主窗体敲数字"两条路径。② 想让通话中键盘数字发 DTMF，则必须先把输入框 `Disable()`（禁用后不可聚焦，键才会落到 canvas 回调）——通话中主窗体正是这么做的。
 - **Fyne**：UI 必须主线程（goroutine 运行会托盘失效+线程告警）；dialog 的 parent 传 nil 直接 panic（主窗口未显示时不要弹 dialog）；`SetSystemTrayWindow` 会覆盖 CloseIntercept（需重新接管）并注册单击回调；Window 无 Visible() 查询 API（主窗口显示状态用全局标识 mainShown 跟踪）。
 - **Fyne 托盘菜单**：菜单最后一项若不带 `IsQuit` 标记，Fyne 会自动补一个本地化的 `Quit` 项（`driver_desktop.go` 的 `addMissingQuitForMenu`，按 `lang.L("Quit")` 比对标签，中文标签匹配不上）。本项目的「退出」项经 `markTrayQuit` 处理——**仅 Linux 打标记**，Windows 保持多一个 Quit 的现状（用户要求）。新增托盘菜单项时注意最后一项的角色。
@@ -352,7 +423,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **splash 窗口也会进任务栏（Windows）**：GLFW 给**每个**顶层窗口都设 `WS_EX_APPWINDOW`（`glfw/src/win32_window.c` 的 `getWindowExStyle` 写死），这个扩展样式的作用就是"强制生成任务栏按钮"，会压过 `WS_POPUP` 本来的不占任务栏语义——更新提示窗因此带着一条任务栏标题（用户实测）。**关键是改样式的时机**：只在窗口显示之后再异步改（曾用"显示 → 定位协程里换样式 + hide/show 刷新"）**不够**——外壳是状态驱动地扫描任务栏窗口，往往已经按 APPWINDOW 把按钮建出来了，之后改样式、隐藏都不会把它收回去（用户实测：点「稍后」关掉提示窗后，任务栏上那条按钮还残留着点不动）。正确做法见 `topmost_windows.go` 的 `showUpdateWindow`：在**第一次显示的同一步内**走 Show（首次 Show 才创建 GLFW 窗口）→ 立刻 `w.Hide()` → `setToolWindowStyle(hwnd)`（APPWINDOW 换成 TOOLWINDOW）→ `w.Show()`——外壳还没来得及处理"显示"，窗口已经是工具窗口，按钮根本不会建。`positionUpdateWindow` 里的 `setToolWindowStyle` 只是幂等兜底。⚠️ 读写扩展样式用 `Get/SetWindowLongPtrW`，32 位 user32 没有这两个导出（`LazyProc.Call` 会 panic 且 GUI 子系统无可见输出），必须按 `Find()` 结果回退 `Get/SetWindowLongW`。**通话面板与更新提示窗都按工具窗口显示（不占任务栏）**——面板走 `showCallWindow`、提示窗走 `showUpdateWindow`，两者都进 `showWindowAsTool`；只有视频窗口保留任务栏条目（它是带标题栏、可拖动的普通窗口，用户可能要从任务栏找它）。
 - **音频管理器（internal/audio）的线程模型**：后端初始化在后台 goroutine，`NewManager` 最多等 `initWait`(2s) 就返回；所有会碰后端的操作（开关音频流、播放提示音）都排入单 worker 的 FIFO 队列后立即返回，调用方（UI 线程、SIP 线程）不会被设备操作阻塞。**不要持 `m.mu` 调用后端**——miniaudio 的设备操作在音频服务不可达时会长时间阻塞（`PULSE_SERVER=tcp:localhost` 实测 15 秒），持锁会把 UI 线程的 `enqueue`/`SetMic` 一起卡死；正确做法是先取状态快照、释放锁再调后端（见 `startStreamFor`/`stopStream`）。设备枚举 `Devices()` 保持同步，调用方需自行放进后台 goroutine（界面侧见 `refreshDevices`）。后端内部同理：`malgoBackend.toneMu` 只护提示音状态，**不得跨越 `malgo.InitDevice`/`device.Start`/`device.Uninit` 持有**——miniaudio 启动/销毁设备要等音频回调线程，而回调要拿 `toneMu`，持锁即死锁（树莓派 PulseAudio 实测 `ma_device_start` 永不返回，音频 worker 卡死，之后所有音频操作排队不执行、通话无声）。
 - **通话面板窗口控制按平台拆分**：`ui_call.go`/`ui.go` 只调用平台函数（`moveCallWindowToCorner`、`callWindowTitle`、`markTrayQuit`、面板尺寸常量），实现分别在 `topmost_windows.go`（Win32）与 `topmost_linux.go`（X11）——**勿把任一侧的逻辑写进共享文件**。Linux 侧靠 `driver.NativeWindow.RunNative` 取 X11 窗口号（回调收到 `driver.X11WindowContext`），需经 `fyne.DoAndWait` 在主线程取；`fyne.DoAndWait` 不可在主线程调用（会 panic），故 `moveCallWindowToCorner` 内部起 goroutine。Wayland 会话下 X11 手段全部无效（不能自定位、去装饰看合成器）——所以 Linux 默认把后端固定到 X11（见下方「Linux 桌面后端」条）。X11 侧还额外把 `_NET_WM_STATE` 写成**窗口属性**（不只发 ClientMessage），因为 Xwayland 下没有独立 X11 窗口管理器处理消息。但**任务栏条目在 labwc 下无法由客户端去掉**（实测属性/消息都不生效）：任务栏走 foreign-toplevel 协议，该协议没有 skip-taskbar 字段，`_NET_WM_STATE_SKIP_TASKBAR` 不会透传。要隐藏只能用 labwc 自己的窗口规则（`~/.config/labwc/rc.xml`，labwc ≥0.6.4）：`<windowRule title="SIP" skipTaskbar="yes" skipWindowSwitcher="yes"/>`——按 `title` 匹配（面板标题恒以 `SIP` 开头，主窗体是 `mti-sip-phone …`），**勿按 `identifier` 匹配**（Xwayland 下两窗口 WM_CLASS 相同，会连主窗体一起隐藏）。用户已确认该条目可接受，不要再在客户端代码里尝试修它。
-- **服务端心跳（REQ-ACC-020/021）与 OPTIONS 的关系，别想当然**：启用后只是注册报文的 **User-Agent 带 `optchk`**，服务端据此定期发 OPTIONS 探测；**OPTIONS 不要专门处理——sipgo 默认回 405，实测 OpenSIPS 接受**。曾实现过"逐字回抄的 200 + Contact + 重传缓存"，服务端仍判探测失败并摘注册（NAT/rport 下它登记的是改写后的外部地址，与我们的 Contact 对不上）。**心跳计数必须挂在传输层读钩子（`readFilter`）上**：服务端的探测复用**同一个 Via branch**，sipgo 会把 Timer J（32 秒）内相同 branch 的请求当**重传**、不再回调 handler——按 handler 计数会把 10 秒的心跳看成 ~40 秒。超时判定是 **2.5 个周期**（`hbOverdueFactor`）：先置**未注册**（托盘/圆点变红、原因"服务端心跳超时"），再立即重新注册，触发一次后复位。
+- **服务端心跳（REQ-ACC-020/021）与 OPTIONS 的关系，别想当然**：**整套机制只对 UDP 传输生效**（`heartbeatWanted()`：开关打开 **且** 传输是 udp；`optchk` 标记、传输层计数、间隔学习、2.5 周期超时重注册四处都受它管，设置页在 tcp/tls 下把勾选项置灰——用户要求）。启用后只是注册报文的 **User-Agent 带 `optchk`**，服务端据此定期发 OPTIONS 探测；**OPTIONS 不要专门处理——sipgo 默认回 405，实测 OpenSIPS 接受**。曾实现过"逐字回抄的 200 + Contact + 重传缓存"，服务端仍判探测失败并摘注册（NAT/rport 下它登记的是改写后的外部地址，与我们的 Contact 对不上）。**心跳计数必须挂在传输层读钩子（`readFilter`）上**：服务端的探测复用**同一个 Via branch**，sipgo 会把 Timer J（32 秒）内相同 branch 的请求当**重传**、不再回调 handler——按 handler 计数会把 10 秒的心跳看成 ~40 秒。超时判定是 **2.5 个周期**（`hbOverdueFactor`）：先置**未注册**（托盘/圆点变红、原因"服务端心跳超时"），再立即重新注册，触发一次后复位。
 - **信令日志唯一出口是 `internal/sip/tracer.go` 的全局跟踪器**（sipgo 传输层钩子 + 「SIP 信令记录」开关）：**业务代码里不要再散点调 `logx.TraceSIP`**，否则同一条报文在日志里出现两份（历史缺陷，已清理 11 处）；跟踪器里另有"非 SIP 载荷不记"的过滤（挡掉服务端/NAT 的四个 0 字节保活包）。
 - **日志轮转：Windows 上删除/改名文件前必须先关自己的句柄**（`internal/logx/logx.go` 的 `rotate`/`gzipFile`）。Windows 要求**所有**句柄都带 `FILE_SHARE_DELETE` 才允许删/改名，而 Go 的 `os.OpenFile` 只申请 `FILE_SHARE_READ|FILE_SHARE_WRITE`（`syscall_windows.go` 的 sharemode）——**自己的句柄没关，`os.Remove`/`os.Rename` 必然失败**。历史缺陷写成 `return os.Remove(src)`（在 `defer in.Close()` 之前执行），于是"压缩完成却删不掉源文件"：日志文件永不截断（实测卡在 42.8MB）→ 尺寸一直超上限 → **之后每次写日志都再完整轮转一次**（整个文件重新 gzip 一遍，且全程持写锁）→ 写日志的线程（SIP/界面/**RTP 接收循环**）被随机卡住数百毫秒（实测同一接收循环迭代内相邻两行日志相差 494ms）。症状极具迷惑性：通话开始时的日志突发撞上轮转 → 接收循环停摆、对端媒体包在 socket 里排队后成批涌入 → 播放缓冲超深截断 → **"第一声回铃音断续"**（真因，找了很久）。另外那条路径还会让 `.1.gz~.9.gz` **内容完全相同且每次轮转 mtime 全变**（每次压的都是同一份越来越大的文件）。现在的做法：关闭 → **改名切走**（改名即完成截断）→ 立即开新文件继续写 + 后台 goroutine 压缩与归档移位（不持锁做重活）；改名失败退化为清空当前文件，连清空都不行则降级为"不再轮转"，**绝不能回到"每次写都重压整个文件"的循环**。改这里务必跑 `go test ./internal/logx/`（有回归测试）。
 - **媒体/NAT**：对称 NAT 下 UDP 映射需持续出向流量保活（早期媒体阶段 SetKeepalive 持续发静音帧）；SDP 宣告地址与 socket 绑定地址分离（SetSDPIP）；183→200 可能换 SSRC/端口（引擎已自动处理，勿移除 playPush 的重置逻辑）。

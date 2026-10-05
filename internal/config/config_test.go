@@ -110,3 +110,30 @@ func TestVideoEnabledDefaultOn(t *testing.T) {
 		t.Fatal("视频关闭时摄像头应算不可用")
 	}
 }
+
+// TestTransportNormalize 传输协议规范化（REQ-ACC-006）：大小写/空白容错，
+// 空值与非法值回退 udp（旧配置没有 tls，行为与从前一致）；
+// tls 的服务端默认端口是 5061，其余 5060。
+func TestTransportNormalize(t *testing.T) {
+	cases := map[string]string{
+		"":      "udp",
+		"UDP":   "udp",
+		"tcp":   "tcp",
+		" TCP ": "tcp",
+		"TLS":   "tls",
+		"tls":   "tls",
+		"sips":  "udp", // 非法值回退
+		"quic":  "udp",
+	}
+	for in, want := range cases {
+		if got := NormalizeTransport(in); got != want {
+			t.Fatalf("NormalizeTransport(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+	if p := DefaultPortForTransport("tls"); p != 5061 {
+		t.Fatalf("tls 默认端口应为 5061，实际 %d", p)
+	}
+	if p := DefaultPortForTransport("tcp"); p != 5060 {
+		t.Fatalf("tcp 默认端口应为 5060，实际 %d", p)
+	}
+}

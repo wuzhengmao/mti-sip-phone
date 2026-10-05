@@ -2,6 +2,7 @@ package sip
 
 import (
 	"bytes"
+	"fmt"
 
 	"github.com/emiago/sipgo/sip"
 
@@ -31,14 +32,24 @@ func (t *tracer) SIPTraceRead(transport, laddr, raddr string, sipmsg []byte) {
 	if !isSIPPayload(sipmsg) {
 		return
 	}
-	logx.TraceSIP("收到", string(sipmsg))
+	logx.TraceSIP(traceDir("收到", transport, laddr, raddr), string(sipmsg))
 }
 
 func (t *tracer) SIPTraceWrite(transport, laddr, raddr string, sipmsg []byte) {
 	if !isSIPPayload(sipmsg) {
 		return
 	}
-	logx.TraceSIP("发出", string(sipmsg))
+	logx.TraceSIP(traceDir("发出", transport, laddr, raddr), string(sipmsg))
+}
+
+// traceDir 信令日志的方向行：带上传输与本地/远端地址。
+// 排查"这条消息到底发到哪条腿/哪个连接上"全靠它（TLS 多腿场景尤其关键，
+// 例如 200 OK 是否发在接收 INVITE 的那条连接上）。
+func traceDir(dir, transport, laddr, raddr string) string {
+	if transport == "" && laddr == "" && raddr == "" {
+		return dir
+	}
+	return fmt.Sprintf("%s %s %s → %s", dir, transport, laddr, raddr)
 }
 
 // isSIPPayload 粗判是否为 SIP 报文：传输层还会收到非 SIP 载荷，比如实测
