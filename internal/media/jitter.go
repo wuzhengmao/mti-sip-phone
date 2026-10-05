@@ -1,26 +1,36 @@
 package media
 
-// playTargetDepth 播放缓冲的目标深度（样本数，8kHz 下 1600 = 200ms）。
-// 足够吸收 LAN 抖动，又不会让人耳察觉到延迟。
-const playTargetDepth = 1600
-
-// playMaxDepth 播放缓冲的硬上限（样本数，8000 下 4000 = 500ms）。
-// 超过就丢最旧数据回到目标深度。
-//
-// 为什么必须封顶：读侧（音频回调）**恒为实时速率**，而写侧会被两类事件
-// 一次性垫高——丢包时按 gap 补静音、对端/网关的突发投递。垫高之后深度
-// 只会保持不变、**永远回不去**（读多少写多少），于是"通话越久延迟越大"。
-// 早先容量给到 8 秒，实际等于允许累积 8 秒延迟。宁可偶发一次轻微跳音。
-const playMaxDepth = 4000
+// 播放缓冲的两个深度阈值**按毫秒定义**，实际样本数 = 毫秒 × 采样率 / 1000：
+// 内部管线的采样率会随协商的编解码器变（G.711/Opus 8 kHz、G.722 16 kHz），
+// 时间语义必须与采样率解耦，否则 16 kHz 通话的深度会缩成一半。
+const (
+	// playTargetDepthMs 目标深度：足够吸收 LAN 抖动，又不会让人耳察觉到延迟。
+	playTargetDepthMs = 200
+	// playMaxDepthMs 硬上限：超过就丢最旧数据回到目标深度。
+	//
+	// 为什么必须封顶：读侧（音频回调）**恒为实时速率**，而写侧会被两类事件
+	// 一次性垫高——丢包时按 gap 补静音、对端/网关的突发投递。垫高之后深度
+	// 只会保持不变、**永远回不去**（读多少写多少），于是"通话越久延迟越大"。
+	// 早先容量给到 8 秒，实际等于允许累积 8 秒延迟。宁可偶发一次轻微跳音。
+	playMaxDepthMs = 500
+	// defaultSampleRate 默认采样率（G.711 / Opus 的管线速率）。
+	defaultSampleRate = 8000
+	// 下面两个是 **8 kHz 基准**下的样本数（换算见 targetDepth/maxDepth）：
+	// 测试与文档引用它们表达"默认管线下的 200ms / 500ms"。
+	playTargetDepth = playTargetDepthMs * defaultSampleRate / 1000 // 1600
+	playMaxDepth    = playMaxDepthMs * defaultSampleRate / 1000    // 4000
+)
 
 // playRing 播放环形缓冲：样本粒度（int16），供音频回调按任意帧长读取。
-// 容量按秒数换算（8kHz 采样率），超过硬上限时丢弃最旧数据。
+// 容量按秒数 × 采样率换算，超过硬上限时丢弃最旧数据。
 //
 // 取代早期按包重排的 jitterBuffer：后者在缓冲空时无限循环最后一帧
 //（回铃音停顿期产生持续嗡鸣噪音），且消费粒度固定 20ms、无法适配
 // 音频回调的实际帧长（WASAPI 共享模式下回调帧数不保证等于请求值）。
 type playRing struct {
 	buf      []int16
+	rate     int // 当前采样率（Hz）：容量与深度阈值都按它换算
+	seconds  int // 容量（秒）
 	r        int // 读位置
 	w        int // 写位置
 	size     int // 当前样本数
@@ -30,8 +40,37 @@ type playRing struct {
 }
 
 func newPlayRing(seconds int) *playRing {
-	return &playRing{buf: make([]int16, seconds*8000)}
+	return &playRing{
+		buf:     make([]int16, seconds*defaultSampleRate),
+		rate:    defaultSampleRate,
+		seconds: seconds,
+	}
 }
+
+// Rate 当前采样率（Hz）。
+func (r *playRing) Rate() int { return r.rate }
+
+// SetRate 切换采样率：重新分配缓冲并**清空**（里面是旧速率的样本，按新速率
+// 播放会变速变调）。速率不变时是空操作——保持/取消保持这类 re-INVITE 会走
+// 到这条路径，不能白清一次缓冲。
+func (r *playRing) SetRate(rate int) {
+	if rate <= 0 || rate == r.rate {
+		return
+	}
+	r.rate = rate
+	if r.seconds <= 0 {
+		r.seconds = 8
+	}
+	r.buf = make([]int16, r.seconds*rate)
+	r.r, r.w, r.size, r.trim = 0, 0, 0, 0
+	r.scratch = nil
+}
+
+// targetDepth 目标深度（样本数，按当前采样率换算）。
+func (r *playRing) targetDepth() int { return playTargetDepthMs * r.rate / 1000 }
+
+// maxDepth 硬上限（样本数，按当前采样率换算）。
+func (r *playRing) maxDepth() int { return playMaxDepthMs * r.rate / 1000 }
 
 // Write 追加样本；超过硬上限时按"最安静窗口"丢弃数据回到目标深度。
 // 返回本次丢弃的样本数。
@@ -59,9 +98,9 @@ func (r *playRing) Write(samples []int16) int {
 	r.w = (r.w + len(samples)) % len(r.buf)
 	r.size += len(samples)
 
-	// 深度封顶：见 playMaxDepth 注释
-	if r.size > playMaxDepth {
-		dropped += r.trimQuiet(r.size - playTargetDepth)
+	// 深度封顶：见 playMaxDepthMs 注释
+	if r.size > r.maxDepth() {
+		dropped += r.trimQuiet(r.size - r.targetDepth())
 	}
 	r.trim += dropped
 	return dropped
@@ -78,12 +117,12 @@ func (r *playRing) trimQuiet(out int) int {
 	if out <= 0 || out >= r.size {
 		return 0
 	}
-	// 只在最旧的一段里找（丢得越早，延迟回收越直接）；跨度 = 需要丢的量 + 300ms 余量
-	const (
-		fadeStep  = 80 // 候选窗口步长：10ms（8kHz）
-		fadeSlack = 2400
-		fadeLen   = 16 // 接缝交叉淡化 2ms
-	)
+	// 只在最旧的一段里找（丢得越早，延迟回收越直接）；跨度 = 需要丢的量 + 300ms 余量。
+	// 三个步长都按**时间**定义再换算成样本（采样率随编解码器变，见 playTargetDepthMs）：
+	// 8 kHz 下与原值 80 / 2400 / 16 逐样本一致。
+	fadeStep := r.rate / 100    // 候选窗口步长：10ms
+	fadeSlack := r.rate * 3 / 10 // 余量：300ms
+	fadeLen := r.rate / 500     // 接缝交叉淡化 2ms
 	if cap(r.scratch) < r.size {
 		r.scratch = make([]int16, r.size)
 	}

@@ -15,7 +15,7 @@ package media
 //     `python tools/wavscan.py <wav>` 看时间轴与波形跳变。
 //
 // 判读要点（实战用过两次，都是靠它定位的）：
-//   - 「写入」应≈8000 样本/秒（8kHz 实时）。远高于它 = 对端媒体成批涌入；
+//   - 「写入」应≈采样率 样本/秒（8kHz 或 16kHz 实时）。远高于它 = 对端媒体成批涌入；
 //   - 「回调请求」与「实际读出」不等 = 播放缓冲被读空（欠载），差值就是补静音的量；
 //   - 「播放回调次数」应≈50/s。明显偏低 = 音频线程被卡（进程忙/被日志轮转等拖住）；
 //   - 「深度」长期顶在上限、伴随「累计截断」增长 = 缓冲在丢音频（回铃音断续的
@@ -39,7 +39,7 @@ import (
 )
 
 const (
-	probeWAVMaxSamples = 8000 * 60 // 每份 WAV 最多 60 秒
+	probeWAVSeconds = 60 // 每份 WAV 最多 60 秒（换算成样本要乘当前采样率）
 	probePeriod        = time.Second
 	probeMaxSeconds    = 30 // 媒体开始后最多汇总 30 秒（前 30 秒是问题高发段）
 )
@@ -94,6 +94,16 @@ func newMediaProbe(port int) *mediaProbe {
 	}
 	logx.Logger().Info("【诊断】媒体探针已启用，WAV 输出到", "dir", dir, "rtpPort", port)
 	return p
+}
+
+// setRate 采样率变化（协商到 16 kHz 编解码器）时同步三份 WAV 的速率。
+func (p *mediaProbe) setRate(rate int) {
+	if p == nil {
+		return
+	}
+	p.rx.setRate(rate)
+	p.play.setRate(rate)
+	p.mic.setRate(rate)
 }
 
 // cleanOldDumps 清掉上一次诊断留下的 WAV（端口每通电话都不同，不清会越攒越多；
@@ -316,7 +326,7 @@ func (p *mediaProbe) close() {
 }
 
 // ---------------------------------------------------------------------------
-// WAV 落盘（16bit 单声道 8kHz）
+// WAV 落盘（16bit 单声道；采样率随编解码器，8kHz 或 16kHz）
 // ---------------------------------------------------------------------------
 
 type wavDump struct {
@@ -331,6 +341,9 @@ type wavDump struct {
 	// bytes 由写盘 goroutine 更新、write 侧读取（都用原子量）
 	bytes atomic.Int64
 	buf   []byte
+	// rate 本次通话的 PCM 采样率（Hz）：头部先在创建时按默认值写好，
+	// 采样率变了/收尾时再回填（诊断 WAV 的时长与播放速度都靠它）。
+	rate atomic.Int32
 }
 
 func newWavDump(path string) (*wavDump, error) {
@@ -356,6 +369,7 @@ func newWavDump(path string) (*wavDump, error) {
 		return nil, err
 	}
 	w := &wavDump{f: f, path: path, ch: make(chan []int16, 512), done: make(chan struct{})}
+	w.rate.Store(defaultSampleRate)
 	go w.loop()
 	return w, nil
 }
@@ -375,7 +389,7 @@ func (w *wavDump) write(s []int16) {
 	if w == nil || len(s) == 0 {
 		return
 	}
-	if w.bytes.Load() >= probeWAVMaxSamples*2 {
+	if w.bytes.Load() >= w.maxBytes() {
 		return
 	}
 	cp := make([]int16, len(s))
@@ -393,7 +407,7 @@ func (w *wavDump) write(s []int16) {
 
 func (w *wavDump) writeFile(s []int16) {
 	need := len(s) * 2
-	if w.bytes.Load()+int64(need) > probeWAVMaxSamples*2 {
+	if w.bytes.Load()+int64(need) > w.maxBytes() {
 		return
 	}
 	if cap(w.buf) < need {
@@ -429,6 +443,28 @@ func (w *wavDump) close() {
 	_, _ = w.f.WriteAt(b[:], 4) // RIFF 大小
 	binary.LittleEndian.PutUint32(b[:], uint32(n))
 	_, _ = w.f.WriteAt(b[:], 40) // data 大小
+	// 采样率回填（创建时按默认 8kHz 写的头，实际速率可能不同）
+	binary.LittleEndian.PutUint32(b[:], uint32(w.Rate()))
+	_, _ = w.f.WriteAt(b[:], 24) // 采样率
+	binary.LittleEndian.PutUint32(b[:], uint32(w.Rate()*2))
+	_, _ = w.f.WriteAt(b[:], 28) // 字节率
 	_ = w.f.Close()
-	logx.Logger().Info("【诊断】WAV 已写出", "file", w.path, "秒", n/16000)
+	logx.Logger().Info("【诊断】WAV 已写出", "file", w.path, "采样率", w.Rate(), "秒", n/(int64(w.Rate())*2))
+}
+
+// Rate 当前记录的采样率（Hz）。
+func (w *wavDump) Rate() int { return int(w.rate.Load()) }
+
+// setRate 更新采样率（协商到 G.722 等 16 kHz 编解码器时）。头部在 close 时
+// 按最终速率回填；同一份 WAV 里跨采样率时以最终值为准（诊断尽力而为）。
+func (w *wavDump) setRate(rate int) {
+	if w == nil || rate <= 0 {
+		return
+	}
+	w.rate.Store(int32(rate))
+}
+
+// maxBytes 本份 WAV 的字节上限（probeWAVSeconds 秒 × 采样率 × 2 字节）。
+func (w *wavDump) maxBytes() int64 {
+	return int64(w.Rate()) * probeWAVSeconds * 2
 }

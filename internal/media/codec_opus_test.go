@@ -23,27 +23,15 @@ func opusSine(n int, freq, amp float64) []int16 {
 	return out
 }
 
-// rms 信号均方根（能量比较用，避免逐样本比对编解码时延）。
-func rms(pcm []int16) float64 {
-	if len(pcm) == 0 {
-		return 0
-	}
-	var sum float64
-	for _, s := range pcm {
-		sum += float64(s) * float64(s)
-	}
-	return math.Sqrt(sum / float64(len(pcm)))
-}
-
 // TestOpusCodecMetadata 元数据：PT 固定 96、RTP 时钟 48000、PCM 帧长 160、
 // 时间戳步长 960（时钟率与 PCM 帧长不是一回事）、rtpmap 固定 opus/48000/2。
 func TestOpusCodecMetadata(t *testing.T) {
 	if !OpusSupported() {
 		t.Fatal("带 opus 标签的构建必须支持 Opus")
 	}
-	c := supportedCodecs[len(supportedCodecs)-1] // Opus 排在最后（优先级最低）
-	if c.Name() != "opus" {
-		t.Fatalf("最后一个编解码器应为 opus，实际 %s", c.Name())
+	c := codecByName(t, "opus")
+	if c == nil {
+		t.Fatal("supportedCodecs 里找不到 opus")
 	}
 	if c.PayloadType() != 96 {
 		t.Fatalf("Opus 负载类型应固定为 96，实际 %d", c.PayloadType())
@@ -68,7 +56,7 @@ func TestOpusCodecMetadata(t *testing.T) {
 // TestOpusRoundTrip 编码→解码往返：8kHz 单声道正弦波编解码后能量相当
 //（不逐样本比对：Opus 有算法时延与有损压缩，逐样本比对必然失败）。
 func TestOpusRoundTrip(t *testing.T) {
-	c := supportedCodecs[len(supportedCodecs)-1]
+	c := codecByName(t, "opus")
 	const frames = 10
 	var in, out []int16
 	for i := 0; i < frames; i++ {
@@ -102,7 +90,7 @@ func TestOpusRoundTrip(t *testing.T) {
 
 // TestOpusFrameSizeGuard 每帧必须是 20ms（160 样本），否则报错而不是越界读。
 func TestOpusFrameSizeGuard(t *testing.T) {
-	c := supportedCodecs[len(supportedCodecs)-1]
+	c := codecByName(t, "opus")
 	if _, err := c.Encode(make([]int16, 100)); err == nil {
 		t.Fatal("非 160 样本的帧应报错")
 	}
@@ -113,7 +101,7 @@ func TestOpusFrameSizeGuard(t *testing.T) {
 
 // TestOpusPLC 丢包隐藏：解过一包之后能外推同样长度的替代样本。
 func TestOpusPLC(t *testing.T) {
-	c := supportedCodecs[len(supportedCodecs)-1]
+	c := codecByName(t, "opus")
 	plc, ok := c.(plcCodec)
 	if !ok {
 		t.Fatal("Opus 应实现丢包隐藏接口")
@@ -136,7 +124,7 @@ func TestOpusPLC(t *testing.T) {
 
 // TestOpusResetReset 复位后仍能正常编解码（复位用于新通话/换流）。
 func TestOpusReset(t *testing.T) {
-	c := supportedCodecs[len(supportedCodecs)-1]
+	c := codecByName(t, "opus")
 	payload := mustEncode(t, c, opusSine(160, 440, 8000))
 	if _, err := c.Decode(payload); err != nil {
 		t.Fatalf("解码失败: %v", err)

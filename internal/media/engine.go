@@ -18,13 +18,18 @@ import (
 )
 
 // supportedCodecs 支持的编解码器（按优先级排序：PCMA 优先，其次 PCMU，
-// Opus 最后——用户明确要求 Opus 排在 SDP 末尾）。双方能力交集取最前者。
+// 然后 G.722（宽频），最后是可选编解码器（Opus））。双方能力交集取最前者。
 // Opus 由构建标签 audio 提供（见 optionalCodecs，以后其他音频编解码库同此），
 // 未启用的构建里它不存在，
 // SDP 也就不会宣告。
+//
+// G.722 是纯 Go 实现、任何构建都有，排在 Opus 之前（REQ-MEDIA-011 的用户决策，
+// 真机验证过互通）：对端同时提供 G.722 与 Opus 时选 G.722（7 kHz 宽频、64 kbps
+// 固定码率），而对端有 G.711 时仍按老规矩走 G.711（行为与历史一致）。
 var supportedCodecs = append([]Codec{
 	NewG711Codec(false), // PCMA（优先）
 	NewG711Codec(true),  // PCMU
+	NewG722Codec(),      // G.722（宽频，排在 Opus 之前）
 }, optionalCodecs...)
 
 // OpusSupported 当前构建是否含 Opus 编解码器（黄金测试与排查用）。
@@ -59,6 +64,39 @@ func resetCodec(c Codec) {
 	}
 }
 
+// applyNegotiatedCodec 协商切换编解码器的**唯一入口**（两个 SDP 入口共用）：
+// 复位编解码器状态、更新 PCM 管线采样率，并在速率真的变了时重置播放缓冲、
+// 清掉采集侧残留的半帧、通知音频层重开设备。
+//
+// "速率真的变了"才动手很重要：保持/取消保持这类 re-INVITE 会走同一条路径，
+// 速率没变时不能清缓冲（否则每次保持都丢一段声音）。
+func (e *Engine) applyNegotiatedCodec(c Codec) {
+	resetCodec(c)
+	rate := c.SampleRate()
+	if rate <= 0 || rate == e.SampleRate() {
+		return
+	}
+	e.sampleRate.Store(int32(rate))
+
+	// 播放缓冲里是**旧速率**的样本，按新速率播放会变速变调：直接清空
+	//（此刻对端多半也在换流/换编码，丢掉的是切换瞬间的几十毫秒）。
+	e.playMu.Lock()
+	e.ring.SetRate(rate)
+	e.ring.Reset()
+	e.playMu.Unlock()
+	// 采集侧同理：不足一帧的残留样本是按旧速率采的，不能拼进新编码器的帧
+	e.micMu.Lock()
+	e.micBuf = e.micBuf[:0]
+	e.micMu.Unlock()
+	if e.probe != nil {
+		e.probe.setRate(rate)
+	}
+	logx.Logger().Info("媒体采样率已切换", "rate", rate, "codec", c.Name())
+	if fn := e.rateChange.Load(); fn != nil {
+		(*fn)(rate)
+	}
+}
+
 // Engine 一次通话的媒体引擎：RTP/RTCP 收发 + 播放缓冲。
 // 与音频设备层解耦：音频采集回调调用 FeedMic（接受任意帧长，内部按
 // 编解码器帧长累积发送），播放侧调用 ReadPlayback（按任意帧长读取）。
@@ -70,6 +108,15 @@ type Engine struct {
 	// 动态负载类型（视频全部是动态 PT）会协商串味。音频 PCMA/PCMU 是
 	// 静态 PT 8/0，两种取值恰好相同，故此前未暴露。
 	activePT atomic.Uint32
+
+	// sampleRate 当前协商编解码器要求的 PCM 管线采样率（Hz）。G.711/Opus 恒为
+	// 8000（与历史行为一致），G.722 是 16000（REQ-MEDIA-011：协商到它时整条
+	// 音频管线切到 16 kHz 宽频）。由 applyNegotiatedCodec 统一维护；音频线程、
+	// 播放缓冲与诊断探针都无锁读它。
+	sampleRate atomic.Int32
+	// rateChange 采样率变更回调（audio.Manager 在 AttachEngine 时注入）：
+	// 设备已按旧速率开流时，回调里排一次"关流重开"。
+	rateChange atomic.Pointer[func(rate int)]
 
 	// dtmfPT 对端 SDP 里 telephone-event 的负载类型号（0 = 对端没声明）。
 	// 收到对端 DTMF 时按这个号识别——**发送**方向恒用本端声明的
@@ -164,6 +211,7 @@ func NewEngine(localIP string) (*Engine, error) {
 		stop:      make(chan struct{}),
 	}
 	e.activePT.Store(uint32(e.codec.PayloadType()))
+	e.sampleRate.Store(int32(e.codec.SampleRate()))
 	e.probe = newMediaProbe(e.localPort)
 	e.rtcp = newRTCPSession(rtcpConn, e)
 	logx.Logger().Debug("媒体引擎已创建", "codec", e.codec.Name(),
@@ -177,6 +225,22 @@ func NewEngine(localIP string) (*Engine, error) {
 
 // payloadType 线上使用的负载类型号（见 activePT 字段说明）。
 func (e *Engine) payloadType() uint8 { return uint8(e.activePT.Load()) }
+
+// SampleRate 当前 PCM 管线采样率（Hz）：协商前是本端首选编解码器的速率
+//（PCMA = 8000），协商到 G.722 之后是 16000。音频设备、播放缓冲、诊断 WAV
+// 都按它工作。
+func (e *Engine) SampleRate() int { return int(e.sampleRate.Load()) }
+
+// SetSampleRateListener 注册采样率变更回调（audio.Manager 在 AttachEngine 时
+// 注入；nil 取消）。回调在**协商线程**上同步调用，实现方必须非阻塞
+//（音频层的做法是排进自己的 worker 队列）。
+func (e *Engine) SetSampleRateListener(fn func(rate int)) {
+	if fn == nil {
+		e.rateChange.Store(nil)
+		return
+	}
+	e.rateChange.Store(&fn)
+}
 
 // PayloadType 线上使用的音频负载类型号（answer 必须复用它，RFC 3264）。
 func (e *Engine) PayloadType() uint8 { return e.payloadType() }
@@ -442,7 +506,7 @@ func (e *Engine) playPush(ssrc uint32, seq uint16, frame []int16) {
 		if time.Since(e.lastTrimLog) > 10*time.Second {
 			e.lastTrimLog = time.Now()
 			logx.Logger().Warn("播放缓冲超深已截断（声音延迟被压回目标值）",
-				"丢弃样本", dropped, "当前深度ms", e.ring.Depth()*1000/8000,
+				"丢弃样本", dropped, "当前深度ms", e.ring.Depth()*1000/e.SampleRate(),
 				"累计丢弃", e.ring.Trimmed(),
 				"切点能量比", fmt.Sprintf("%.2f", e.ring.CutRatio()))
 		}
@@ -484,7 +548,8 @@ func (e *Engine) fillLoss(n, samples int) {
 }
 
 // FeedMic 音频采集回调：接受任意帧长输入（音频回调帧长不一定等于
-// 20ms），按编解码器帧长（20ms=160 样本）累积，凑满一帧编码发送，
+// 20ms），按编解码器帧长（20ms = FrameSize：G.711/Opus 160、G.722 320）
+// 累积，凑满一帧编码发送，
 // 不足一帧的部分留待下次回调。
 func (e *Engine) FeedMic(pcm []int16) {
 	e.micMu.Lock()
@@ -595,7 +660,8 @@ func (e *Engine) sendPacket(codec Codec, payload []byte) {
 	}
 	e.seq++
 	// 时间戳按 **RTP 时钟率** 递增，不是 PCM 帧长：Opus 的 PCM 帧长是 160
-	//（8kHz 管线）而时钟是 48000，每帧要走 960（见 Codec.TimestampStep）。
+	//（8 kHz 管线）而时钟是 48000，每帧要走 960；G.722 反过来：PCM 帧长 320 而
+	// 时钟是 8000，每帧只走 160（见 Codec.TimestampStep）。
 	e.ts += uint32(codec.TimestampStep())
 	e.txPackets.Add(1)
 	e.txBytes.Add(uint64(len(payload)))
@@ -890,8 +956,8 @@ func (e *Engine) SDPAnswerWithDirection(offer []byte, dir string) (string, error
 	// answerer：线上用**对端**的负载类型号（RFC 3264）
 	e.activePT.Store(uint32(peerPT))
 	e.dtmfPT.Store(uint32(peerDTMFPT(offer))) // 对端 DTMF 用他们自己声明的号
-	// 编解码器换了（对端号 + 新编码）：复位其内部状态
-	resetCodec(codec)
+	// 编解码器换了（对端号 + 新编码）：复位其内部状态、按需切换管线采样率
+	e.applyNegotiatedCodec(codec)
 	e.setRemote(remote, rtcpPort)
 	// 远端地址更新后打洞（NAT 下对端媒体包需先有出向包放行）
 	e.punchHole()
@@ -910,8 +976,9 @@ func (e *Engine) SDPApplyAnswer(answer []byte) error {
 	// offerer：answer 里的号取自本端 offer，即为本端号
 	e.activePT.Store(uint32(pt))
 	e.dtmfPT.Store(uint32(peerDTMFPT(answer)))
-	// 编解码器换了（183 早期媒体 → 200 可能换编码）：复位其内部状态
-	resetCodec(codec)
+	// 编解码器换了（183 早期媒体 → 200 可能换编码，比如 G.711 → G.722）：
+	// 复位内部状态、按需切换管线采样率（变了会让音频层重开设备）
+	e.applyNegotiatedCodec(codec)
 	e.setRemote(remote, rtcpPort)
 	// 远端地址更新（如 183 → 200 端口变化）后重新打洞
 	e.punchHole()

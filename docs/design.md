@@ -261,7 +261,7 @@ go test ./internal/media/ ./internal/wsapi/ ./internal/sip/ ./internal/ui/ ./int
 
 | 想加什么 | 大致落点 | 要特别注意 |
 | --- | --- | --- |
-| 新音频编解码（如 G.722） | `internal/media/codec_*.go` + `sdp.go` 的编解码表；静态库走 `third_party/audio` + `-tags audio` | `FrameSize()`（PCM 帧长）与 `TimestampStep()`（RTP 时间戳增量）不是一回事；要复位 C 状态就实现 `resetter` |
+| 新音频编解码（G.722 已交付，见 `internal/media/g722`） | `internal/media/codec_*.go` + `sdp.go` 的编解码表；**纯 Go 实现直接注册进 `supportedCodecs`**，需要 C 库的才走 `third_party/audio` + `-tags audio` | `SampleRate()`（PCM 管线采样率）、`FrameSize()`（每帧样本数 = SampleRate/50）与 `TimestampStep()`（RTP 时间戳增量 = ClockRate/50）是三件事，G.722（320/160）与 Opus（160/960）是最容易踩的两个反例；有状态就把 `Reset()` 实现成 `resetter` |
 | 新 WS 方法 / 事件 | `wsapi/protocol.go` 常量 + `handler.go`（**外层列表 + 内层分支**）+ 协议文档 | 错误码映射 `codeOf`；事件要加进 ws-protocol 的事件表 |
 | 新 SDK 能力 | `web/sdk/sip-phone-sdk.js` + `.d.ts` + 测试页演示 | SDK 无构建步骤，改完重建二进制才生效（内嵌） |
 | 多路通话 | `core.App` 的 `calls` 已按 map 组织，但**有全局假设**：媒体层 Opus 编解码器是包级共享实例、UI 只显示一个通话面板、按键/DTMF 只作用于 `activeCallID` | 需要一次系统性梳理，别只改半边 |

@@ -50,6 +50,7 @@ type Manager struct {
 	engine        *media.Engine
 	backend       Backend
 	running       bool // 音频流是否已启动
+	streamRate    int  // 已启动的音频流用的采样率（0 = 未启动）
 	initDone      bool // 后端初始化是否已结束（成功或失败）
 	closed        bool
 
@@ -218,6 +219,11 @@ func (m *Manager) AttachEngine(engine *media.Engine) {
 				m.PlayDTMF(digit)
 			}
 		})
+		// 协商换到不同采样率的编解码器（G.711 ⇄ G.722）：设备已按旧速率开流时
+		// 关流重开。回调在协商线程上跑，只做"排队"（不阻塞信令）。
+		engine.SetSampleRateListener(func(int) {
+			m.enqueue(func() { m.restartStreamIfRateChanged(engine) })
+		})
 	}
 	m.enqueue(func() { m.startStreamFor(engine) })
 }
@@ -329,6 +335,7 @@ func (m *Manager) startStreamFor(engine *media.Engine) {
 		return
 	}
 	backend, mic, speaker := m.backend, m.micID, m.speakerID
+	rate := engineSampleRate(engine)
 	m.running = true // 先置位，避免与 restart/stop 重复启动
 	m.mu.Unlock()
 
@@ -336,11 +343,15 @@ func (m *Manager) startStreamFor(engine *media.Engine) {
 	if err := backend.Start(mic, speaker, engine); err != nil {
 		m.mu.Lock()
 		m.running = false
+		m.streamRate = 0
 		m.mu.Unlock()
-		logx.Logger().Error("启动音频流失败", "err", err)
+		logx.Logger().Error("启动音频流失败", "err", err, "采样率", rate)
 		return
 	}
-	logx.Logger().Info("音频流已启动", "mic", mic, "speaker", speaker)
+	m.mu.Lock()
+	m.streamRate = rate
+	m.mu.Unlock()
+	logx.Logger().Info("音频流已启动", "mic", mic, "speaker", speaker, "采样率", rate)
 }
 
 // stopStream 队列命令：停止音频流。
@@ -352,6 +363,7 @@ func (m *Manager) stopStream() {
 	}
 	backend := m.backend
 	m.running = false
+	m.streamRate = 0
 	m.mu.Unlock()
 
 	if backend == nil {
@@ -359,6 +371,23 @@ func (m *Manager) stopStream() {
 	}
 	backend.Stop() // 不持锁：设备关闭同样可能阻塞
 	logx.Logger().Debug("音频流已停止")
+}
+
+// restartStreamIfRateChanged 队列命令：引擎的采样率与当前音频流不一致时
+// 关流重开（协商换到不同速率的编解码器，REQ-MEDIA-011）。
+//
+// 只在**真的不一致**时才重开：保持/取消保持这类 re-INVITE 也会触发采样率
+// 回调，但速率没变，不能白重开一次设备（会有可听的断点）。速率在队列里
+// 连变两次时也会自动合并（执行时比较的是"当前值"）。
+func (m *Manager) restartStreamIfRateChanged(engine *media.Engine) {
+	m.mu.Lock()
+	ok := m.engine == engine && m.running && m.backend != nil
+	cur := m.streamRate
+	m.mu.Unlock()
+	if !ok || engineSampleRate(engine) == cur {
+		return
+	}
+	m.restartStream()
 }
 
 // restartStream 队列命令：设备切换时重建音频流。

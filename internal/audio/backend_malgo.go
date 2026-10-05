@@ -71,15 +71,19 @@ func (b *malgoBackend) Devices() ([]core.AudioDevice, []core.AudioDevice) {
 	return mics, speakers
 }
 
-// Start 启动全双工流：20ms 帧（8kHz × 160 样本），采集回调驱动编码发送，
+// Start 启动全双工流：20ms 帧（采样率 × 20ms 个样本），采集回调驱动编码发送，
 // 播放侧从媒体引擎抖动缓冲取数据。
+//
+// **采样率取自引擎**（engine.SampleRate）：G.711 / Opus 通话是 8 kHz（20ms =
+// 160 样本，与历史行为一致），协商到 G.722 的通话是 16 kHz（20ms = 320 样本，
+// REQ-MEDIA-011）。编解码器换到不同速率时由 Manager 关流重开（见 restartStream）。
 func (b *malgoBackend) Start(micID, speakerID string, engine *media.Engine) error {
 	if b.device != nil {
 		b.Stop()
 	}
 
 	deviceConfig := malgo.DefaultDeviceConfig(malgo.Duplex)
-	deviceConfig.SampleRate = 8000
+	deviceConfig.SampleRate = uint32(engineSampleRate(engine))
 	deviceConfig.PeriodSizeInMilliseconds = 20
 	deviceConfig.Periods = 3
 	deviceConfig.Capture.Format = malgo.FormatS16

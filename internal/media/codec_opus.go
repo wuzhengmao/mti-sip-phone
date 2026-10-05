@@ -36,10 +36,11 @@ import (
 
 // Opus 编解码器（libopus，cgo 静态链接）。
 //
-// **采样率**：本端内部 PCM 管线恒为 8kHz（音频设备 backend_malgo 固定 8000、
-// 播放缓冲按 8000 换算），因此编码器/解码器都以 Fs=8000 创建：libopus 内部
-// 按 48kHz 处理后降到 8kHz 输出（窄带），本端不需要任何重采样；对端发来的
-// 宽带/全带包同样能正常解码（libopus 自行降采样）。
+// **采样率**：本端 PCM 管线在 G.711/Opus 通话里恒为 8kHz（音频设备按
+// engine.SampleRate() 开流，见 backend_malgo——只有 G.722 通话才是 16kHz），
+// 因此编码器/解码器都以 Fs=8000 创建：libopus 内部按 48kHz 处理后降到 8kHz
+// 输出（窄带），本端不需要任何重采样；对端发来的宽带/全带包同样能正常解码
+//（libopus 自行降采样）。
 //
 // **RTP 侧时钟率恒为 48000**（RFC 7587 的线上常量），所以 20ms 帧的时间戳
 // 步长是 960，与 PCM 帧长 160 不是一回事——见 Codec.TimestampStep。
@@ -111,7 +112,11 @@ func newOpusCodec() (*opusCodec, error) {
 func (c *opusCodec) Name() string       { return "opus" }
 func (c *opusCodec) PayloadType() uint8 { return opusPayloadType }
 func (c *opusCodec) ClockRate() int     { return 48000 }
-func (c *opusCodec) FrameSize() int     { return opusFrameSamples }
+
+// SampleRate Opus 以 Fs=8000（窄带）创建：RTP 时钟虽是 48000，PCM 管线仍是 8 kHz
+//（**别写成 ClockRate()**，否则 Opus 通话会把音频设备开到 48 kHz）。
+func (c *opusCodec) SampleRate() int { return opusSampleRate }
+func (c *opusCodec) FrameSize() int  { return opusFrameSamples }
 func (c *opusCodec) TimestampStep() int { return opusTimestampStep }
 func (c *opusCodec) Channels() int      { return opusChannels }
 func (c *opusCodec) RTPMap() string     { return "opus/48000/2" }
