@@ -89,6 +89,23 @@ func main() {
 	}
 	defer logx.Close()
 
+	// 崩溃现场记录：托盘版是 GUI 子系统构建（没有控制台），未捕获的 panic、
+	// 运行期致命错误、cgo 里的非法访问都只会写 stderr——那里没人接，Windows
+	// 事件日志也不会有记录（进程是「自己退出」的），表现为「软件凭空消失、
+	// 日志停在半截」。这里把运行期崩溃输出另存一份，并把没有控制台时的
+	// stderr 一并落到日志目录（有控制台时不动，控制台输出照旧）。
+	crashPath, archivedCrash, crashErr := logx.InstallCrashHandler(logDir, fmt.Sprintf(
+		"mti-sip-phone %s (%s) pid=%d 实例=%d 参数=%q",
+		core.Version, core.Platform(), os.Getpid(), slot, os.Args[1:]))
+	if crashErr != nil {
+		logx.Logger().Warn("崩溃记录未启用（崩溃时可能没有现场可查）", "err", crashErr)
+	} else {
+		logx.Logger().Info("崩溃记录已启用", "file", crashPath)
+		if archivedCrash != "" {
+			logx.Logger().Warn("上次运行的崩溃现场已归档（上次是异常退出）", "file", archivedCrash)
+		}
+	}
+
 	// 沙箱实例：首次启动（还没有配置文件）时按「固定偏移 +10」给 WS 端口一个
 	// 起点（默认 8765 → 8775，被占用仍会自动 +1 并存入本实例自己的配置），
 	// 免得与主实例抢 8765。已有配置（用户改过端口）时不覆盖。

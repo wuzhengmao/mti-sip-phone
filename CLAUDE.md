@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.13**（已定版并合并到 master；含 **SIP 信令 TLS(SIPS) 传输（REQ-ACC-006）**——传输新增 tls、sips:// 拉起、本端自签 TLS 监听、TCP/TLS 信令保活，以及真机联调修出的来电接听/振铃取消/长通话挂断等一批 TCP/TLS 信令缺陷；此前 1.0.12 的 G.722 宽频、视频总开关等一并包含）。
+当前开发版本 **1.0.14**（1.0.13 已定版并合并到 master，含 **SIP 信令 TLS(SIPS) 传输（REQ-ACC-006）**——传输新增 tls、sips:// 拉起、本端自签 TLS 监听、TCP/TLS 信令保活，以及真机联调修出的来电接听/振铃取消/长通话挂断等一批 TCP/TLS 信令缺陷；此前 1.0.12 的 G.722 宽频、视频总开关等一并包含）。1.0.14 进行中：崩溃现场记录（REQ-LOG-009，见「已知陷阱」的日志条）。
 版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），
 正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
@@ -135,7 +135,8 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 cmd/sip-phone/main.go   入口：命令行/单实例/协议注册/开机自启/组装各层/GUI 主循环
 internal/
   config/     JSON 配置加载与保存（密码 AES-256-GCM 加密、原子写入）
-  logx/       slog 日志：滚动+gzip 归档、信令跟踪 TraceSIP（自动脱敏）
+  logx/       slog 日志：滚动+gzip 归档、信令跟踪 TraceSIP（自动脱敏）、崩溃现场记录
+              （crash.go/crash_test.go：debug.SetCrashOutput → crash.log，REQ-LOG-009）
   core/       应用核心：状态机、事件总线（发布-订阅）、Telephony 抽象接口。
               calllog.go 定义通话记录接口与采集点（REQ-CALL-007），实现在
               internal/calllog：单 worker FIFO 队列串行执行全部 SQL、
@@ -425,6 +426,16 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **通话面板窗口控制按平台拆分**：`ui_call.go`/`ui.go` 只调用平台函数（`moveCallWindowToCorner`、`callWindowTitle`、`markTrayQuit`、面板尺寸常量），实现分别在 `topmost_windows.go`（Win32）与 `topmost_linux.go`（X11）——**勿把任一侧的逻辑写进共享文件**。Linux 侧靠 `driver.NativeWindow.RunNative` 取 X11 窗口号（回调收到 `driver.X11WindowContext`），需经 `fyne.DoAndWait` 在主线程取；`fyne.DoAndWait` 不可在主线程调用（会 panic），故 `moveCallWindowToCorner` 内部起 goroutine。Wayland 会话下 X11 手段全部无效（不能自定位、去装饰看合成器）——所以 Linux 默认把后端固定到 X11（见下方「Linux 桌面后端」条）。X11 侧还额外把 `_NET_WM_STATE` 写成**窗口属性**（不只发 ClientMessage），因为 Xwayland 下没有独立 X11 窗口管理器处理消息。但**任务栏条目在 labwc 下无法由客户端去掉**（实测属性/消息都不生效）：任务栏走 foreign-toplevel 协议，该协议没有 skip-taskbar 字段，`_NET_WM_STATE_SKIP_TASKBAR` 不会透传。要隐藏只能用 labwc 自己的窗口规则（`~/.config/labwc/rc.xml`，labwc ≥0.6.4）：`<windowRule title="SIP" skipTaskbar="yes" skipWindowSwitcher="yes"/>`——按 `title` 匹配（面板标题恒以 `SIP` 开头，主窗体是 `mti-sip-phone …`），**勿按 `identifier` 匹配**（Xwayland 下两窗口 WM_CLASS 相同，会连主窗体一起隐藏）。用户已确认该条目可接受，不要再在客户端代码里尝试修它。
 - **服务端心跳（REQ-ACC-020/021）与 OPTIONS 的关系，别想当然**：**整套机制只对 UDP 传输生效**（`heartbeatWanted()`：开关打开 **且** 传输是 udp；`optchk` 标记、传输层计数、间隔学习、2.5 周期超时重注册四处都受它管，设置页在 tcp/tls 下把勾选项置灰——用户要求）。启用后只是注册报文的 **User-Agent 带 `optchk`**，服务端据此定期发 OPTIONS 探测；**OPTIONS 不要专门处理——sipgo 默认回 405，实测 OpenSIPS 接受**。曾实现过"逐字回抄的 200 + Contact + 重传缓存"，服务端仍判探测失败并摘注册（NAT/rport 下它登记的是改写后的外部地址，与我们的 Contact 对不上）。**心跳计数必须挂在传输层读钩子（`readFilter`）上**：服务端的探测复用**同一个 Via branch**，sipgo 会把 Timer J（32 秒）内相同 branch 的请求当**重传**、不再回调 handler——按 handler 计数会把 10 秒的心跳看成 ~40 秒。超时判定是 **2.5 个周期**（`hbOverdueFactor`）：先置**未注册**（托盘/圆点变红、原因"服务端心跳超时"），再立即重新注册，触发一次后复位。
 - **信令日志唯一出口是 `internal/sip/tracer.go` 的全局跟踪器**（sipgo 传输层钩子 + 「SIP 信令记录」开关）：**业务代码里不要再散点调 `logx.TraceSIP`**，否则同一条报文在日志里出现两份（历史缺陷，已清理 11 处）；跟踪器里另有"非 SIP 载荷不记"的过滤（挡掉服务端/NAT 的四个 0 字节保活包）。
+- **「软件凭空消失、日志停在半截」= 崩溃输出没有去处，不是没崩**：托盘版是 GUI 子系统
+  （`-H=windowsgui`），**没有控制台**——未捕获的 panic、运行期致命错误（并发 map 读写、
+  栈溢出）、cgo 里的非法内存访问都只写 **stderr** 后 `exit(2)`；Windows 事件日志**也不会有
+  记录**（那是进程"**自己**退出"的，既没有 Application Error 也没有 WER 报告）。所以
+  「事件日志里干干净净」**不能**说明没崩。`internal/logx/crash.go`（REQ-LOG-009）现在把这份
+  输出落盘到日志目录 `crash.log`（下次启动归档为 `crash-<时间>.log`，并在主日志里 WARN
+  「上次是异常退出」）——排查「实例跑着跑着没了」第一站就是它：**空文件 = 不是崩溃**（正常
+  退出或被 taskkill 杀掉）。改这里注意：`debug.SetCrashOutput` 内部 **dup** 句柄且**同一进程
+  内不会释放**，所以同进程里重复安装（测试）要先 `SetCrashOutput(nil, …)`，否则 Windows 下
+  `crash.log` 一直被占、归档改名必失败。
 - **日志轮转：Windows 上删除/改名文件前必须先关自己的句柄**（`internal/logx/logx.go` 的 `rotate`/`gzipFile`）。Windows 要求**所有**句柄都带 `FILE_SHARE_DELETE` 才允许删/改名，而 Go 的 `os.OpenFile` 只申请 `FILE_SHARE_READ|FILE_SHARE_WRITE`（`syscall_windows.go` 的 sharemode）——**自己的句柄没关，`os.Remove`/`os.Rename` 必然失败**。历史缺陷写成 `return os.Remove(src)`（在 `defer in.Close()` 之前执行），于是"压缩完成却删不掉源文件"：日志文件永不截断（实测卡在 42.8MB）→ 尺寸一直超上限 → **之后每次写日志都再完整轮转一次**（整个文件重新 gzip 一遍，且全程持写锁）→ 写日志的线程（SIP/界面/**RTP 接收循环**）被随机卡住数百毫秒（实测同一接收循环迭代内相邻两行日志相差 494ms）。症状极具迷惑性：通话开始时的日志突发撞上轮转 → 接收循环停摆、对端媒体包在 socket 里排队后成批涌入 → 播放缓冲超深截断 → **"第一声回铃音断续"**（真因，找了很久）。另外那条路径还会让 `.1.gz~.9.gz` **内容完全相同且每次轮转 mtime 全变**（每次压的都是同一份越来越大的文件）。现在的做法：关闭 → **改名切走**（改名即完成截断）→ 立即开新文件继续写 + 后台 goroutine 压缩与归档移位（不持锁做重活）；改名失败退化为清空当前文件，连清空都不行则降级为"不再轮转"，**绝不能回到"每次写都重压整个文件"的循环**。改这里务必跑 `go test ./internal/logx/`（有回归测试）。
 - **媒体/NAT**：对称 NAT 下 UDP 映射需持续出向流量保活（早期媒体阶段 SetKeepalive 持续发静音帧）；SDP 宣告地址与 socket 绑定地址分离（SetSDPIP）；183→200 可能换 SSRC/端口（引擎已自动处理，勿移除 playPush 的重置逻辑）。
 - **自更新重启时序**（勿简化）：重启请求只标记 `restartRequested` 并取消 ctx，**释放单实例锁与拉起新进程必须放在退出收尾**（`shutdown` 之后、进程退出之前，见 main.go 的 `spawnNewProcessIfRequested`）——顺序反了会让新进程因锁冲突转发参数后退出，或因 WS 端口仍被占用而 +1 写回配置、SIP 双注册。历史缺陷：旧 `onRestart` 释放锁+拉起进程后不退出旧进程（已修复）。Windows 上运行中的 exe **能改名不能覆盖**，替换流程为 exe→.old、.new→exe、失败回滚（`internal/updater/replace.go`，已用真实进程验证）。
