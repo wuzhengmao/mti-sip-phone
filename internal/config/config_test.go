@@ -276,3 +276,43 @@ func TestNormalizeVideoRotation(t *testing.T) {
 		t.Errorf("加载时未规范化旋转角: %d，期望 90", cfg.UI.LocalPreviewRotation)
 	}
 }
+
+// TestAudioPreprocessDefaults 音频预处理开关的默认值（REQ-MEDIA-007）：
+// AEC/NS 默认开、AGC 默认关；旧配置（没有这三个字段）也要拿到同样的默认值——
+// Load 是先取 Default() 再反序列化覆盖，这条测试同时钉住那个机制。
+func TestAudioPreprocessDefaults(t *testing.T) {
+	d := Default()
+	if !d.Audio.AEC || !d.Audio.NS {
+		t.Errorf("默认应开启回声消除与降噪：aec=%v ns=%v", d.Audio.AEC, d.Audio.NS)
+	}
+	if d.Audio.AGC {
+		t.Error("默认应关闭自动增益（会与手动麦克风增益较劲）")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	legacy := `{"version":1,"account":{"server":"10.0.0.1","account":"1001"},"audio":{"micId":"x"}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("写测试配置失败: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if !cfg.Audio.AEC || !cfg.Audio.NS || cfg.Audio.AGC {
+		t.Errorf("旧配置缺字段时应取默认值：aec=%v ns=%v agc=%v", cfg.Audio.AEC, cfg.Audio.NS, cfg.Audio.AGC)
+	}
+
+	// 显式关闭要能覆盖默认值
+	off := `{"version":1,"account":{"server":"10.0.0.1","account":"1001"},"audio":{"aec":false,"ns":false,"agc":true}}`
+	if err := os.WriteFile(path, []byte(off), 0o600); err != nil {
+		t.Fatalf("写测试配置失败: %v", err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if cfg.Audio.AEC || cfg.Audio.NS || !cfg.Audio.AGC {
+		t.Errorf("显式设置的开关不该被默认值覆盖：aec=%v ns=%v agc=%v", cfg.Audio.AEC, cfg.Audio.NS, cfg.Audio.AGC)
+	}
+}

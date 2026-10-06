@@ -120,6 +120,13 @@ type App struct {
 	accEnabled        *widget.Check
 	micSelect         *widget.Select
 	speakerSelect     *widget.Select
+	aecCheck          *widget.Check // 音频预处理：回声消除（REQ-MEDIA-007）
+	nsCheck           *widget.Check // 降噪
+	agcCheck          *widget.Check // 自动增益
+	preprocessHint    *widget.Label
+	aecDesc           *widget.Label // 三个开关下面各自的说明（常驻）
+	nsDesc            *widget.Label
+	agcDesc           *widget.Label
 	ringSpeakerSelect *widget.Select
 	logFileCheck      *widget.Check
 	sipTraceCheck     *widget.Check
@@ -356,15 +363,19 @@ func (a *App) buildMainWindow() {
 	a.fyne.Settings().SetTheme(&dialTheme{})
 	a.watchThemeChanges()
 
+	// 顶层提示图层（备注/说明悬停用，见 ui_tooltip.go）**必须先建**：设置页的
+	// ⓘ 图标（REQ-MEDIA-007）在构建时就把它捕获进去了，晚建会拿到 nil。
+	a.mainTip = newTooltipLayer()
 	a.buildDialPage()
 	a.buildSettingsPage()
+	// 音频预处理开关按配置回填（REQ-MEDIA-007；本构建没有 APM 时置灰）
+	a.applyPreprocessForm()
 	a.buildHistoryPage()
 	a.buildContactsPage()
 
 	// 窗口内容 = 当前页 + 顶层提示图层（备注悬停用，见 ui_tooltip.go）。
 	// 切页只换 Objects[0]，提示图层恒为 Objects[1]：它不含 Hoverable/Tappable，
 	// 命中测试会穿透到下面的页面，绘制顺序上又在最上层、不受滚动裁剪。
-	a.mainTip = newTooltipLayer()
 	a.mainContent = container.NewStack(a.dialPage, a.mainTip)
 	w.SetContent(a.mainContent)
 	w.Resize(fyne.NewSize(320, 620)) // 更窄的宽度 + 按键增高后的总高
@@ -661,6 +672,21 @@ func (a *App) buildSettingsPage() {
 	a.ringSpeakerSelect = widget.NewSelect([]string{}, nil)
 	refreshDevicesBtn := widget.NewButtonWithIcon("刷新设备", theme.ViewRefreshIcon(), a.refreshDevices)
 
+	// 音频预处理（REQ-MEDIA-007）：说明文字要自动折行（主窗体固定宽度，
+	// 不折行会把窗口撑宽——与摄像头说明行同样的处理）。
+	a.aecCheck = widget.NewCheck("回声消除（AEC）", a.onPreprocessChanged)
+	a.nsCheck = widget.NewCheck("降噪（NS）", a.onPreprocessChanged)
+	a.agcCheck = widget.NewCheck("自动增益（AGC）", a.onPreprocessChanged)
+	// 每条说明常驻显示在对应勾选项下面（自动折行：主窗体固定 320 宽）
+	a.aecDesc = widget.NewLabel(preprocessAECNote)
+	a.aecDesc.Wrapping = fyne.TextWrapWord
+	a.nsDesc = widget.NewLabel(preprocessNSNote)
+	a.nsDesc.Wrapping = fyne.TextWrapWord
+	a.agcDesc = widget.NewLabel(preprocessAGCNote)
+	a.agcDesc.Wrapping = fyne.TextWrapWord
+	a.preprocessHint = widget.NewLabel(preprocessUnsupportedText)
+	a.preprocessHint.Wrapping = fyne.TextWrapWord
+	a.preprocessHint.Hide() // 默认（支持时）不显示
 	audioCard := container.NewVBox(
 		widget.NewLabelWithStyle("音频设备", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		formItem("麦克风", a.micSelect),
@@ -668,6 +694,16 @@ func (a *App) buildSettingsPage() {
 		formItem("振铃设备", a.ringSpeakerSelect),
 		widget.NewLabel("振铃音专用播放设备，可选其他扬声器"),
 		refreshDevicesBtn,
+		// 音频预处理（REQ-MEDIA-007）：三个开关，改动立即保存、**下一通电话生效**
+		//（音频流在每次通话开始时重建）。
+		widget.NewLabelWithStyle("音频预处理", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		a.aecCheck,
+		a.aecDesc,
+		a.nsCheck,
+		a.nsDesc,
+		a.agcCheck,
+		a.agcDesc,
+		a.preprocessHint,
 	)
 
 	// ---- 视频设备（REQ-VIDEO-002/005/014）----
@@ -2087,6 +2123,62 @@ func openInFileManager(path string) error {
 		return exec.Command("xdg-open", path).Start()
 	}
 	return fmt.Errorf("当前平台不支持打开文件管理器")
+}
+
+// 音频预处理的三条说明（REQ-MEDIA-007）：直接显示在各自勾选项的**下面**
+// （用户要求：试过 ⓘ+提示那套，效果都差，常驻一行反而最省事最稳）。
+// 文案只讲"作用"，不带 (AEC)/(NS)/(AGC) 后缀——勾选项标签上已经有缩写。
+const (
+	preprocessAECNote = "用正在播放的声音当参考，消掉麦克风里的扬声器回声（外放时防自激）"
+	preprocessNSNote  = "压掉风扇、键盘这类稳态背景噪声"
+	preprocessAGCNote = "自动调整麦克风音量，与通话面板的手动增益叠加"
+	// preprocessUnsupportedText 本构建没编进 APM 时的说明（这种情况才常驻显示）。
+	preprocessUnsupportedText = "本构建未包含音频预处理（缺 webrtc-audio-processing 静态库，" +
+		"见 scripts/build-audio-libs.sh）。"
+)
+
+// applyPreprocessForm 把音频预处理开关回填到界面（REQ-MEDIA-007），
+// 本构建没有 APM 时置灰并说明原因。
+func (a *App) applyPreprocessForm() {
+	if a.aecCheck == nil {
+		return
+	}
+	a.loadingForm = true // 回填期间屏蔽 OnChanged 自动保存
+	a.aecCheck.SetChecked(a.cfg.Audio.AEC)
+	a.nsCheck.SetChecked(a.cfg.Audio.NS)
+	a.agcCheck.SetChecked(a.cfg.Audio.AGC)
+	a.loadingForm = false
+
+	if audio.PreprocessSupported() {
+		a.aecCheck.Enable()
+		a.nsCheck.Enable()
+		a.agcCheck.Enable()
+		a.preprocessHint.Hide() // 支持时不需要"本构建未包含"那行
+		return
+	}
+	a.aecCheck.Disable() // 本构建没编进 APM：开关无意义
+	a.nsCheck.Disable()
+	a.agcCheck.Disable()
+	a.preprocessHint.Show()
+}
+
+// onPreprocessChanged 音频预处理开关变化：写配置 + 立即下发给音频管理器
+// （音频流在每通电话开始时重建，因此从下一通生效）。
+func (a *App) onPreprocessChanged(bool) {
+	if a.loadingForm || a.aecCheck == nil {
+		return
+	}
+	a.cfg.Audio.AEC = a.aecCheck.Checked
+	a.cfg.Audio.NS = a.nsCheck.Checked
+	a.cfg.Audio.AGC = a.agcCheck.Checked
+	if a.audioMgr != nil {
+		a.audioMgr.SetPreprocess(audio.Preprocess{
+			AEC: a.cfg.Audio.AEC, NS: a.cfg.Audio.NS, AGC: a.cfg.Audio.AGC,
+		})
+	}
+	a.persistConfig()
+	logx.Logger().Info("音频预处理开关已更新",
+		"回声消除", a.cfg.Audio.AEC, "降噪", a.cfg.Audio.NS, "自动增益", a.cfg.Audio.AGC)
 }
 
 // refreshDevices 刷新音频设备列表（枚举真实系统设备，REQ-MEDIA-002）。

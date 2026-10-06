@@ -160,6 +160,9 @@ CODEC_NOTES=""
 VIDEO_LIBS="libavcodec.a libswscale.a libavutil.a libvpx.a libopenh264.a"
 # internal/media/codec_opus.go 的 #cgo LDFLAGS 依赖 libopus（改那边记得同步这里）
 AUDIO_LIBS="libopus.a"
+# internal/audio/apm.go 的 #cgo LDFLAGS 依赖 webrtc-audio-processing + abseil
+#（音频预处理 AEC/NS/AGC，REQ-MEDIA-007；改那边记得同步这里）
+APM_LIBS="libwebrtc-audio-processing-1.a libwebrtc-audio-coding-1.a"
 
 # 工程根目录的绝对路径。Windows（git-bash）宿主下必须用 **D:/... 形式**：
 # go build 只会把 CGO_CFLAGS/CGO_LDFLAGS 里**第一个** MSYS 形式（/d/git/...）
@@ -220,16 +223,33 @@ audio_setup() {
     fi
 }
 
+apm_setup() {
+    # $1 = 目标名；音频预处理（AEC/NS/AGC）是独立标签：库在同一个目录里，
+    # 有 opus 没 APM（或反过来）都允许（两者分别降级）
+    if codec_libs_ok "third_party/audio/$1" apm "$APM_LIBS" "build-audio-libs.sh"; then
+        # 头文件装在 include/webrtc-audio-processing-1/ 下（meson 的版本后缀），
+        # 源码里按 "modules/audio_processing/..." 引入，所以要再加这一层。
+        # ⚠️ C++ 源码（apm_bridge.cc）读的是 CGO_CXXFLAGS，**不是** CGO_CFLAGS，
+        # 两处都要给，否则 C 编译能找到头、C++ 编译找不到（实测踩过）。
+        export CGO_CFLAGS="$CGO_CFLAGS -I$ABS_ROOT/third_party/audio/$1/include -I$ABS_ROOT/third_party/audio/$1/include/webrtc-audio-processing-1"
+        export CGO_CXXFLAGS="$CGO_CXXFLAGS -I$ABS_ROOT/third_party/audio/$1/include -I$ABS_ROOT/third_party/audio/$1/include/webrtc-audio-processing-1"
+        APM_ON=1
+    fi
+}
+
 # 每个目标构建前重置标签与 CGO 路径，再分别探测视频与音频库
 codec_setup() {
     BUILD_TAGS=""
     VIDEO_ON=""
     AUDIO_ON=""
+    APM_ON=""
     CODEC_NOTES=""
     export CGO_CFLAGS=""
+    export CGO_CXXFLAGS=""
     export CGO_LDFLAGS=""
     video_setup "$1"
     audio_setup "$1"
+    apm_setup "$1"
     # 特性摘要（不列具体编码格式）：音频是基础（malgo 设备 + G.711，Opus 也是
     # 音频的一部分），视频与 Opus 由第三方静态库带来。四种组合直接写清楚，
     # 缺什么在这里标出，具体怎么补见后面的提示行。
@@ -242,6 +262,10 @@ codec_setup() {
     fi
     if [ -n "$VIDEO_ON" ] && [ -n "$AUDIO_ON" ]; then
         FEATURES="CGO+音频+视频"
+    fi
+    # 音频预处理（AEC/NS/AGC）单独标出：它是可独立降级的一项
+    if [ -n "$APM_ON" ]; then
+        FEATURES="$FEATURES+AEC"
     fi
 }
 

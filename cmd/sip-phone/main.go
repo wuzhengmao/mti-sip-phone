@@ -278,6 +278,8 @@ func main() {
 	if cfg.Audio.RingSpeakerID != "" {
 		audioMgr.SetRingSpeaker(cfg.Audio.RingSpeakerID)
 	}
+	// 音频预处理（REQ-MEDIA-007）：开关随通话流创建时生效
+	audioMgr.SetPreprocess(audio.Preprocess{AEC: cfg.Audio.AEC, NS: cfg.Audio.NS, AGC: cfg.Audio.AGC})
 	// 视频配置（REQ-VIDEO-002/005）：摄像头选择与采集参数在通话建立时生效
 	phone.SetVideoConfig(cfg.Video)
 	app.SetTel(tel)

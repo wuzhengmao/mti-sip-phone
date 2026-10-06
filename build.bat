@@ -73,6 +73,11 @@ rem cmd.exe mis-parses them as a command group and aborts with a syntax error.
 if not defined GCC32 goto :skip386
 set CGO_ENABLED=1
 set CC=%GCC32%
+rem Audio preprocessing's C++ bridge (internal/audio/apm_bridge.cc) needs a CXX
+rem of the SAME architecture as CC: Go's default is a bare "g++" which resolves
+rem to the x64 toolchain on PATH, so a 32-bit target would link with the wrong
+rem one. Derive it from CC by swapping the suffix.
+set "CXX=%GCC32:gcc.exe=g++.exe%"
 set GOOS=windows
 set GOARCH=386
 call :codec_setup windows-386
@@ -125,11 +130,14 @@ set "TAGS_ARG="
 set "BUILD_TAGS="
 set "VIDEO_ON="
 set "AUDIO_ON="
+set "APM_ON="
 set "FEATURES="
 set "CGO_CFLAGS="
+set "CGO_CXXFLAGS="
 set "CGO_LDFLAGS="
 call :video_setup %~1
 call :audio_setup %~1
+call :apm_setup %~1
 if defined BUILD_TAGS set "TAGS_ARG=-tags %BUILD_TAGS%"
 rem FEATURES: what this target really gets (no codec lists - audio is the
 rem base and Opus is part of audio; video and Opus come from their static
@@ -139,6 +147,33 @@ set "FEATURES=CGO, audio, no video, no opus"
 if defined VIDEO_ON set "FEATURES=CGO, audio, video, no opus"
 if defined AUDIO_ON set "FEATURES=CGO, audio, no video"
 if defined VIDEO_ON if defined AUDIO_ON set "FEATURES=CGO, audio, video"
+rem Audio preprocessing (AEC/NS/AGC, REQ-MEDIA-007) is listed separately:
+rem it degrades independently of Opus.
+if defined APM_ON set "FEATURES=%FEATURES%, AEC"
+goto :eof
+
+:apm_setup
+rem %~1 = target name (windows-amd64 / windows-386); sits in the same
+rem third_party\audio dir as opus but gets its own build tag.
+if not exist "third_party\audio\%~1\lib\libwebrtc-audio-processing-1.a" goto :apm_none
+if not exist "third_party\audio\%~1\lib\libwebrtc-audio-coding-1.a" goto :apm_none
+set "CGO_CFLAGS=%CGO_CFLAGS% -I%CD%\third_party\audio\%~1\include"
+rem headers live under include\webrtc-audio-processing-1 (meson version suffix)
+set "CGO_CFLAGS=%CGO_CFLAGS% -I%CD%\third_party\audio\%~1\include\webrtc-audio-processing-1"
+rem C++ sources (apm_bridge.cc) are compiled with CGO_CXXFLAGS, not CGO_CFLAGS
+set "CGO_CXXFLAGS=%CGO_CXXFLAGS% -I%CD%\third_party\audio\%~1\include"
+set "CGO_CXXFLAGS=%CGO_CXXFLAGS% -I%CD%\third_party\audio\%~1\include\webrtc-audio-processing-1"
+set "CGO_LDFLAGS=%CGO_LDFLAGS% -L%CD%\third_party\audio\%~1\lib"
+set "APM_ON=1"
+if not defined BUILD_TAGS goto :apm_first_tag
+set "BUILD_TAGS=%BUILD_TAGS%,apm"
+goto :eof
+:apm_first_tag
+set "BUILD_TAGS=apm"
+goto :eof
+:apm_none
+echo       hint: audio preprocessing (AEC/NS/AGC) not found under third_party\audio\%~1,
+echo             building without it - run scripts\build-audio-libs.bat once to enable it
 goto :eof
 
 :video_setup

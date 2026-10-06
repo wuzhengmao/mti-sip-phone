@@ -60,6 +60,17 @@ type AudioConfig struct {
 	MicID         string `json:"micId"`         // 麦克风设备 ID，空 = 系统默认
 	SpeakerID     string `json:"speakerId"`     // 扬声器设备 ID，空 = 系统默认
 	RingSpeakerID string `json:"ringSpeakerId"` // 振铃音专用扬声器 ID，空 = 系统默认
+
+	// —— 音频预处理（REQ-MEDIA-007，webrtc-audio-processing）——
+	// 三个开关都走"默认值由 Default() 给、Load 先取 Default 再反序列化覆盖"的
+	// 老路，所以旧配置缺字段时仍然拿到默认值。
+	//
+	// 默认：AEC（回声消除）与 NS（降噪）**开**——外放时的自激回声是软电话
+	// 最常见的投诉，降噪基本无损；AGC（自动增益）**关**：它会和 REQ-MEDIA-006
+	// 的手动麦克风增益"较劲"，先让用户按需开启。
+	AEC bool `json:"aec"` // 回声消除
+	NS  bool `json:"ns"`  // 降噪
+	AGC bool `json:"agc"` // 自动增益
 }
 
 // 摄像头禁用标志：CameraID 取该值时表示不使用摄像头。
@@ -216,6 +227,8 @@ func Default() *Config {
 			Level: "info",
 			File:  true,
 		},
+		// 音频预处理（REQ-MEDIA-007）：AEC/NS 默认开，AGC 默认关
+		Audio: AudioConfig{AEC: true, NS: true},
 		Video: VideoConfig{
 			Width:  640,
 			Height: 480,

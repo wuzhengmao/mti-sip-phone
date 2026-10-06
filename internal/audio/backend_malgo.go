@@ -32,6 +32,9 @@ type malgoBackend struct {
 	toneCh   int
 	tonePos  int
 	toneLoop bool
+	// 音频预处理实例（REQ-MEDIA-007）：随音频流创建/销毁；回调闭包捕获的是
+	// 副本，Stop 在设备 Uninit 之后才关它，不与回调线程并发访问。
+	prep preprocessor
 	// 设备复用与空闲关闭用（都只在 toneMu 下读写）：
 	toneRate  int         // 当前提示音设备的采样率（0 = 无设备）
 	toneDevID string      // 当前提示音设备的设备 ID（管理器传的原始字符串）
@@ -77,7 +80,7 @@ func (b *malgoBackend) Devices() ([]core.AudioDevice, []core.AudioDevice) {
 // **采样率取自引擎**（engine.SampleRate）：G.711 / Opus 通话是 8 kHz（20ms =
 // 160 样本，与历史行为一致），协商到 G.722 的通话是 16 kHz（20ms = 320 样本，
 // REQ-MEDIA-011）。编解码器换到不同速率时由 Manager 关流重开（见 restartStream）。
-func (b *malgoBackend) Start(micID, speakerID string, engine *media.Engine) error {
+func (b *malgoBackend) Start(micID, speakerID string, engine *media.Engine, pre Preprocess) error {
 	if b.device != nil {
 		b.Stop()
 	}
@@ -109,9 +112,11 @@ func (b *malgoBackend) Start(micID, speakerID string, engine *media.Engine) erro
 	// 回调帧数不保证等于 20ms（WASAPI 共享模式下由设备周期决定）：
 	// 媒体引擎的 FeedMic/ReadPlayback 均接受任意帧长，内部按编解码器
 	// 帧长（20ms=160 样本）累积/取用，避免帧长不匹配导致的数据错乱。
-	const maxCallbackFrames = 4096
 	playBuf := make([]int16, maxCallbackFrames)
 	micBuf := make([]int16, maxCallbackFrames)
+	// 音频预处理（REQ-MEDIA-007）：三项全关或本构建没有 APM 时是 nil，
+	// 下面的回调路径与历史行为一字不差。
+	prep := newPreprocessor(engineSampleRate(engine), pre)
 
 	onFrames := func(output, input []byte, frameCount uint32) {
 		diagStat(frameCount)
@@ -126,25 +131,40 @@ func (b *malgoBackend) Start(micID, speakerID string, engine *media.Engine) erro
 				binary.LittleEndian.PutUint16(output[i*2:], uint16(s))
 			}
 		}
-		// 采集：输入 PCM → 媒体引擎（内部累积成 20ms 帧发送）
+		// 采集：输入 PCM → （音频预处理）→ 媒体引擎（内部累积成 20ms 帧发送）
 		if len(input) >= n {
 			for i := range micBuf[:frameCount] {
 				micBuf[i] = int16(binary.LittleEndian.Uint16(input[i*2:]))
 			}
-			engine.FeedMic(micBuf[:frameCount])
+			micN := int(frameCount)
+			if prep != nil {
+				// 参考信号 = 本拍即将播放的样本（AEC 要用它消掉扬声器回声）；
+				// 返回值可能小于帧长——不足 10ms 的尾巴留在预处理器内部下一拍再补
+				micN = prep.Process(micBuf[:frameCount], playBuf[:frameCount])
+			}
+			if micN > 0 {
+				engine.FeedMic(micBuf[:micN])
+			}
 		}
 	}
 
 	callbacks := malgo.DeviceCallbacks{Data: onFrames}
 	device, err := malgo.InitDevice(b.ctx.Context, deviceConfig, callbacks)
 	if err != nil {
+		if prep != nil {
+			prep.Close()
+		}
 		return fmt.Errorf("初始化音频设备失败: %w", err)
 	}
 	if err := device.Start(); err != nil {
 		device.Uninit()
+		if prep != nil {
+			prep.Close()
+		}
 		return fmt.Errorf("启动音频设备失败: %w", err)
 	}
 	b.device = device
+	b.prep = prep
 	// 设备实际形态（排查音频问题的第一手线索）：内部采样率/格式与请求不一致
 	// 说明走了 miniaudio 的重采样路径，播放缓冲的消费速率可能受影响。
 	logx.Logger().Info("音频设备已打开",
@@ -163,8 +183,12 @@ func (b *malgoBackend) Stop() {
 	if b.device == nil {
 		return
 	}
-	b.device.Uninit()
+	b.device.Uninit() // 先停设备线程，回调不再进来
 	b.device = nil
+	if b.prep != nil {
+		b.prep.Close()
+		b.prep = nil
+	}
 }
 
 // PlayTone 播放提示音（独立 playback 设备；loop=true 循环）。

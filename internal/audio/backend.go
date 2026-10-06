@@ -6,7 +6,7 @@ import (
 )
 
 // engineSampleRate 音频设备要用的采样率：跟随引擎当前协商的编解码器
-//（G.711 / Opus 8 kHz，G.722 16 kHz，见 media.Codec.SampleRate）。
+// （G.711 / Opus 8 kHz，G.722 16 kHz，见 media.Codec.SampleRate）。
 // 只接受已知的两档，异常值回落到 8 kHz——宁可回到历史行为，也不要把设备
 // 开到一个谁也没验证过的速率上。
 func engineSampleRate(engine *media.Engine) int {
@@ -21,6 +21,10 @@ func engineSampleRate(engine *media.Engine) int {
 	}
 }
 
+// maxCallbackFrames 单次音频回调可能给出的最大帧数上限：播放/采集缓冲、
+// 以及音频预处理的分帧缓冲都按它预留（回调里不做任何分配）。
+const maxCallbackFrames = 4096
+
 // Backend 音频后端接口：设备枚举与全双工流管理。
 type Backend interface {
 	// Devices 枚举麦克风（capture）与扬声器（playback）设备。
@@ -29,7 +33,8 @@ type Backend interface {
 	//   - 采集：以 20ms 帧周期调用 engine.FeedMic
 	//   - 播放：以 20ms 帧周期调用 engine.ReadPlayback 获取数据
 	// micID / speakerID 为空表示使用系统默认设备；采样率取自 engine.SampleRate()。
-	Start(micID, speakerID string, engine *media.Engine) error
+	// pre 为音频预处理开关（REQ-MEDIA-007）：三项全关时后端不做任何额外处理。
+	Start(micID, speakerID string, engine *media.Engine, pre Preprocess) error
 	// Stop 停止音频流。
 	Stop()
 	// PlayTone 播放提示音：loop=true 循环播放（如振铃），否则播放一次。

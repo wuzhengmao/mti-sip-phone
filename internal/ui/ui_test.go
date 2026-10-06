@@ -588,3 +588,15 @@ func TestApplyVideoTransformsPersistsLocalOnly(t *testing.T) {
 		t.Fatalf("远端旋转原子量未更新：%d", a.remoteRot.Load())
 	}
 }
+
+// TestTooltipWidgetInterfaces 提示控件的接口契约：通信录/通话记录的名称备注
+// 靠 hoverNote 的悬停（大段删代码时容易把方法一起删掉，编译照样过、功能静默失效）。
+func TestTooltipWidgetInterfaces(t *testing.T) {
+	test.NewApp()
+	tip := newTooltipLayer()
+
+	var note any = newHoverNote("张三", 12, "备注", tip)
+	if _, ok := note.(desktop.Hoverable); !ok {
+		t.Error("hoverNote 必须实现 desktop.Hoverable（联系人备注靠悬停显示）")
+	}
+}
