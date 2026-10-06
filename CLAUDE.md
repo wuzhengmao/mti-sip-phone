@@ -105,7 +105,9 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
   `mti-sip-phone-<平台>-<架构>[.exe]`（**文件名不含版本号**，同一平台下载地址跨版本不变）、
   `release.json`（artifacts 显式声明 os/arch/kind/sha256/size）、`CHANGELOG.md`（从根
   changelog.md 抽取该版本段）、`SHA256SUMS`。站点按版本目录区分版本，文件名只要含平台/架构词。
-- Windows 上一键只能出 Windows 产物；Linux 产物要在 Linux 机器上跑 `build.sh` 后再发布。
+- **发布用的最终产物统一在 Linux 机器上跑 `build.sh` 交叉编译**（工具链齐全时一次产出全部
+  5 个平台：Windows x64/x86/ARM64 + Linux 本机与对侧架构，**不做 CI 矩阵**）；Windows 上的
+  `build.bat` 仅供本机开发自测（只能出 Windows 产物）。
   产物 mtime 早于本次构建开始的会被跳过（防止把上次的旧二进制当新版本发出去）。
 
 **交叉编译说明**：fyne 的 OpenGL 绑定依赖 CGO，需要**目标平台**的 gcc 工具链。
