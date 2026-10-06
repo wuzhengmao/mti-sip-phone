@@ -7,9 +7,13 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"mti-sip-phone/internal/config"
 	"mti-sip-phone/internal/core"
 )
 
@@ -389,7 +393,7 @@ func TestInstanceColumnShift(t *testing.T) {
 }
 
 // TestSRTPHintFitsWindow 媒体加密的说明文字必须塞得进固定 320 DIP 宽的主窗体
-//（用户实测过：一行太长的中文说明会把窗体撑开）。中文没有空格，整行会被当成
+// （用户实测过：一行太长的中文说明会把窗体撑开）。中文没有空格，整行会被当成
 // 一个"词"，光靠 TextWrapWord 折不开——所以**每一行都要短**，这里逐行卡住。
 func TestSRTPHintFitsWindow(t *testing.T) {
 	test.NewApp()
@@ -445,5 +449,142 @@ func TestDeclaredIPForm(t *testing.T) {
 	a.accIPSelect.SetText("example.com")
 	if got := a.declaredIPValue(); got != "" {
 		t.Fatalf("非法输入应取空，实际 %q", got)
+	}
+}
+
+// TestCallGripGeometry 通话面板顶部拖动条（REQ-UI-040）：细线要落在
+// "距顶 4px、高 2px、占面板宽度一半"的位置上，可抓取区域比细线高一截
+// （2px 太难点中），且不碰到第一行内容（内容从 y=14 才开始）。
+func TestCallGripGeometry(t *testing.T) {
+	test.NewApp()
+
+	g := newCallGrip(nil, nil)
+	m := g.MinSize()
+	if m.Width != callPanelWidth/2 {
+		t.Errorf("拖动条宽度应为面板的一半（%v），实际 %v", callPanelWidth/2, m.Width)
+	}
+	if m.Height != callGripHitH {
+		t.Errorf("可抓取区域高应为 %v，实际 %v", callGripHitH, m.Height)
+	}
+	if callGripHitH > 14 {
+		t.Errorf("可抓取区域（%v）不得伸进第一行内容（y=14 起）", callGripHitH)
+	}
+
+	// 细线在抓手区域内的位置与粗细
+	line := canvas.NewRectangle(theme.PrimaryColor())
+	callGripLineLayout{}.Layout([]fyne.CanvasObject{line}, m)
+	if line.Position().Y != callGripLineTop || line.Size().Height != callGripLineHeight {
+		t.Errorf("细线应距顶 %v 高 %v，实际 y=%v h=%v",
+			callGripLineTop, callGripLineHeight, line.Position().Y, line.Size().Height)
+	}
+	if line.Size().Width != m.Width {
+		t.Errorf("细线应占满抓手宽度 %v，实际 %v", m.Width, line.Size().Width)
+	}
+
+	// 定位层把它摆在顶部正中
+	callGripLayer{}.Layout([]fyne.CanvasObject{g}, fyne.NewSize(callPanelWidth, callPanelHeight))
+	wantX := (float32(callPanelWidth) - m.Width) / 2
+	if g.Position().X != wantX || g.Position().Y != 0 {
+		t.Errorf("拖动条应位于顶部居中 (%v,0)，实际 (%v,%v)", wantX, g.Position().X, g.Position().Y)
+	}
+}
+
+// TestCallGripDragCallbacks 拖动条只负责"开始一次 + 结束一次"：
+// Dragged 每帧都会被调（会话由 App 侧幂等守卫），DragEnd 收口。
+func TestCallGripDragCallbacks(t *testing.T) {
+	test.NewApp()
+	starts, ends := 0, 0
+	g := newCallGrip(func() { starts++ }, func() { ends++ })
+	g.Dragged(nil)
+	g.Dragged(nil)
+	g.DragEnd()
+	if starts != 2 || ends != 1 {
+		t.Fatalf("回调次数不对：start=%d end=%d", starts, ends)
+	}
+}
+
+// TestCallGripInterfaces 拖动条必须同时是 Draggable（能拖）与 Cursorable
+// （悬停变"可移动"光标），且**不能**是 Tappable/Hoverable——否则会抢走
+// 面板按钮的点击与名称备注的悬停。
+func TestCallGripInterfaces(t *testing.T) {
+	test.NewApp()
+	g := newCallGrip(nil, nil)
+	var obj fyne.CanvasObject = g
+	if _, ok := obj.(fyne.Draggable); !ok {
+		t.Error("拖动条必须实现 fyne.Draggable")
+	}
+	if _, ok := obj.(desktop.Cursorable); !ok {
+		t.Error("拖动条必须实现 desktop.Cursorable（悬停提示可拖动）")
+	}
+	if _, ok := obj.(fyne.Tappable); ok {
+		t.Error("拖动条不该实现 Tappable（会抢走面板按钮的点击）")
+	}
+	if _, ok := obj.(desktop.Hoverable); ok {
+		t.Error("拖动条不该实现 Hoverable（会抢走名称备注的悬停）")
+	}
+	if c := g.Cursor(); c == desktop.DefaultCursor {
+		t.Error("拖动条悬停时不该是默认箭头光标")
+	}
+}
+
+// TestMoveCursorImage 自定义"可移动"光标：热点在正中，图形有黑有白
+// （白描边保证深浅背景下都看得清）。
+func TestMoveCursorImage(t *testing.T) {
+	img, hx, hy := moveCursor{}.Image()
+	if img == nil {
+		t.Fatal("光标位图不能为空")
+	}
+	if hx != moveCursorHot || hy != moveCursorHot {
+		t.Errorf("热点应在正中 (%d,%d)，实际 (%d,%d)", moveCursorHot, moveCursorHot, hx, hy)
+	}
+	b := img.Bounds()
+	if b.Dx() != moveCursorSize || b.Dy() != moveCursorSize {
+		t.Errorf("光标位图应为 %d×%d，实际 %d×%d", moveCursorSize, moveCursorSize, b.Dx(), b.Dy())
+	}
+	var black, white int
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bb, a := img.At(x, y).RGBA()
+			if a == 0 {
+				continue
+			}
+			if r == 0 && g == 0 && bb == 0 {
+				black++
+			} else {
+				white++
+			}
+		}
+	}
+	if black == 0 || white == 0 {
+		t.Fatalf("光标位图应含黑色主体与白色描边，实际 black=%d white=%d", black, white)
+	}
+}
+
+// TestApplyVideoTransformsPersistsLocalOnly 本地回显的旋转/镜像落盘、
+// 远端的不落盘（REQ-VIDEO-015，用户明确要求不对称）。
+func TestApplyVideoTransformsPersistsLocalOnly(t *testing.T) {
+	test.NewApp()
+	a := &App{cfg: config.Default()}
+
+	a.applyVideoTransforms(core.VideoTransforms{
+		Remote: core.VideoTransform{Rotation: 90, Mirror: true},
+		Local:  core.VideoTransform{Rotation: 180, Mirror: true},
+	})
+	if a.cfg.UI.LocalPreviewRotation != 180 || !a.cfg.UI.LocalPreviewMirror {
+		t.Fatalf("本地回显的旋转/镜像应写入配置，实际 rot=%d mirror=%v",
+			a.cfg.UI.LocalPreviewRotation, a.cfg.UI.LocalPreviewMirror)
+	}
+
+	// 只改远端：配置里的本地值不该跟着变（远端不持久化）
+	a.applyVideoTransforms(core.VideoTransforms{
+		Remote: core.VideoTransform{Rotation: 270, Mirror: false},
+		Local:  core.VideoTransform{Rotation: 180, Mirror: true},
+	})
+	if a.cfg.UI.LocalPreviewRotation != 180 || !a.cfg.UI.LocalPreviewMirror {
+		t.Fatalf("远端变换不该影响配置里的本地值，实际 rot=%d mirror=%v",
+			a.cfg.UI.LocalPreviewRotation, a.cfg.UI.LocalPreviewMirror)
+	}
+	if a.remoteRot.Load() != 270 {
+		t.Fatalf("远端旋转原子量未更新：%d", a.remoteRot.Load())
 	}
 }

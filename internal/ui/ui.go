@@ -148,6 +148,10 @@ type App struct {
 	pulseStop      chan struct{}     // 振铃脉动动画停止通道
 	ringFlashRect  *canvas.Rectangle // 振铃边框闪烁描边（无边框窗口用，REQ-UI-025 修订）
 
+	// 窗口拖动（REQ-UI-040）：面板顶部的拖动条（抓手）
+	callGrip     *callGrip
+	callDragging bool // 本次拖动会话是否已开始（DragEnd 前不再重复 begin）
+
 	// 主窗口呼叫状态控件
 	keypadBtns []*widget.Button // 3×4 拨号键（空闲输入号码 / 通话中发 DTMF）
 
@@ -198,13 +202,13 @@ type App struct {
 	updShown           bool              // 提示窗当前是否显示（Fyne 无 Visible 查询）
 
 	// ---- 视频（REQ-VIDEO-*）----
-	callRow        *fyne.Container  // 主窗体「呼叫 + 视频呼叫」按钮行（视频按钮显隐要重排）
-	videoCallBtn   *compactButton   // 主窗体「视频呼叫」按钮（需求 3）
-	videoAnswerBtn *compactButton   // 来电弹窗「视频接听」按钮（需求 4）
-	videoBtn       *compactButton   // 通话面板「关闭视频」开关（需求 8）
-	videoCallCheck *widget.Check    // 设置页「启用视频通话」总开关（REQ-VIDEO-014）
-	camSelect      *widget.Select   // 设置页摄像头选择（需求 2）
-	camHint        *widget.Label    // 摄像头说明行（本构建不支持时改成提示文字）
+	callRow        *fyne.Container // 主窗体「呼叫 + 视频呼叫」按钮行（视频按钮显隐要重排）
+	videoCallBtn   *compactButton  // 主窗体「视频呼叫」按钮（需求 3）
+	videoAnswerBtn *compactButton  // 来电弹窗「视频接听」按钮（需求 4）
+	videoBtn       *compactButton  // 通话面板「关闭视频」开关（需求 8）
+	videoCallCheck *widget.Check   // 设置页「启用视频通话」总开关（REQ-VIDEO-014）
+	camSelect      *widget.Select  // 设置页摄像头选择（需求 2）
+	camHint        *widget.Label   // 摄像头说明行（本构建不支持时改成提示文字）
 	camIDs         map[string]string
 
 	videoW          fyne.Window   // 视频窗口（懒创建）
@@ -221,8 +225,14 @@ type App struct {
 	videoFullscreen bool
 	webVideoOn      bool // 有网页正在接收视频画面（REQ-VIDEO-009，此时不显示视频窗口）
 	ringbackOn      bool // 正在放本地回铃音（没有早期媒体时自己放，避免重复放）
-	videoTopmost    bool // 视频窗口是否被用户置顶（默认不置顶，手动开启）
+	videoTopmost    bool // 视频窗口是否被用户置顶（REQ-VIDEO-015：已持久化到配置）
 	videoShown      bool // 视频窗口当前是否显示（Fyne 无 Visible() 查询 API，只能自己记）
+
+	// 视频窗口的锁（REQ-VIDEO-015）：默认锁上（不能移动/改大小），点锁按钮
+	// 解锁后可拖动。**会话内记忆、不持久化**（用户确认）：通话结束/窗口隐藏
+	// 都不复位，程序重启回到默认「锁上」。
+	//（通话面板没有锁：顶部拖动条随时可拖，见 REQ-UI-040）
+	videoLocked bool
 
 	// 帧投递：媒体层 goroutine 写、主线程读（合并刷新，见 ui_video.go）
 	remoteFrame   atomic.Pointer[frameRef]
@@ -271,6 +281,19 @@ func New(c *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath strin
 		// 视频：默认开（会话内记忆，不持久化）
 		videoOn:   true,
 		previewOn: true,
+		// 视频窗口的锁：默认锁上（会话内记忆，不持久化，REQ-VIDEO-015）
+		videoLocked: true,
+	}
+	// 视频窗口置顶与本地回显的旋转/镜像从配置恢复（REQ-VIDEO-015）。
+	// 变换的权威状态在 core（桌面与网页共用）：这里播种，网页连上时
+	// system.state 里的 video 字段就与桌面一致；**远端**变换按用户要求
+	// 不持久化，显式归零。
+	if cfg != nil {
+		ui.videoTopmost = cfg.UI.VideoTopmost
+		c.SetVideoRotation(core.VideoChannelLocal, cfg.UI.LocalPreviewRotation)
+		c.SetVideoMirror(core.VideoChannelLocal, cfg.UI.LocalPreviewMirror)
+		c.SetVideoRotation(core.VideoChannelRemote, 0)
+		c.SetVideoMirror(core.VideoChannelRemote, false)
 	}
 	if desk, ok := ui.fyne.(desktop.App); ok {
 		ui.desk = desk
@@ -291,6 +314,12 @@ func (a *App) Run() {
 	a.buildMainWindow()
 	a.buildTray()
 	a.subscribeEvents()
+	// 视频窗口"用户挪动了"回调（REQ-VIDEO-015）：Windows 是窗口过程的
+	// WM_EXITSIZEMOVE、Linux 是守护 goroutine 的轮询，都可能不在主线程，
+	// 统一 fyne.Do 回主线程再写配置。
+	SetVideoWindowMoveHook(func(x, y int) {
+		fyne.Do(func() { a.onVideoWindowUserMoved(x, y) })
+	})
 	a.watchWSPortFocus() // WS 端口输入框失焦保存与重启提示
 	// 音频后端在后台初始化（音频服务不可达时可能耗时数十秒）：就绪后
 	// 刷新设置页的设备列表。回调在后台 goroutine，需 fyne.Do 回主线程。
@@ -1081,6 +1110,9 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		if a.callW != nil {
 			a.callW.Hide()
 		}
+		// 挂断/隐藏时拖动可能没等到 DragEnd（面板藏了就不再收指针事件）：
+		// 收掉拖动会话，免得窗口在后台被继续拖着走（REQ-UI-040）
+		cancelCallPanelDrag(a.callW)
 		if a.callTip != nil {
 			a.callTip.hide() // 面板藏了，提示不能留在屏幕上
 		}
@@ -1120,7 +1152,7 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		a.callStateLabel.SetText("呼叫中")
 		a.rebuildCallRows(dialingButtons)
 		showCallWindow(a.callW) // 平台函数：Windows 下不占任务栏（见 showWindowAsTool）
-		moveCallWindowToCorner(a.callW)
+		a.placeCallWindow()
 		a.startTimer()
 
 	case uiRinging:
@@ -1135,7 +1167,7 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		a.rebuildCallRows(ringingButtons)
 		showCallWindow(a.callW)
 		a.callW.RequestFocus()
-		moveCallWindowToCorner(a.callW)
+		a.placeCallWindow()
 		a.startTimer() // 振铃时长
 
 	case uiInCall:
@@ -1149,12 +1181,34 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		a.callStateLabel.SetText("通话中")
 		a.rebuildCallRows(incallButtons)
 		showCallWindow(a.callW)
-		moveCallWindowToCorner(a.callW)
+		a.placeCallWindow()
 		a.startTimer() // 通话时长从 0 开始
 	}
 	// 视频回显摆位随通话阶段变化（振铃期铺满窗口 / 接通后回右上角小窗），
 	// 每次状态切换都按新口径同步一次（用户要求）。
 	a.applyLocalVideoVisibility()
+}
+
+// placeCallWindow 摆通话面板（每次状态切换都调，REQ-UI-040）：
+//   - 用户**移动过**（配置里有位置）→ 移到保存的位置，默认摆放不再覆盖；
+//     保存的位置越界（拔屏/换分辨率）时记一条日志并回退默认；
+//   - 没移动过 → 沿用原来的"工作区右下角 + 多实例列偏移"。
+func (a *App) placeCallWindow() {
+	if a.callW == nil {
+		return
+	}
+	u := a.cfg.UI.CallPanel
+	if u.Moved {
+		scale := a.callW.Canvas().Scale()
+		w := int(callPanelWidth * scale)
+		h := int(callPanelHeight * scale)
+		if sx, sy, sw, sh := screenBounds(); windowPosUsable(u.X, u.Y, w, h, sx, sy, sw, sh) {
+			moveCallPanelToSaved(a.callW, u.X, u.Y)
+			return
+		}
+		logx.Logger().Info("通话面板保存的位置已不在屏幕上，回退默认摆放", "x", u.X, "y", u.Y)
+	}
+	moveCallWindowToCorner(a.callW)
 }
 
 // ---- 多实例（沙箱槽位）的窗口排布（REQ-NFR-007）----
@@ -1755,7 +1809,7 @@ func (a *App) bringMainToFront() {
 
 // saveAccount 保存账户配置并触发重新注册（REQ-ACC-011）。
 // srtpLabels 媒体加密策略的下拉显示名；与 srtpValues 一一对应
-//（顺序即下拉顺序，默认项在第二个）。
+// （顺序即下拉顺序，默认项在第二个）。
 var srtpLabels = []string{"关闭", "支持（默认）", "建议", "必要"}
 
 var srtpValues = []string{
@@ -1773,7 +1827,7 @@ const tlsNoteText = "SIPS 只加密信令"
 
 // srtpHint 媒体加密的说明文字。
 // 每档**一行、每行都短**：主窗体固定 320 DIP 宽，长行会把内容撑出可视区
-//（中文没有空格，整行会被当成一个"词"，靠折行也救不回来）。
+// （中文没有空格，整行会被当成一个"词"，靠折行也救不回来）。
 const srtpHint = "媒体加密（SRTP）：\n" +
 	"关闭 = 不加密\n" +
 	"支持 = 对端要求才配合（默认）\n" +

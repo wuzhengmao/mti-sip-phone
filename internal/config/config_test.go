@@ -142,14 +142,14 @@ func TestTransportNormalize(t *testing.T) {
 // 空值/非法值一律回退默认「支持」（旧配置没有该字段）。
 func TestSRTPNormalize(t *testing.T) {
 	cases := map[string]string{
-		"":          SRTPSupported,
-		"off":       SRTPOff,
-		"OFF":       SRTPOff,
+		"":           SRTPSupported,
+		"off":        SRTPOff,
+		"OFF":        SRTPOff,
 		" supported": SRTPSupported,
-		"preferred": SRTPPreferred,
-		" Required": SRTPRequired,
-		"yes":       SRTPSupported, // 非法值回退
-		"none":      SRTPSupported,
+		"preferred":  SRTPPreferred,
+		" Required":  SRTPRequired,
+		"yes":        SRTPSupported, // 非法值回退
+		"none":       SRTPSupported,
 	}
 	for in, want := range cases {
 		if got := NormalizeSRTP(in); got != want {
@@ -184,18 +184,95 @@ func TestDomainNormalize(t *testing.T) {
 // TestPublicIPNormalize 声明 IP 只接受 IP 字面量（SDP 的 c= 行必须写 IP）。
 func TestPublicIPNormalize(t *testing.T) {
 	cases := map[string]string{
-		"":                  "",
-		"  10.168.5.10  ":   "10.168.5.10",
-		"192.168.3.15":      "192.168.3.15",
-		"[::1]":             "::1",
-		"example.com":       "", // 域名不行（SDP 会非法）
-		"10.168.5.10:5060":  "",
-		"999.1.1.1":         "",
-		"sip:10.168.5.10":   "",
+		"":                 "",
+		"  10.168.5.10  ":  "10.168.5.10",
+		"192.168.3.15":     "192.168.3.15",
+		"[::1]":            "::1",
+		"example.com":      "", // 域名不行（SDP 会非法）
+		"10.168.5.10:5060": "",
+		"999.1.1.1":        "",
+		"sip:10.168.5.10":  "",
 	}
 	for in, want := range cases {
 		if got := NormalizePublicIP(in); got != want {
 			t.Errorf("NormalizePublicIP(%q) = %q，期望 %q", in, got, want)
 		}
+	}
+}
+
+// TestUIConfigWindowFieldsCompat 窗口位置记忆与视频窗口状态的兼容性
+// （REQ-UI-040 / REQ-VIDEO-015）：旧配置没有这些字段时全部落零——移动标志
+// false 表示"从没移动过，按默认位置摆放"，置顶 false，旋转 0；显式写入的
+// 值 Save→Load 往返保真（副屏的负坐标也要保住）。
+func TestUIConfigWindowFieldsCompat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	legacy := `{"version":1,"account":{"server":"10.0.0.1","account":"1001"}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("写测试配置失败: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if cfg.UI.CallPanel.Moved || cfg.UI.VideoWindow.Moved {
+		t.Fatal("旧配置缺字段时应视为「从未移动过」（Moved=false）")
+	}
+	if cfg.UI.VideoTopmost || cfg.UI.LocalPreviewRotation != 0 || cfg.UI.LocalPreviewMirror {
+		t.Fatal("旧配置缺字段时置顶应为 false、本地旋转/镜像应为零值")
+	}
+
+	cfg.UI.CallPanel = WindowPlacement{Moved: true, X: 1200, Y: 800}
+	cfg.UI.VideoWindow = WindowPlacement{Moved: true, X: -300, Y: 40} // 左侧副屏：负坐标
+	cfg.UI.VideoTopmost = true
+	cfg.UI.LocalPreviewRotation = 270
+	cfg.UI.LocalPreviewMirror = true
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("保存配置失败: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("重新加载失败: %v", err)
+	}
+	if got.UI.CallPanel != (WindowPlacement{Moved: true, X: 1200, Y: 800}) {
+		t.Errorf("通话面板位置往返不一致: %+v", got.UI.CallPanel)
+	}
+	if got.UI.VideoWindow != (WindowPlacement{Moved: true, X: -300, Y: 40}) {
+		t.Errorf("视频窗口位置往返不一致: %+v", got.UI.VideoWindow)
+	}
+	if !got.UI.VideoTopmost || got.UI.LocalPreviewRotation != 270 || !got.UI.LocalPreviewMirror {
+		t.Errorf("置顶/本地旋转镜像往返不一致: topmost=%v rot=%d mirror=%v",
+			got.UI.VideoTopmost, got.UI.LocalPreviewRotation, got.UI.LocalPreviewMirror)
+	}
+}
+
+// TestNormalizeVideoRotation 旋转角规范化：取 360 的模，非 90 的整倍数归 0
+// （手改配置写坏时不留半吊子角度）。
+func TestNormalizeVideoRotation(t *testing.T) {
+	cases := map[int]int{
+		0: 0, 90: 90, 180: 180, 270: 270,
+		360: 0, 450: 90, 720: 0,
+		-90: 270, -450: 270,
+		45: 0, 91: 0, 999: 0, -1: 0,
+	}
+	for in, want := range cases {
+		if got := NormalizeVideoRotation(in); got != want {
+			t.Errorf("NormalizeVideoRotation(%d) = %d，期望 %d", in, got, want)
+		}
+	}
+
+	// Load 也要规范化（旧配置/手改配置里的非法角度不该进内存）
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	legacy := `{"version":1,"account":{"server":"10.0.0.1","account":"1001"},"ui":{"localPreviewRotation":450}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("写测试配置失败: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if cfg.UI.LocalPreviewRotation != 90 {
+		t.Errorf("加载时未规范化旋转角: %d，期望 90", cfg.UI.LocalPreviewRotation)
 	}
 }

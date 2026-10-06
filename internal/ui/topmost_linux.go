@@ -261,6 +261,61 @@ static void sp_lock_size(Display *d, Window win, int w, int h) {
 	XResizeWindow(d, win, w, h);
 	XFlush(d);
 }
+
+// 解除尺寸锁定（清掉 sp_lock_size 设的 PMinSize/PMaxSize）。
+static void sp_unlock_size(Display *d, Window win) {
+	XSizeHints hints;
+	long supplied = 0;
+	memset(&hints, 0, sizeof(hints));
+	XGetWMNormalHints(d, win, &hints, &supplied);
+	hints.flags &= ~(PMinSize | PMaxSize);
+	XSetWMNormalHints(d, win, &hints);
+	XFlush(d);
+}
+
+// 屏幕绝对光标位置（根窗口坐标系）——拖动窗口用。窗口跟着光标移动时，
+// 相对坐标会自反馈，只有根坐标是稳的。
+static int sp_cursor(Display *d, int *x, int *y) {
+	Window root = DefaultRootWindow(d);
+	Window rr, child;
+	int rx, ry, wx, wy;
+	unsigned int mask;
+	if (!XQueryPointer(d, root, &rr, &child, &rx, &ry, &wx, &wy, &mask)) {
+		return 0;
+	}
+	*x = rx;
+	*y = ry;
+	return 1;
+}
+
+// 窗口左上角在根窗口坐标系里的位置。
+// **不要**用 XGetWindowAttributes 的 x/y：装饰窗口被 WM reparent 到 frame 里，
+// 那个 x/y 是相对父窗口（frame）的，读回来会差一条标题栏。
+static int sp_abs_pos(Display *d, Window win, int *x, int *y) {
+	Window root = DefaultRootWindow(d);
+	Window child;
+	int rx, ry;
+	if (!XTranslateCoordinates(d, win, root, 0, 0, &rx, &ry, &child)) {
+		return 0;
+	}
+	*x = rx;
+	*y = ry;
+	return 1;
+}
+
+// 一次取回窗口的绝对位置与尺寸（视频窗口守卫每拍要用）。
+static int sp_geometry_abs(Display *d, Window win, int *x, int *y, int *w, int *h) {
+	XWindowAttributes attr;
+	if (!XGetWindowAttributes(d, win, &attr)) {
+		return 0;
+	}
+	if (!sp_abs_pos(d, win, x, y)) {
+		return 0;
+	}
+	*w = attr.width;
+	*h = attr.height;
+	return 1;
+}
 */
 import "C"
 
@@ -365,6 +420,8 @@ func placeVideoWindow(w fyne.Window) {
 	if w == nil {
 		return
 	}
+	// 程序化摆放：位置守卫的静默期（不把它当成"用户拖动"，锁定期间也不回拉）
+	markVideoProgMove()
 	scale := w.Canvas().Scale()
 	go func() {
 		var handle uintptr
@@ -593,3 +650,442 @@ func setForegroundWindow(hwnd uintptr)   {}
 func forceForegroundWindow(hwnd uintptr) {}
 
 func ringBorderFlash(hwnd uintptr, stop <-chan struct{}) {}
+
+// ---------------------------------------------------------------------------
+// 窗口位置记忆与锁定（REQ-UI-040 / REQ-VIDEO-015）
+// ---------------------------------------------------------------------------
+//
+// 坐标空间：**像素、根窗口绝对坐标、窗口左上角**（XTranslateCoordinates 口径），
+// 读（sp_abs_pos）与写（sp_move / XMoveWindow）同一空间，往返自洽。
+//
+// 与 Windows 侧的两处结构性差异（X11 的固有限制，不是简化）：
+//   - 装饰窗口的移动/缩放由 WM 接管，客户端**拦不住**拖动：锁定只能"发现被
+//     移动就挪回"（位置）+ 尺寸提示 min=max（尺寸，WM 一般会直接拒绝）；
+//   - 取窗口句柄的 callPanelHandle 内部是 fyne.DoAndWait，**只能在后台
+//     goroutine 调用**（主线程调会 panic），所以拖动/守卫都跑在自己的 goroutine 里，
+//     各自持有一条 X 连接（本文件的前提：连接不跨 goroutine 共享）。
+
+var (
+	// videoLocked 视频窗口是否锁定（锁定时把被挪走的窗口拉回来）。
+	videoLocked atomic.Bool
+	// videoProgUntil 程序化摆放的"静默期"截止时间（unix 纳秒）：这段窗口期内
+	// 的位置变化算程序化摆放（恢复保存位置/默认摆放的多次延迟校正），
+	// 不算"用户拖动"，也不触发锁定回拉。
+	videoProgUntil atomic.Int64
+	// videoMoveHook 用户拖动结束回调（物理像素）。
+	videoMoveHookMu sync.Mutex
+	videoMoveHook   func(x, y int)
+)
+
+// markVideoProgMove 标记"接下来这一小段时间里的位置变化是程序化的"。
+// 静默期要盖住默认摆放的三次延迟校正（150/350/800ms，最后一拍约 1.3s 生效、
+// 守卫 250ms 一拍才看到），取 2s 留足余量。
+func markVideoProgMove() {
+	videoProgUntil.Store(time.Now().Add(2 * time.Second).UnixNano())
+}
+
+func videoProgRecent() bool { return time.Now().UnixNano() < videoProgUntil.Load() }
+
+// SetVideoWindowMoveHook 注册"用户拖动结束"回调（由视频窗口守卫 goroutine 触发）。
+func SetVideoWindowMoveHook(fn func(x, y int)) {
+	videoMoveHookMu.Lock()
+	videoMoveHook = fn
+	videoMoveHookMu.Unlock()
+}
+
+func fireVideoMoveHook(x, y int) {
+	videoMoveHookMu.Lock()
+	fn := videoMoveHook
+	videoMoveHookMu.Unlock()
+	if fn != nil {
+		fn(x, y) // 调用方（ui.go）自己用 fyne.Do 回主线程
+	}
+}
+
+// screenBounds 屏幕边界（物理像素）：X11 下 DisplayWidth/Height 是整屏
+// （多显示器为并集），原点 (0,0)。
+func screenBounds() (x, y, w, h int) {
+	d := C.sp_open_display()
+	if d == nil {
+		return 0, 0, 1280, 800
+	}
+	defer C.sp_close_display(d)
+	var ww, hh C.int
+	C.sp_screen(d, &ww, &hh)
+	if ww <= 0 || hh <= 0 {
+		return 0, 0, 1280, 800
+	}
+	return 0, 0, int(ww), int(hh)
+}
+
+// ---- 通话面板拖动会话（REQ-UI-040）----
+
+type callPanelDragSession struct {
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+	mu       sync.Mutex
+	posX     int
+	posY     int
+	posOK    bool
+}
+
+var (
+	callPanelDragMu  sync.Mutex
+	callPanelDragCur *callPanelDragSession
+)
+
+// beginCallPanelDrag 开始拖动：起一条会话 goroutine 以 ~60Hz 跟随光标移动窗口。
+// 主线程只做非阻塞的启动/停止（句柄解析要 DoAndWait，绝不能在这里同步做）。
+func beginCallPanelDrag(w fyne.Window) {
+	if w == nil {
+		return
+	}
+	cancelCallPanelDrag(w) // 幂等：重复触发时重锚
+	d := &callPanelDragSession{stop: make(chan struct{}), done: make(chan struct{})}
+	callPanelDragMu.Lock()
+	callPanelDragCur = d
+	callPanelDragMu.Unlock()
+	go d.run(w)
+}
+
+func (d *callPanelDragSession) run(w fyne.Window) {
+	defer close(d.done)
+
+	// 句柄：面板此刻必已显示，取不到就多试几次（首次 Show 的窗口异步创建）。
+	// 等待期间要能被打断——取消会话时调用方在等 done，别让它干等一整秒。
+	var handle uintptr
+	for i := 0; i < 20; i++ {
+		select {
+		case <-d.stop:
+			return
+		default:
+		}
+		if handle = callPanelHandle(w); handle != 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if handle == 0 {
+		logx.Logger().Debug("未取得通话面板 X11 句柄，跳过拖动")
+		return
+	}
+	disp := C.sp_open_display()
+	if disp == nil {
+		return
+	}
+	defer C.sp_close_display(disp)
+	win := C.Window(handle)
+
+	var winX, winY, curX, curY C.int
+	if C.sp_abs_pos(disp, win, &winX, &winY) == 0 || C.sp_cursor(disp, &curX, &curY) == 0 {
+		return
+	}
+	anchorWinX, anchorWinY := int(winX), int(winY)
+	anchorCurX, anchorCurY := int(curX), int(curY)
+
+	ticker := time.NewTicker(time.Second / 60)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.stop:
+			// 结束前读回最终位置（读不到就不落盘）
+			var fx, fy C.int
+			if C.sp_abs_pos(disp, win, &fx, &fy) != 0 {
+				d.mu.Lock()
+				d.posX, d.posY, d.posOK = int(fx), int(fy), true
+				d.mu.Unlock()
+			}
+			return
+		case <-ticker.C:
+			var cx, cy C.int
+			if C.sp_cursor(disp, &cx, &cy) == 0 {
+				continue
+			}
+			x, y := dragTarget(anchorWinX, anchorWinY, int(cx), int(cy), anchorCurX, anchorCurY)
+			C.sp_move(disp, win, C.int(x), C.int(y))
+		}
+	}
+}
+
+func stopCallPanelDrag() *callPanelDragSession {
+	callPanelDragMu.Lock()
+	d := callPanelDragCur
+	callPanelDragCur = nil
+	callPanelDragMu.Unlock()
+	if d == nil {
+		return nil
+	}
+	d.stopOnce.Do(func() { close(d.stop) })
+	return d
+}
+
+// endCallPanelDrag 结束拖动并读回最终位置（goroutine 里读的，带超时兜底）。
+func endCallPanelDrag(w fyne.Window) (x, y int, ok bool) {
+	d := stopCallPanelDrag()
+	if d == nil {
+		return 0, 0, false
+	}
+	select {
+	case <-d.done:
+	case <-time.After(500 * time.Millisecond): // 句柄重试最长 1s，超时就当没读到
+		return 0, 0, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.posX, d.posY, d.posOK
+}
+
+// cancelCallPanelDrag 丢弃拖动会话（窗口隐藏/挂断时兜底：DragEnd 可能不来）。
+func cancelCallPanelDrag(w fyne.Window) {
+	d := stopCallPanelDrag()
+	if d == nil {
+		return
+	}
+	select {
+	case <-d.done:
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// moveCallPanelToSaved 把通话面板移到保存的位置（异步重试 + 多次延迟校正）。
+func moveCallPanelToSaved(w fyne.Window, x, y int) {
+	if w == nil {
+		return
+	}
+	go func() {
+		var handle uintptr
+		for i := 0; i < 20; i++ {
+			if handle = callPanelHandle(w); handle != 0 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if handle == 0 {
+			logx.Logger().Warn("未取得通话面板 X11 句柄，跳过位置恢复")
+			return
+		}
+		disp := C.sp_open_display()
+		if disp == nil {
+			return
+		}
+		defer C.sp_close_display(disp)
+		win := C.Window(handle)
+		C.sp_move(disp, win, C.int(x), C.int(y))
+		for _, delay := range []time.Duration{150 * time.Millisecond, 350 * time.Millisecond, 800 * time.Millisecond} {
+			time.Sleep(delay)
+			C.sp_move(disp, win, C.int(x), C.int(y))
+		}
+	}()
+}
+
+// ---- 视频窗口位置与锁定（REQ-VIDEO-015）----
+
+// moveVideoWindowToSaved 把视频窗口移到保存的位置（异步重试 + 多次延迟校正）。
+func moveVideoWindowToSaved(w fyne.Window, x, y int) {
+	if w == nil {
+		return
+	}
+	markVideoProgMove()
+	go func() {
+		var handle uintptr
+		for i := 0; i < 20; i++ {
+			if handle = callPanelHandle(w); handle != 0 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if handle == 0 {
+			return
+		}
+		disp := C.sp_open_display()
+		if disp == nil {
+			return
+		}
+		defer C.sp_close_display(disp)
+		win := C.Window(handle)
+		C.sp_move(disp, win, C.int(x), C.int(y))
+		for _, delay := range []time.Duration{150 * time.Millisecond, 350 * time.Millisecond, 800 * time.Millisecond} {
+			time.Sleep(delay)
+			C.sp_move(disp, win, C.int(x), C.int(y))
+		}
+	}()
+}
+
+// setVideoWindowLock 切换视频窗口锁定：锁定时把 WM_NORMAL_HINTS 的 min/max
+// 钉在窗口当前尺寸（WM 一般会直接拒绝用户的缩放），位置由守卫 goroutine 回拉。
+// 句柄解析要 DoAndWait，所以只能扔给后台 goroutine。
+func setVideoWindowLock(w fyne.Window, locked bool) {
+	videoLocked.Store(locked)
+	if w == nil {
+		return
+	}
+	go func() {
+		var handle uintptr
+		for i := 0; i < 20; i++ {
+			if handle = callPanelHandle(w); handle != 0 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if handle == 0 {
+			return
+		}
+		disp := C.sp_open_display()
+		if disp == nil {
+			return
+		}
+		defer C.sp_close_display(disp)
+		win := C.Window(handle)
+		if locked {
+			var ww, hh C.int
+			if C.sp_geometry(disp, win, &ww, &hh) != 0 && ww > 0 && hh > 0 {
+				C.sp_lock_size(disp, win, ww, hh)
+			}
+			return
+		}
+		C.sp_unlock_size(disp, win)
+	}()
+}
+
+// ---- 视频窗口位置守卫（显示期间轮询）----
+
+type videoWatchSession struct {
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+}
+
+var (
+	videoWatchMu  sync.Mutex
+	videoWatchCur *videoWatchSession
+)
+
+// startVideoWindowWatch 窗口显示期间的位置守卫（幂等）：
+//   - 锁定：发现位置被改就挪回；尺寸由 WM_NORMAL_HINTS 钉住（这里兜底再钉一次）；
+//   - 解锁：把位置变化当作"用户拖动结束"上报（连续两拍稳定后回调一次），
+//     程序化摆放（恢复位置/默认摆放的延迟校正）靠静默期排除。
+func startVideoWindowWatch(w fyne.Window) {
+	if w == nil {
+		return
+	}
+	videoWatchMu.Lock()
+	if videoWatchCur != nil {
+		videoWatchMu.Unlock()
+		return
+	}
+	vw := &videoWatchSession{stop: make(chan struct{}), done: make(chan struct{})}
+	videoWatchCur = vw
+	videoWatchMu.Unlock()
+	go vw.run(w)
+}
+
+// stopVideoWindowWatch 窗口隐藏时停掉守卫。
+func stopVideoWindowWatch(w fyne.Window) {
+	videoWatchMu.Lock()
+	vw := videoWatchCur
+	videoWatchCur = nil
+	videoWatchMu.Unlock()
+	if vw == nil {
+		return
+	}
+	vw.stopOnce.Do(func() { close(vw.stop) })
+	select {
+	case <-vw.done:
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func (vw *videoWatchSession) run(w fyne.Window) {
+	defer close(vw.done)
+
+	var handle uintptr
+	for i := 0; i < 20; i++ {
+		if handle = callPanelHandle(w); handle != 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if handle == 0 {
+		logx.Logger().Debug("未取得视频窗口 X11 句柄，跳过位置守卫")
+		return
+	}
+	disp := C.sp_open_display()
+	if disp == nil {
+		return
+	}
+	defer C.sp_close_display(disp)
+	win := C.Window(handle)
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	var (
+		have          bool
+		lastX, lastY  int
+		lastW, lastH  int
+		lastLocked    bool
+		stableTicks   int
+		lastReportedX int
+		lastReportedY int
+	)
+	for {
+		select {
+		case <-vw.stop:
+			return
+		case <-ticker.C:
+			var x, y, ww, hh C.int
+			if C.sp_geometry_abs(disp, win, &x, &y, &ww, &hh) == 0 {
+				continue
+			}
+			cx, cy, cw, ch := int(x), int(y), int(ww), int(hh)
+			locked := videoLocked.Load()
+			if !have || locked != lastLocked {
+				// 首次取到 / 锁定状态刚变化：只重锚，不做任何判定
+				lastX, lastY, lastW, lastH, have = cx, cy, cw, ch, true
+				lastLocked = locked
+				stableTicks = 0
+				continue
+			}
+			if videoProgRecent() {
+				// 程序化摆放的延迟校正：只更新锚点
+				lastX, lastY, lastW, lastH = cx, cy, cw, ch
+				stableTicks = 0
+				continue
+			}
+			if locked {
+				if cx != lastX || cy != lastY {
+					C.sp_move(disp, win, C.int(lastX), C.int(lastY))
+					continue
+				}
+				if cw != lastW || ch != lastH {
+					// WM 本该按尺寸提示拒绝；这里兜底拉回并重新钉住
+					C.sp_lock_size(disp, win, C.int(lastW), C.int(lastH))
+				}
+				continue
+			}
+			// 解锁：位置变了要连续两拍稳定才算拖动结束（拖动中间不算）
+			if cx != lastX || cy != lastY {
+				if cx == lastReportedX && cy == lastReportedY {
+					stableTicks++
+				} else {
+					stableTicks = 0
+				}
+				lastReportedX, lastReportedY = cx, cy
+				if stableTicks >= 1 {
+					lastX, lastY = cx, cy
+					stableTicks = 0
+					fireVideoMoveHook(cx, cy)
+				}
+			} else {
+				stableTicks = 0
+			}
+			lastW, lastH = cw, ch
+		}
+	}
+}
+
+// suspendVideoWindowLockClamp / resumeVideoWindowLockClamp：X11 侧没有消息钳制
+// （锁定靠轮询回拉），全屏切换期间标记静默期即可。
+func suspendVideoWindowLockClamp() { markVideoProgMove() }
+func resumeVideoWindowLockClamp()  {}

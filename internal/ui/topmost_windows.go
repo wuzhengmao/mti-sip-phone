@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -14,6 +16,9 @@ import (
 
 	"mti-sip-phone/internal/logx"
 )
+
+// callWindowProc 转发消息给窗口的原过程（子类化用，见 videoWndProc）。
+var callWindowProc = syscall.NewLazyDLL("user32.dll").NewProc("CallWindowProcW")
 
 // screenWorkArea 屏幕工作区尺寸（**物理像素**）——需求 6 用它把视频窗口
 // 限制在屏幕的 1/2 以内；调用方按 Canvas().Scale() 换算成 DIP。
@@ -282,8 +287,11 @@ func placeVideoWindow(w fyne.Window) {
 			x := wr.left + (targetRight - vis.right)
 			y := wr.top + (targetBottom - vis.bottom)
 			const swpNoSize, swpNoZOrder, swpNoActivate = 0x0001, 0x0004, 0x0010
+			// 程序化移动：让"视频窗口锁定"的消息钳制放行（REQ-VIDEO-015）
+			videoProgMove.Store(true)
 			user32.NewProc("SetWindowPos").Call(h, 0, uintptr(x), uintptr(y), 0, 0,
 				swpNoSize|swpNoZOrder|swpNoActivate)
+			videoProgMove.Store(false)
 			logx.Logger().Debug("视频窗口已摆放",
 				"targetRight", targetRight, "targetBottom", targetBottom,
 				"vis", fmt.Sprintf("%dx%d@%d,%d", vis.right-vis.left, vis.bottom-vis.top, vis.left, vis.top),
@@ -437,13 +445,14 @@ const (
 	wsExToolWnd   = 0x00000080   // 工具窗口：不占任务栏
 )
 
-// exStyleProcs 返回读写扩展样式的两个导出。
+// longPtrProcs 返回读写窗口"长整数"属性的两个导出（扩展样式 GWL_EXSTYLE、
+// 窗口过程 GWLP_WNDPROC 等都用它）。
 //
 // ⚠️ 32 位 user32.dll 没有 GetWindowLongPtrW / SetWindowLongPtrW 导出，
 // LazyProc.Call 找不到过程会直接 panic（GUI 子系统无控制台，panic 毫无可见
 // 输出）；32 位下 LONG_PTR 与 LONG 同宽，回退到 GetWindowLongW / SetWindowLongW
 // 语义等价（同 CLAUDE.md「32 位 Win32 调用」条）。
-func exStyleProcs() (getLong, setLong *syscall.LazyProc) {
+func longPtrProcs() (getLong, setLong *syscall.LazyProc) {
 	user32 := syscall.NewLazyDLL("user32.dll")
 	getLong = user32.NewProc("GetWindowLongPtrW")
 	setLong = user32.NewProc("SetWindowLongPtrW")
@@ -460,7 +469,7 @@ func isToolWindow(hwnd uintptr) bool {
 	if hwnd == 0 {
 		return true
 	}
-	getLong, _ := exStyleProcs()
+	getLong, _ := longPtrProcs()
 	ex, _, _ := getLong.Call(hwnd, gwlExStyle)
 	return ex&wsExToolWnd != 0 && ex&wsExAppWindow == 0
 }
@@ -471,7 +480,7 @@ func setToolWindowStyle(hwnd uintptr) {
 	if hwnd == 0 {
 		return
 	}
-	getLong, setLong := exStyleProcs()
+	getLong, setLong := longPtrProcs()
 	ex, _, _ := getLong.Call(hwnd, gwlExStyle)
 	want := (ex | wsExToolWnd) &^ uintptr(wsExAppWindow)
 	if want == ex {
@@ -677,3 +686,409 @@ func findWindowByTitlePrefix(prefix string) uintptr {
 	enumWindows.Call(cb, 0)
 	return found
 }
+
+// ---------------------------------------------------------------------------
+// 窗口位置记忆与锁定（REQ-UI-040 / REQ-VIDEO-015）
+// ---------------------------------------------------------------------------
+//
+// 坐标空间：**物理像素、屏幕绝对坐标、窗口矩形左上角**（GetWindowRect 的
+// left/top）。读（GetWindowRect）与写（SetWindowPos）用同一空间，往返自洽；
+// 带标题栏的视频窗口含不可见的调整边框，别与 visibleRect 混用（那个只用于
+// 默认摆放时与通话面板对齐）。
+
+// winRectAt 读窗口矩形左上角（物理像素）。
+func winRectAt(hwnd uintptr) (x, y int, ok bool) {
+	if hwnd == 0 {
+		return 0, 0, false
+	}
+	var wr winRect
+	user32 := syscall.NewLazyDLL("user32.dll")
+	if r, _, _ := user32.NewProc("GetWindowRect").Call(hwnd, uintptr(unsafe.Pointer(&wr))); r == 0 {
+		return 0, 0, false
+	}
+	return int(wr.left), int(wr.top), true
+}
+
+// moveWindowXY 只移动窗口（不改尺寸、不改 z 序、不激活）。
+func moveWindowXY(hwnd uintptr, x, y int) {
+	if hwnd == 0 {
+		return
+	}
+	const (
+		swpNoSize     = 0x0001
+		swpNoZOrder   = 0x0004
+		swpNoActivate = 0x0010
+	)
+	user32 := syscall.NewLazyDLL("user32.dll")
+	user32.NewProc("SetWindowPos").Call(hwnd, 0, uintptr(x), uintptr(y), 0, 0,
+		swpNoSize|swpNoZOrder|swpNoActivate)
+}
+
+// cursorScreenPos 屏幕绝对光标位置（物理像素）。
+func cursorScreenPos() (x, y int, ok bool) {
+	var p struct{ x, y int32 }
+	user32 := syscall.NewLazyDLL("user32.dll")
+	if r, _, _ := user32.NewProc("GetCursorPos").Call(uintptr(unsafe.Pointer(&p))); r == 0 {
+		return 0, 0, false
+	}
+	return int(p.x), int(p.y), true
+}
+
+// screenBounds 整个虚拟桌面（多显示器）的边界（物理像素，原点可为负）。
+//
+// **不要用 SPI_GETWORKAREA 判越界**：它只覆盖主显示器，副屏上的窗口会被
+// 误判成"越界"而被拉回默认位置。
+func screenBounds() (x, y, w, h int) {
+	user32 := syscall.NewLazyDLL("user32.dll")
+	get := user32.NewProc("GetSystemMetrics")
+	if get.Find() != nil {
+		return 0, 0, 1280, 800
+	}
+	const (
+		smXVirtualScreen  = 76
+		smYVirtualScreen  = 77
+		smCxVirtualScreen = 78
+		smCyVirtualScreen = 79
+	)
+	xv, _, _ := get.Call(smXVirtualScreen)
+	yv, _, _ := get.Call(smYVirtualScreen)
+	cx, _, _ := get.Call(smCxVirtualScreen)
+	cy, _, _ := get.Call(smCyVirtualScreen)
+	if int32(cx) <= 0 || int32(cy) <= 0 {
+		// 指标异常：退化为工作区
+		ww, hh := screenWorkArea()
+		return 0, 0, int(ww), int(hh)
+	}
+	return int(int32(xv)), int(int32(yv)), int(int32(cx)), int(int32(cy))
+}
+
+// ---- 通话面板拖动会话（REQ-UI-040）----
+//
+// 拖动**不在 Fyne 的每条拖动事件里挪窗口**，而是 begin 时起一条会话 goroutine
+// 以 ~60Hz 读屏幕绝对光标跟随移动：主线程零负担（拖动中它还要跑动画/事件），
+// 且与 Linux 侧的实现对称（那边取窗口句柄必须离开主线程）。
+// 位置按锚点法算（见 ui_window_pos.go 的 dragTarget），窗口跟随光标不会有自反馈。
+
+type callPanelDragSession struct {
+	hwnd       uintptr
+	winX, winY int // 按下时的窗口左上角
+	curX, curY int // 按下时的屏幕光标
+	stop       chan struct{}
+	done       chan struct{}
+	stopOnce   sync.Once
+}
+
+var (
+	callPanelDragMu  sync.Mutex
+	callPanelDragCur *callPanelDragSession
+)
+
+// beginCallPanelDrag 开始拖动（幂等：已在拖则先收掉旧会话再按当前状态重锚）。
+func beginCallPanelDrag(w fyne.Window) {
+	if w == nil {
+		return
+	}
+	hwnd := findWindowByTitlePrefix(callWindowTitlePrefix)
+	if hwnd == 0 {
+		return
+	}
+	winX, winY, ok := winRectAt(hwnd)
+	if !ok {
+		return
+	}
+	curX, curY, ok := cursorScreenPos()
+	if !ok {
+		return
+	}
+	// 旧会话先收掉（拖动中重复触发时重锚，不会有两个 mover 抢同一个窗口）
+	cancelCallPanelDrag(w)
+
+	d := &callPanelDragSession{
+		hwnd: hwnd, winX: winX, winY: winY, curX: curX, curY: curY,
+		stop: make(chan struct{}), done: make(chan struct{}),
+	}
+	callPanelDragMu.Lock()
+	callPanelDragCur = d
+	callPanelDragMu.Unlock()
+	go d.run()
+}
+
+func (d *callPanelDragSession) run() {
+	defer close(d.done)
+	ticker := time.NewTicker(time.Second / 60)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.stop:
+			return
+		case <-ticker.C:
+			cx, cy, ok := cursorScreenPos()
+			if !ok {
+				continue
+			}
+			x, y := dragTarget(d.winX, d.winY, cx, cy, d.curX, d.curY)
+			moveWindowXY(d.hwnd, x, y)
+		}
+	}
+}
+
+// stopCallPanelDrag 收掉当前会话（keep=false 时丢弃，不读回位置）。
+func stopCallPanelDrag() *callPanelDragSession {
+	callPanelDragMu.Lock()
+	d := callPanelDragCur
+	callPanelDragCur = nil
+	callPanelDragMu.Unlock()
+	if d == nil {
+		return nil
+	}
+	d.stopOnce.Do(func() { close(d.stop) })
+	return d
+}
+
+// endCallPanelDrag 结束拖动并读回窗口左上角（物理像素）。
+func endCallPanelDrag(w fyne.Window) (x, y int, ok bool) {
+	d := stopCallPanelDrag()
+	if d == nil {
+		return 0, 0, false
+	}
+	select {
+	case <-d.done:
+	case <-time.After(200 * time.Millisecond): // mover 顶多在处理一帧，正常瞬时返回
+	}
+	return winRectAt(d.hwnd)
+}
+
+// cancelCallPanelDrag 丢弃拖动会话（窗口隐藏/挂断时兜底：DragEnd 可能不来）。
+func cancelCallPanelDrag(w fyne.Window) {
+	d := stopCallPanelDrag()
+	if d == nil {
+		return
+	}
+	select {
+	case <-d.done:
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// moveCallPanelToSaved 把通话面板移到保存的位置：句柄异步重试 + 多次延迟校正，
+// 节奏与 moveWindowToCorner 一致（Fyne/GLFW 可能在 Show 之后再应用一次位置）。
+func moveCallPanelToSaved(w fyne.Window, x, y int) {
+	if w == nil {
+		return
+	}
+	go func() {
+		moved := false
+		for i := 0; i < 40; i++ {
+			if h := findWindowByTitlePrefix(callWindowTitlePrefix); h != 0 {
+				moved = true
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !moved {
+			logx.Logger().Warn("未找到通话面板句柄，跳过位置恢复")
+			return
+		}
+		place := func() {
+			if h := findWindowByTitlePrefix(callWindowTitlePrefix); h != 0 {
+				moveWindowXY(h, x, y)
+			}
+		}
+		place()
+		for _, delay := range []time.Duration{150 * time.Millisecond, 350 * time.Millisecond, 800 * time.Millisecond} {
+			time.Sleep(delay)
+			place()
+		}
+	}()
+}
+
+// ---- 视频窗口位置与锁定（REQ-VIDEO-015）----
+
+// moveVideoWindowToSaved 把视频窗口移到保存的位置（节奏同上，句柄等待更短）。
+func moveVideoWindowToSaved(w fyne.Window, x, y int) {
+	if w == nil {
+		return
+	}
+	go func() {
+		for i := 0; i < 20; i++ {
+			if findWindowByTitlePrefix(videoWindowTitlePrefix) != 0 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		place := func() {
+			h := findWindowByTitlePrefix(videoWindowTitlePrefix)
+			if h == 0 {
+				return
+			}
+			videoProgMove.Store(true)
+			moveWindowXY(h, x, y)
+			videoProgMove.Store(false)
+		}
+		place()
+		for _, delay := range []time.Duration{150 * time.Millisecond, 350 * time.Millisecond, 800 * time.Millisecond} {
+			time.Sleep(delay)
+			if findWindowByTitlePrefix(videoWindowTitlePrefix) == 0 {
+				return
+			}
+			place()
+		}
+	}()
+}
+
+var (
+	// videoLocked 视频窗口是否锁定（锁定时不允许移动与改大小）。
+	videoLocked atomic.Bool
+	// videoProgMove 程序化移动进行中：锁定钳制在此期间放行（我们自己的摆放、
+	// 全屏切换都走它），否则会把自己的移动也挡回去。
+	videoProgMove atomic.Bool
+	// videoMoveHook 用户拖动/缩放结束的回调（物理像素坐标）。
+	videoMoveHookMu sync.Mutex
+	videoMoveHook   func(x, y int)
+	// videoWndProcCB 子类化用的窗口过程回调（必须包级存活，否则会被 GC）。
+	videoWndProcCB  uintptr
+	videoOldProc    uintptr
+	videoHookedHwnd uintptr
+)
+
+// SetVideoWindowMoveHook 注册"用户拖动/缩放结束"回调（由 showVideoWindow 之后的
+// startVideoWindowWatch 与 Windows 的 WM_EXITSIZEMOVE 触发）。回调可能来自任意
+// 线程，调用方自行用 fyne.Do 回主线程。
+func SetVideoWindowMoveHook(fn func(x, y int)) {
+	videoMoveHookMu.Lock()
+	videoMoveHook = fn
+	videoMoveHookMu.Unlock()
+}
+
+func fireVideoMoveHook(x, y int) {
+	videoMoveHookMu.Lock()
+	fn := videoMoveHook
+	videoMoveHookMu.Unlock()
+	if fn != nil {
+		fn(x, y)
+	}
+}
+
+// setVideoWindowLock 切换视频窗口锁定：锁定时禁止移动与边框改大小
+// （关闭/最小化照常），并安装窗口过程钩子。
+func setVideoWindowLock(w fyne.Window, locked bool) {
+	videoLocked.Store(locked)
+	if hwnd := findWindowByTitlePrefix(videoWindowTitlePrefix); hwnd != 0 {
+		installVideoWindowProc(hwnd)
+	}
+}
+
+// installVideoWindowProc 给视频窗口装窗口过程钩子（幂等）。
+//
+// 这是**唯一**能拦住"用户从标题栏拖动/从边框改大小"的地方：GLFW 的窗口样式
+// 不能动（改了会让它的边框缓存失准，CLAUDE.md 有历史教训），所以在消息层面拦。
+func installVideoWindowProc(hwnd uintptr) {
+	if videoWndProcCB == 0 {
+		videoWndProcCB = syscall.NewCallback(videoWndProc)
+	}
+	if videoHookedHwnd == hwnd {
+		return
+	}
+	const gwlpWndProc = ^uintptr(3) // GWLP_WNDPROC = -4
+	getLong, setLong := longPtrProcs()
+	old, _, _ := getLong.Call(hwnd, gwlpWndProc)
+	if old == 0 || old == videoWndProcCB {
+		return
+	}
+	videoOldProc = old
+	setLong.Call(hwnd, gwlpWndProc, videoWndProcCB)
+	videoHookedHwnd = hwnd
+	logx.Logger().Debug("视频窗口过程钩子已安装", "hwnd", hwnd)
+}
+
+// videoWndProc 视频窗口的窗口过程：锁定时拦移动/缩放相关的消息，其余一律转给
+// 原过程（**只拦消息，不碰窗口样式与几何**）。
+func videoWndProc(hwnd uintptr, msg uint32, wparam uintptr, lparam unsafe.Pointer) uintptr {
+	const (
+		wmNCHitTest         = 0x0084
+		wmNCLButtonDown     = 0x00A1
+		wmNCLButtonDblClk   = 0x00A3
+		wmSysCommand        = 0x0112
+		wmWindowPosChanging = 0x0046
+		wmExitSizeMove      = 0x0232
+
+		htCaption                                         = 2
+		htBorder                                          = 18
+		htLeft                                            = 10
+		htRight                                           = 11
+		htTop                                             = 12
+		htTopLeft                                         = 13
+		htTopRight, htBottom, htBottomLeft, htBottomRight = 14, 15, 16, 17
+
+		scSize     = 0xF000
+		scMove     = 0xF010
+		scMaximize = 0xF030
+
+		swpNoMove       = 0x0002
+		swpFrameChanged = 0x0020
+	)
+	locked := videoLocked.Load()
+	isResizeHit := func(ht int32) bool {
+		return ht >= htLeft && ht <= htBottomRight && ht != htCaption
+	}
+
+	switch msg {
+	case wmNCLButtonDown, wmNCLButtonDblClk:
+		// 标题栏按下（拖标题栏 / 双击最大化）与边框按下（改大小）：锁定即吞掉
+		if locked {
+			if ht := int32(wparam); ht == htCaption || (ht >= htLeft && ht <= htBottomRight) {
+				return 0
+			}
+		}
+	case wmNCHitTest:
+		// 锁定时把边框命中降级为 HTBORDER：不给"能改大小"的误导性光标
+		if locked {
+			hr, _, _ := callWindowProc.Call(videoOldProc, hwnd, uintptr(msg), wparam, uintptr(lparam))
+			if isResizeHit(int32(hr)) {
+				return htBorder
+			}
+			return hr
+		}
+	case wmSysCommand:
+		// 系统菜单/键盘/贴靠：SC_MOVE / SC_SIZE / SC_MAXIMIZE 一律拦掉，
+		// SC_CLOSE 与 SC_MINIMIZE 不拦（关闭与最小化照常可用）
+		if locked {
+			switch wparam & 0xFFF0 {
+			case scMove, scSize, scMaximize:
+				return 0
+			}
+		}
+	case wmWindowPosChanging:
+		// 兜底钳制：Win+方向键、Win11 贴靠这些由外壳直接 SetWindowPos 的路径
+		// 走不到上面的消息。锁定且非程序化移动时把位置回填成旧值；带
+		// SWP_FRAMECHANGED 的是全屏/换显示器这类系统性变更，放行。
+		if locked && !videoProgMove.Load() {
+			wp := (*windowPos)(lparam)
+			if wp.flags&swpNoMove == 0 && wp.flags&swpFrameChanged == 0 {
+				if x, y, ok := winRectAt(hwnd); ok && (int(wp.x) != x || int(wp.y) != y) {
+					wp.x, wp.y = int32(x), int32(y)
+				}
+			}
+		}
+	case wmExitSizeMove:
+		// 只由**交互式**移动/缩放产生（程序化 SetWindowPos 不会触发）：
+		// 这是"用户把窗口挪到哪了"的准确时机，记下来落盘
+		if !locked {
+			if x, y, ok := winRectAt(hwnd); ok {
+				fireVideoMoveHook(x, y)
+			}
+		}
+	}
+	r, _, _ := callWindowProc.Call(videoOldProc, hwnd, uintptr(msg), wparam, uintptr(lparam))
+	return r
+}
+
+// startVideoWindowWatch / stopVideoWindowWatch：Windows 侧靠 WM_EXITSIZEMOVE
+// 事件，不需要轮询（保留同名函数只为与 Linux 侧实现对称）。
+func startVideoWindowWatch(w fyne.Window) {}
+func stopVideoWindowWatch(w fyne.Window)  {}
+
+// suspendVideoWindowLockClamp / resumeVideoWindowLockClamp 让锁定钳制临时放行
+// （全屏切换这类由 GLFW 直接 SetWindowPos 的操作要用）。
+func suspendVideoWindowLockClamp() { videoProgMove.Store(true) }
+func resumeVideoWindowLockClamp()  { videoProgMove.Store(false) }

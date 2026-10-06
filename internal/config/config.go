@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -91,10 +92,47 @@ func (v VideoConfig) Enabled() bool { return !v.Disabled }
 // CameraUsable 摄像头是否可用（总开关启用且未被禁用）。
 func (v VideoConfig) CameraUsable() bool { return v.Enabled() && v.CameraID != CameraDisabled }
 
+// WindowPlacement 窗口位置记忆（物理像素 = 窗口矩形左上角）。
+//
+// Moved=false 表示用户**从未移动过**该窗口，位置一律由程序按默认口径摆放
+// （通话面板：工作区右下角 + 多实例列偏移；视频窗口：通话面板正上方、右边缘对齐），
+// 此时 X/Y 无意义。用户拖动过一次之后默认摆放不再覆盖，改用这里记下的位置
+// （重启后依然生效）。保存值越界（显示器拔掉/分辨率变化）时摆放会回退默认，
+// 但**不清掉**配置值，屏幕回来还能用。
+type WindowPlacement struct {
+	Moved bool `json:"moved,omitempty"`
+	X     int  `json:"x,omitempty"`
+	Y     int  `json:"y,omitempty"`
+}
+
 // UIConfig 界面配置。
 type UIConfig struct {
 	IncomingAlwaysOnTop bool `json:"incomingAlwaysOnTop"` // 来电窗口置顶
 	CallAlwaysOnTop     bool `json:"callAlwaysOnTop"`     // 通话面板置顶
+
+	// 通话面板 / 视频窗口的位置记忆（REQ-UI-040 / REQ-VIDEO-015）。
+	CallPanel   WindowPlacement `json:"callPanel,omitempty"`
+	VideoWindow WindowPlacement `json:"videoWindow,omitempty"`
+
+	// VideoTopmost 视频窗口置顶（REQ-VIDEO-015）：原为「会话内记忆」，
+	// 现在随窗口位置一并持久化（默认 false = 不置顶）。
+	VideoTopmost bool `json:"videoTopmost,omitempty"`
+
+	// LocalPreviewRotation / LocalPreviewMirror 本地回显的旋转（0/90/180/270）与
+	// 水平镜像（REQ-VIDEO-015）。**只记本地回显**——远端画面的旋转/镜像按用户
+	// 要求仍是会话内状态，不落盘（每次启动归零）。
+	LocalPreviewRotation int  `json:"localPreviewRotation,omitempty"`
+	LocalPreviewMirror   bool `json:"localPreviewMirror,omitempty"`
+}
+
+// NormalizeVideoRotation 规范化画面旋转角：先取 360 的模，非 90 的整倍数归 0
+// （手改配置写坏时不留半吊子角度）。与 core.SetVideoRotation 的口径一致。
+func NormalizeVideoRotation(deg int) int {
+	deg = ((deg % 360) + 360) % 360
+	if deg%90 != 0 {
+		return 0
+	}
+	return deg
 }
 
 // 更新检查周期的取值范围（分钟）：1 分钟 ~ 24 小时。
@@ -205,7 +243,7 @@ const (
 )
 
 // NormalizeTransport 规范化传输协议字符串：统一小写；空值或非法值回退 udp
-//（旧配置没有 tls 字段，零值行为与从前一致）。配置文件、界面下拉、sip:// / sips://
+// （旧配置没有 tls 字段，零值行为与从前一致）。配置文件、界面下拉、sip:// / sips://
 // 链接解析三处共用这一份判定。
 func NormalizeTransport(t string) string {
 	switch strings.ToLower(strings.TrimSpace(t)) {
@@ -366,13 +404,28 @@ func Load(path string) (*Config, error) {
 	if cfg.Video.BitrateKbps <= 0 || cfg.Video.BitrateKbps == 512 {
 		cfg.Video.BitrateKbps = 1024
 	}
+	// 窗口位置记忆：旋转角规范化（0/90/180/270），Moved/坐标零值即默认。
+	cfg.UI.LocalPreviewRotation = NormalizeVideoRotation(cfg.UI.LocalPreviewRotation)
 	return cfg, nil
 }
 
 // Save 保存配置到磁盘（原子写入，密码加密后落盘）。
 func (c *Config) Save(path string) error { return save(c, path) }
 
+// saveMu 串行化落盘。
+//
+// 写盘本身已经是"临时文件 + rename"的原子写，但**临时文件名固定**
+// （path + ".tmp"）且整个过程没有锁：两个 goroutine 并发保存时，会出现
+// "A 把 tmp rename 走、B 的 fd 继续往同一个 inode 写"——落盘内容成了两份
+// 配置拼起来的半截 JSON。写点本来就多（设置页、WS 侧、参数转发、拨号历史），
+// 窗口拖动结束/画面变换又新增了两个，加一把锁最省心（写盘是低频快操作，
+// 串行化的代价可忽略）。
+var saveMu sync.Mutex
+
 func save(c *Config, path string) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	// 密码加密：仅内存明文参与序列化前加密
 	if c.Account.Password != "" {
 		enc, err := encryptPassword(c.Account.Password)

@@ -11,6 +11,7 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 
+	"mti-sip-phone/internal/config"
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
 )
@@ -109,10 +110,11 @@ func (l previewLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 		place(l.s.toggleBtn, bx, previewBtnGap)
 		place(l.s.mirrorLocalBtn, bx-step, previewBtnGap)
 		place(l.s.rotateLocalBtn, bx-2*step, previewBtnGap)
-		// 左上角：从左往右 = 远端旋转、远端镜像、窗口置顶
+		// 左上角：从左往右 = 远端旋转、远端镜像、窗口置顶、窗口锁
 		place(l.s.rotateRemoteBtn, previewBtnGap, previewBtnGap)
 		place(l.s.mirrorRemoteBtn, previewBtnGap+step, previewBtnGap)
 		place(l.s.pinBtn, previewBtnGap+2*step, previewBtnGap)
+		place(l.s.lockBtn, previewBtnGap+3*step, previewBtnGap)
 	}
 }
 
@@ -132,6 +134,7 @@ type videoSurface struct {
 	rotateLocalBtn  *compactButton
 	mirrorLocalBtn  *compactButton
 	pinBtn          *compactButton
+	lockBtn         *compactButton // 窗口锁（REQ-VIDEO-015）：默认锁上，不能移动/改大小
 	onDoubleTap     func()
 
 	// localW/localH 本地回显帧的尺寸（**已含旋转**），供 previewLayout 排回显区
@@ -175,6 +178,8 @@ func newVideoSurface(onDoubleTap func()) *videoSurface {
 	s.mirrorLocalBtn = newCompactButton(IconMirror, colorTransformGray, videoToggleButtonSize, nil)
 	// 窗口置顶开关（用户要求）：作用对象是窗口本身，放在左上角最右
 	s.pinBtn = newCompactButton(IconPin, colorTransformGray, videoToggleButtonSize, nil)
+	// 窗口锁（REQ-VIDEO-015）：默认锁上（不能移动、不能改大小），与置顶同在左上角
+	s.lockBtn = newCompactButton(IconLockClosed, colorHoldBlue, videoToggleButtonSize, nil)
 	s.ExtendBaseWidget(s)
 	return s
 }
@@ -185,7 +190,7 @@ var colorPreviewBorder = colorSuccessGreen
 func (s *videoSurface) CreateRenderer() fyne.WidgetRenderer {
 	overlay := container.New(previewLayout{s: s},
 		s.local, s.border, s.toggleBtn,
-		s.rotateRemoteBtn, s.mirrorRemoteBtn, s.rotateLocalBtn, s.mirrorLocalBtn, s.pinBtn)
+		s.rotateRemoteBtn, s.mirrorRemoteBtn, s.rotateLocalBtn, s.mirrorLocalBtn, s.pinBtn, s.lockBtn)
 	return widget.NewSimpleRenderer(container.NewStack(s.remote, overlay))
 }
 
@@ -222,6 +227,7 @@ func (a *App) ensureVideoWindow() {
 	a.videoSurface.rotateLocalBtn.onTap = a.rotateVideoLocal
 	a.videoSurface.mirrorLocalBtn.onTap = a.mirrorVideoLocal
 	a.videoSurface.pinBtn.onTap = a.toggleVideoTopmost
+	a.videoSurface.lockBtn.onTap = a.toggleVideoLock
 	a.applyVideoTransforms(a.core.VideoTransforms()) // 初始状态取自共享状态
 	w.SetContent(a.videoSurface)
 	w.SetPadded(false)
@@ -233,6 +239,11 @@ func (a *App) ensureVideoWindow() {
 	w.SetCloseIntercept(func() { a.setVideoEnabled(false) })
 	// 刻意**不置顶**（用户要求）：视频窗口要能和别的窗口正常叠放，
 	// 且它摆在通话面板上方不与之重叠，不需要靠置顶保证可见。
+	//（置顶是用户手动开的开关，状态持久化；见 REQ-VIDEO-013 / REQ-VIDEO-015）
+
+	// 置顶与锁的初始外观（两者都可能来自配置/默认锁上，按钮底色要跟上）
+	a.applyVideoTopmost()
+	a.applyVideoLock()
 }
 
 // videoDefaultW/H 视频窗口默认尺寸（拿到对端分辨率后按比例调整）。
@@ -290,13 +301,18 @@ func (a *App) showVideoWindow() {
 	if !wasShown {
 		raiseVideoWindow(a.videoW, a.videoTopmost)
 	}
-	// 摆在通话面板正上方、右边缘对齐（保留标题栏，可拖动）。
-	// 只移动不改尺寸；首帧到达后 applyVideoSize 会带尺寸再摆一次。
-	placeVideoWindow(a.videoW)
+	// 位置（REQ-VIDEO-015）：用户移动过 → 回到保存的位置；没移动过 →
+	// 原有的"通话面板正上方、右边缘对齐"（只移动不改尺寸，首帧到达后
+	// applyVideoSize 会带尺寸再摆一次）。
+	a.placeVideoWindowAtSaved()
 	// 用户此前开了置顶：窗口重新显示后再施加一次（Show 可能重置窗口管理器状态）
 	if a.videoTopmost {
 		setVideoWindowTopmost(a.videoW, true)
 	}
+	// 锁（REQ-VIDEO-015）：Show 之后句柄才存在，这里施加一次（默认锁上）；
+	// 并启动位置守卫（Linux 靠轮询，Windows 靠窗口过程事件）
+	setVideoWindowLock(a.videoW, a.videoLocked)
+	startVideoWindowWatch(a.videoW)
 }
 
 // syncVideoWindow 按「当前有没有内容」决定窗口显隐（各处状态变化后统一调用）。
@@ -324,6 +340,7 @@ func (a *App) hideVideoWindow() {
 	if a.videoFullscreen {
 		a.setVideoFullscreen(false)
 	}
+	stopVideoWindowWatch(a.videoW) // 位置守卫只在显示期间跑（REQ-VIDEO-015）
 	a.videoW.Hide()
 	a.videoShown = false
 	a.videoSurface.remote.Hide()
@@ -435,7 +452,11 @@ func (a *App) setVideoFullscreen(on bool) {
 	if a.videoW == nil {
 		return
 	}
+	// 全屏由 GLFW 直接 SetWindowPos 完成（移动+改尺寸）：锁定期间要让"锁定钳制"
+	// 放行，否则会被当成用户移动而被挡回去（REQ-VIDEO-015）
+	suspendVideoWindowLockClamp()
 	a.videoW.SetFullScreen(on)
+	resumeVideoWindowLockClamp()
 	a.videoFullscreen = on
 	logx.Logger().Info("视频窗口全屏切换", "fullscreen", on)
 }
@@ -448,7 +469,7 @@ const (
 )
 
 // 窗口客户区的可用性下限（DIP）：只有拿不到有效分辨率时的兜底尺寸
-//（正常路径下窗口恒被放到 640 那一侧，见 videoFitSize）。
+// （正常路径下窗口恒被放到 640 那一侧，见 videoFitSize）。
 const (
 	videoMinW = 160
 	videoMinH = 120
@@ -456,7 +477,7 @@ const (
 
 // videoFitSize 把「视频原始宽高」换算成窗口客户区尺寸（用户指定规则）：
 // **在固定上限 640×640 内等比放到最大**——比 640 小的流也放大到窗口
-//（用户要求：对端 192×128 的小流不该只开个小窗，要看就看清一点）；
+// （用户要求：对端 192×128 的小流不该只开个小窗，要看就看清一点）；
 // 长边通常恒为 640，只有宽高比极端时另一边先顶到 640（如 900×100 → 640×71）。
 //
 // 历史：早期是"优先 1:1、超 640 才缩"，小流就开一个很小的窗口。
@@ -489,7 +510,7 @@ func (a *App) applyVideoSize(fw, fh int) {
 	// 尺寸交给 Fyne（GLFW 设的是客户区，宽高比才与对端画面一致，不会出黑边）；
 	// 位置由 placeVideoWindow 负责，内部带延迟校正以跟上异步生效的尺寸。
 	a.videoW.Resize(fyne.NewSize(w, h))
-	placeVideoWindow(a.videoW)
+	a.placeVideoWindowIfNeeded()
 	a.videoSized = true
 	a.videoSizedW, a.videoSizedH = fw, fh
 	logx.Logger().Info("视频窗口尺寸已按原视频设置",
@@ -579,6 +600,18 @@ func (a *App) applyVideoTransforms(st core.VideoTransforms) {
 			"本地", fmt.Sprintf("旋转%d° 镜像%v", st.Local.Rotation, st.Local.Mirror))
 	}
 	a.applyVideoTransformButtons()
+	// 本地回显的旋转/镜像持久化（REQ-VIDEO-015）：桌面按钮与网页
+	// video.setTransform 都汇流到这里，任一侧改动都会落盘；**远端不落盘**
+	//（用户明确要求不对称）。值没变就不写盘。
+	if a.cfg != nil {
+		if a.cfg.UI.LocalPreviewRotation != st.Local.Rotation || a.cfg.UI.LocalPreviewMirror != st.Local.Mirror {
+			a.cfg.UI.LocalPreviewRotation = st.Local.Rotation
+			a.cfg.UI.LocalPreviewMirror = st.Local.Mirror
+			a.persistConfig()
+			logx.Logger().Info("本地回显旋转/镜像已保存",
+				"rotation", st.Local.Rotation, "mirror", st.Local.Mirror)
+		}
+	}
 	if int32(st.Remote.Rotation) != prevRemoteRot {
 		a.resizeVideoWindowForRotation(int(prevRemoteRot), st.Remote.Rotation)
 	}
@@ -617,16 +650,21 @@ func (a *App) resizeVideoWindowForRotation(oldRot, newRot int) {
 	}
 	logx.Logger().Info("旋转后调整视频窗口形状", "rot", newRot, "window", int(w), "x", int(h))
 	a.videoW.Resize(fyne.NewSize(w, h))
-	placeVideoWindow(a.videoW)
+	a.placeVideoWindowIfNeeded()
 }
 
 // toggleVideoTopmost 视频窗口置顶开关（用户要求）：点一下置顶，再点取消。
 //
 // 注意视频窗口**默认不置顶**（REQ-VIDEO-006 用户明确要求），这里是用户手动
-// 打开的例外；状态是会话级记忆，窗口重新显示时会再应用一次。
+// 打开的例外；状态持久化到配置（REQ-VIDEO-015），窗口重新显示时会再应用一次。
 func (a *App) toggleVideoTopmost() {
 	a.videoTopmost = !a.videoTopmost
 	a.applyVideoTopmost()
+	if a.cfg.UI.VideoTopmost != a.videoTopmost {
+		a.cfg.UI.VideoTopmost = a.videoTopmost
+		a.persistConfig()
+	}
+	logx.Logger().Info("视频窗口置顶切换", "topmost", a.videoTopmost)
 }
 
 // applyVideoTopmost 施加置顶状态并刷新按钮外观（生效 = 蓝底）。
@@ -646,7 +684,82 @@ func (a *App) applyVideoTopmost() {
 		}
 		btn.Refresh()
 	}
-	logx.Logger().Info("视频窗口置顶切换", "topmost", a.videoTopmost)
+}
+
+// ---- 视频窗口的锁与位置记忆（REQ-VIDEO-015）----
+
+// toggleVideoLock 视频窗口锁开关：锁定时窗口既不能移动也不能改大小
+// （默认锁上；会话内记忆，不持久化）。
+func (a *App) toggleVideoLock() {
+	a.videoLocked = !a.videoLocked
+	a.applyVideoLock()
+	logx.Logger().Info("视频窗口锁定切换", "locked", a.videoLocked)
+}
+
+// applyVideoLock 施加锁状态并刷新锁按钮外观（锁定 = 蓝底闭锁，解锁 = 灰底开锁）。
+func (a *App) applyVideoLock() {
+	if a.videoW != nil {
+		setVideoWindowLock(a.videoW, a.videoLocked)
+	}
+	btn := (*compactButton)(nil)
+	if a.videoSurface != nil {
+		btn = a.videoSurface.lockBtn
+	}
+	if btn != nil {
+		if a.videoLocked {
+			btn.SetIcon(IconLockClosed)
+			btn.SetBg(colorHoldBlue)
+		} else {
+			btn.SetIcon(IconLockOpen)
+			btn.SetBg(colorTransformGray)
+		}
+		btn.Refresh()
+	}
+}
+
+// placeVideoWindowIfNeeded 尺寸变化后的摆放（首帧定尺寸、旋转换形状）：
+//   - 用户没移动过 → 走原有的"通话面板正上方、右边缘对齐"（尺寸变了要重新对齐）；
+//   - 移动过 → **什么都不做**：窗口尺寸变化时左上角本来就不动，
+//     用户摆好的位置不该被拉回面板上方（REQ-VIDEO-015）。
+func (a *App) placeVideoWindowIfNeeded() {
+	if a.videoW == nil || a.cfg.UI.VideoWindow.Moved {
+		return
+	}
+	placeVideoWindow(a.videoW)
+}
+
+// placeVideoWindowAtSaved 窗口显示时的摆放：有保存位置且仍可用 → 用它；
+// 否则回退默认摆放（保存值越界，例如拔掉了副屏——配置值保留，屏幕回来还能用）。
+func (a *App) placeVideoWindowAtSaved() {
+	if a.videoW == nil {
+		return
+	}
+	u := a.cfg.UI.VideoWindow
+	if !u.Moved {
+		a.placeVideoWindowIfNeeded()
+		return
+	}
+	scale := a.videoW.Canvas().Scale()
+	sz := a.videoW.Canvas().Size()
+	w, h := int(sz.Width*scale), int(sz.Height*scale)
+	if sx, sy, sw, sh := screenBounds(); windowPosUsable(u.X, u.Y, w, h, sx, sy, sw, sh) {
+		moveVideoWindowToSaved(a.videoW, u.X, u.Y)
+		return
+	}
+	logx.Logger().Info("视频窗口保存的位置已不在屏幕上，回退默认摆放", "x", u.X, "y", u.Y)
+	placeVideoWindow(a.videoW)
+}
+
+// onVideoWindowUserMoved 用户把视频窗口挪走了（Windows：窗口过程的
+// WM_EXITSIZEMOVE；Linux：守卫轮询到的稳定位置变化）→ 记住并持久化。
+// **程序化摆放绝不走这里**，否则"没移动过就跟随通话面板"的默认摆放会失效。
+func (a *App) onVideoWindowUserMoved(x, y int) {
+	if p := a.cfg.UI.VideoWindow; p.Moved && p.X == x && p.Y == y {
+		return
+	}
+	a.cfg.UI.VideoWindow = config.WindowPlacement{Moved: true, X: x, Y: y}
+	a.persistConfig()
+	logx.Logger().Info("视频窗口位置已保存", "x", x, "y", y)
 }
 
 // applyVideoTransformButtons 旋转/镜像按钮的外观：生效中蓝底，否则灰底。
