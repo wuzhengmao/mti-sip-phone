@@ -583,6 +583,15 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   `camera_windows.cpp` 后就变成「用 Linux 的 g++ 编 Windows 源码」——`<iostream>`、
   `<unistd.h>` 都能找到、**唯独 `<dshow.h>` 找不到**（实测，报错极具误导性），链接
   同样会落到宿主 g++。Debian 上 mingw 的 g++ 是独立包（`g++-mingw-w64-*`）。
+  **Linux 交叉（amd64 ⇄ arm64）同理，而且更容易中招**：2026-10 之前仓库里一个 C++
+  源都没有，所以那条路径一直没设 CXX 也没事；`internal/audio/apm_bridge.cc`（AEC，
+  `-tags apm`）进来之后，linux 交叉的链接驱动就变成了**宿主的** `/usr/bin/g++`——
+  拿 aarch64 的目标文件去链接，报 `Relocations in generic ELF (EM: 183)` /
+  `file in wrong format`，错误里唯一的人话只有 `/usr/bin/g++` 那一行（实测）。
+  `build.sh` 的 linux 交叉现在也显式给 CXX（`${CROSS_TRIPLE}-g++`，可用 `CROSS_CXX`
+  覆盖），并在「开了视频/AEC 却找不到它」时**跳过该目标并提示装
+  `g++-aarch64-linux-gnu`**——C++ 源要 cc1plus、`-lstdc++` 要目标架构的 libstdc++，
+  两者都在这个包里（只有交叉 gcc 是不够的）。
 - **视频静态库：FFmpeg 必须 `--disable-autodetect`**（只关 `--disable-libdrm` 不够）。
   autodetect 类外部库不受 `--disable-everything` 约束，会按宿主装的开发包自动启用：
   踩过的是 libdrm（走 pkg-config，Linux 构建机装了 libdrm-dev 就把 `hwcontext_drm.o`

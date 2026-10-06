@@ -126,6 +126,7 @@ case "$NATIVE_ARCH" in
 esac
 
 CROSS_CC="${CROSS_CC:-}"
+CROSS_CXX="${CROSS_CXX:-}"
 CROSS_PC_LIBDIR="${CROSS_PKG_CONFIG_LIBDIR:-$CROSS_PC_LIBDIR_DEFAULT}"
 CROSS_PC_NEEDED="x11 xrandr xinerama xcursor xi xxf86vm gl wayland-client wayland-cursor wayland-egl xkbcommon"
 CROSS_PC_MISSING=""
@@ -147,6 +148,32 @@ if [ -n "$CROSS_ARCH" ]; then
     if [ -z "$CROSS_CC" ]; then
         CROSS_CC="$(command -v "${CROSS_TRIPLE}-gcc" || true)"
     fi
+    # 交叉的 C++ 编译器，它同时是**链接驱动**：只要构建里有任何一个包含 C++ 源，
+    # Go 就用 CXX 去链接（cmd/go 的 gc.go），而 cfg.DefaultCXX 对交叉目标返回的
+    # 是裸 "g++"——**宿主架构**的 g++。症状：宿主的 g++ 拿 aarch64 目标文件交给
+    # 自己的 ld，报 "Relocations in generic ELF (EM: 183)" / "file in wrong
+    # format"，错误里唯一的人话只有 /usr/bin/g++ 那一行，极具误导性（实测）。
+    # 目前仓库里唯一的 C++ 源是 internal/audio/apm_bridge.cc（-tags apm）；
+    # 带视频时虽无 C++ 源，但链接要 -lstdc++（OpenH264 是 C++ 实现），目标架构的
+    # libstdc++ 同样由 g++ 包提供，所以这两种情况都要求交叉 g++。
+    if [ -z "$CROSS_CXX" ]; then
+        _cxx="${CROSS_CC%.exe}"
+        case "$_cxx" in
+            *gcc)
+                if [ -x "${_cxx%gcc}g++" ]; then
+                    CROSS_CXX="${_cxx%gcc}g++"
+                fi
+                ;;
+        esac
+    fi
+    if [ -z "$CROSS_CXX" ]; then
+        CROSS_CXX="$(command -v "${CROSS_TRIPLE}-g++" || true)"
+    fi
+    # 提示里用的 g++ 包名（Debian/Ubuntu 与交叉 gcc 同名同源）
+    case "$CROSS_GCC_PKG" in
+        gcc-*) CROSS_GXX_PKG="g++-${CROSS_GCC_PKG#gcc-}" ;;
+        *)     CROSS_GXX_PKG="g++" ;;
+    esac
     for pc in $CROSS_PC_NEEDED; do
         pc_found_in_libdir "$pc" || CROSS_PC_MISSING="$CROSS_PC_MISSING ${pc}.pc"
     done
@@ -328,11 +355,24 @@ elif [ -n "$CROSS_PC_MISSING" ]; then
     cross_env_hint
 else
     codec_setup "linux-${CROSS_ARCH}"
-    echo "[2/5] 交叉构建 dist/sip-phone-linux-${CROSS_ARCH}（${FEATURES}，CC=${CROSS_CC}）..."
-    printf '%s' "$CODEC_NOTES"
-    CGO_ENABLED=1 GOOS=linux GOARCH="$CROSS_ARCH" CC="$CROSS_CC" \
-        PKG_CONFIG_LIBDIR="$CROSS_PC_LIBDIR" PKG_CONFIG_PATH= \
-        go build $(tags_args) -ldflags "$LDFLAGS" -o "dist/sip-phone-linux-${CROSS_ARCH}" ./cmd/sip-phone
+    if [ -z "$CROSS_CXX" ] && { [ -n "$VIDEO_ON" ] || [ -n "$APM_ON" ]; }; then
+        echo "[2/5] 跳过 linux/${CROSS_ARCH}：带视频或音频预处理需要 ${CROSS_TRIPLE}-g++"
+        printf '%s' "$CODEC_NOTES"
+        echo "      安装：apt install ${CROSS_GXX_PKG}（或 dnf/其他发行版的对应交叉 g++）"
+        echo "      原因：包里有 C++ 源（internal/audio/apm_bridge.cc）时 Go 用 CXX 当"
+        echo "            链接驱动，没有交叉 g++ 就退回**宿主的** g++，链接必然失败"
+        echo "            （报 Relocations in generic ELF (EM: 183) / file in wrong format）；"
+        echo "            带视频时链接要的 -lstdc++ 也由该包提供"
+        echo "      若不需要视频/预处理：删掉 third_party/video/linux-${CROSS_ARCH} 与"
+        echo "            third_party/audio/linux-${CROSS_ARCH} 即可出基础版"
+        echo "      自建工具链：用 CROSS_CC / CROSS_CXX 显式指定"
+    else
+        echo "[2/5] 交叉构建 dist/sip-phone-linux-${CROSS_ARCH}（${FEATURES}，CC=${CROSS_CC} CXX=${CROSS_CXX}）..."
+        printf '%s' "$CODEC_NOTES"
+        CGO_ENABLED=1 GOOS=linux GOARCH="$CROSS_ARCH" CC="$CROSS_CC" CXX="$CROSS_CXX" \
+            PKG_CONFIG_LIBDIR="$CROSS_PC_LIBDIR" PKG_CONFIG_PATH= \
+            go build $(tags_args) -ldflags "$LDFLAGS" -o "dist/sip-phone-linux-${CROSS_ARCH}" ./cmd/sip-phone
+    fi
 fi
 
 # Windows amd64 托盘版（参数与 build.bat 的同名目标一致：GUI 子系统无控制台）
