@@ -151,7 +151,7 @@ func logPath(dir string) string {
 // SIP 信令与敏感信息脱敏
 // ---------------------------------------------------------------------------
 
-// 需要脱敏的字段：认证头、密码参数、sip URI 中的密码
+// 需要脱敏的字段：认证头、密码参数、sip URI 中的密码、SDES-SRTP 的媒体密钥
 var secretPatterns = []*regexp.Regexp{
 	// Authorization / Proxy-Authorization 整行
 	regexp.MustCompile(`(?mi)^(\s*)(Proxy-)?Authorization\s*:.*$`),
@@ -159,6 +159,9 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(password\s*=\s*)[^\s,;>"]+`),
 	// sip:user:pass@host 形式 URI 中的密码
 	regexp.MustCompile(`(?i)(sips?:[^@\s;>"]*:)[^@\s;>"]+(@)`),
+	// SDES-SRTP 的媒体密钥（REQ-MEDIA-009）：a=crypto:… inline:<base64(key||salt)>。
+	// tag 与套件名可以留（排查看得出用了什么算法），**密钥本身绝不能进日志文件**。
+	regexp.MustCompile(`(?i)(crypto:[^\r\n]*?inline\s*:)\s*[A-Za-z0-9+/=]+`),
 }
 
 // MaskSecrets 对 SIP 消息中的凭据做脱敏，用于日志输出。
@@ -167,6 +170,7 @@ func MaskSecrets(s string) string {
 	out = secretPatterns[0].ReplaceAllString(out, `${1}${2}Authorization: ***脱敏***`)
 	out = secretPatterns[1].ReplaceAllString(out, `${1}***脱敏***`)
 	out = secretPatterns[2].ReplaceAllString(out, `${1}***脱敏***${2}`)
+	out = secretPatterns[3].ReplaceAllString(out, `${1}***脱敏***`)
 	return out
 }
 

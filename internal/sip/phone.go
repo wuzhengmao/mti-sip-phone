@@ -508,6 +508,21 @@ func (p *Phone) Unregister(ctx context.Context) error {
 	return nil
 }
 
+// srtpPolicyOf 账户配置 → 媒体加密策略（REQ-MEDIA-009）。
+// 空值/非法值按默认「支持」处理（旧配置没有该字段）。
+func srtpPolicyOf(acc config.Account) media.SRTPPolicy {
+	switch config.NormalizeSRTP(acc.SRTP) {
+	case config.SRTPOff:
+		return media.SRTPOff
+	case config.SRTPPreferred:
+		return media.SRTPPreferred
+	case config.SRTPRequired:
+		return media.SRTPRequired
+	default:
+		return media.SRTPSupported
+	}
+}
+
 // Dial 呼出（纯音频）。
 func (p *Phone) Dial(ctx context.Context, target string) (string, error) {
 	return p.dial(ctx, target, false)
@@ -549,6 +564,9 @@ func (p *Phone) dial(ctx context.Context, target string, withVideo bool) (string
 	if err != nil {
 		return "", err
 	}
+	// 媒体加密策略（REQ-MEDIA-009）必须在**生成 offer 之前**设置：
+	// 「建议/必要」会在 offer 里带上 a=crypto 行
+	engine.SetSRTPPolicy(srtpPolicyOf(acc))
 	// SDP 宣告地址使用对端可达地址（NAT：注册回显地址 / STUN 公网地址）
 	engine.SetSDPIP(p.localHost())
 
@@ -575,6 +593,7 @@ func (p *Phone) dial(ctx context.Context, target string, withVideo bool) (string
 		v.SetSDPIP(p.localHost())
 		v.SetFrameSink(p.videoSinkFor(callID))
 		v.SetSendEnabled(p.cameraUsable())
+		v.SetSRTPPolicy(srtpPolicyOf(acc)) // 视频是独立 m= 行，独立密钥
 		cs.video = v
 		cs.videoSend = p.cameraUsable()
 	}
@@ -1453,7 +1472,21 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 	cs.engine.SetKeepalive(false) // 关闭保活，恢复真实音频发送
 	cs.engine.SetMuted(false)
 	p.startVideo(cs, cs.videoSend)
+	p.logMediaEncryption(cs)
 	p.sink.OnEstablished(cs.id)
+}
+
+// logMediaEncryption 接通时记一条媒体加密结果（REQ-MEDIA-009）：
+// 排查"这通电话到底加没加密、用的哪个套件"时一眼可见（协商期另有 srtp.go 的日志）。
+func (p *Phone) logMediaEncryption(cs *callSession) {
+	if cs.engine.SRTPActive() {
+		logx.Logger().Info("本次通话媒体已加密（SRTP）", "callId", cs.id, "套件", cs.engine.SRTPSuite())
+		return
+	}
+	p.mu.Lock()
+	policy := config.NormalizeSRTP(p.acc.SRTP)
+	p.mu.Unlock()
+	logx.Logger().Info("本次通话媒体为明文 RTP（未加密）", "callId", cs.id, "媒体加密策略", policy)
 }
 
 // applyVideoAnswer 处理对端 2xx 里的视频段：协商成功则保留引擎（启动在
@@ -1549,9 +1582,22 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	// SDP 宣告地址使用对端可达地址（NAT：注册回显地址 / STUN 公网地址）
 	engine.SetSDPIP(p.localHost())
+	// 媒体加密策略必须在解析对端 offer **之前**设置（REQ-MEDIA-009）：
+	// 对端 offer 带 crypto 而策略允许时要回带 crypto 的 answer
+	engine.SetSRTPPolicy(srtpPolicyOf(acc))
 	cs.engine = engine
 	if body := req.Body(); len(body) > 0 {
 		if _, err := engine.SDPAnswer(body); err != nil {
+			if errors.Is(err, media.ErrSRTPRequired) {
+				// 本机要求媒体必须加密，而对端 offer 没给可接受的 crypto 参数：
+				// 直接 488 拒接（不能静默降级成明文，那正是"必要"要避免的）
+				logx.Logger().Warn("对端未提供 SRTP 参数而本机要求媒体加密，拒接来电（488）",
+					"callId", callID, "err", err)
+				engine.Close()
+				_ = dlg.Respond(488, statusText(488), nil)
+				p.cleanupCall(callID, "failed")
+				return
+			}
 			logx.Logger().Debug("呼入 SDP 解析失败", "err", err)
 		}
 	}
@@ -1568,6 +1614,7 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 			if info, mErr := offer.Media("video"); mErr == nil && !info.Rejected {
 				if v, vErr := media.NewVideoEngine(p.localIP()); vErr == nil {
 					v.SetSDPIP(p.localHost())
+					v.SetSRTPPolicy(srtpPolicyOf(acc)) // 视频独立 m= 行，独立密钥
 					if v.ApplyOffer(info) {
 						cs.video = v
 						hasVideo = true
@@ -1707,6 +1754,14 @@ func (p *Phone) handleReInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	answer, err := cs.engine.SDPAnswerWithDirection(req.Body(), media.MirrorDirection(remoteDir))
 	if err != nil {
+		// 对端在重协商里去掉了 SRTP 而本机要求加密（REQ-MEDIA-009）：
+		// 用 488 明确拒绝，不能用 500（那是"本端出错"，这里是协商不接受）
+		if errors.Is(err, media.ErrSRTPRequired) {
+			logx.Logger().Warn("对端 re-INVITE 去掉了 SRTP 而本机要求媒体加密，拒绝（488）",
+				"callId", cs.id, "err", err)
+			_ = tx.Respond(sip.NewResponseFromRequest(req, 488, statusText(488), nil))
+			return
+		}
 		logx.Logger().Warn("re-INVITE SDP 协商失败", "callId", cs.id, "err", err)
 		_ = tx.Respond(sip.NewResponseFromRequest(req, 500, "Server Internal Error", nil))
 		return
@@ -1908,6 +1963,8 @@ func statusText(code int) string {
 		return "OK"
 	case 486:
 		return "Busy Here"
+	case 488:
+		return "Not Acceptable Here"
 	case 500:
 		return "Server Internal Error"
 	case 603:

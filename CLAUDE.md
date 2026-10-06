@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前开发版本 **1.0.14**（1.0.13 已定版并合并到 master，含 **SIP 信令 TLS(SIPS) 传输（REQ-ACC-006）**——传输新增 tls、sips:// 拉起、本端自签 TLS 监听、TCP/TLS 信令保活，以及真机联调修出的来电接听/振铃取消/长通话挂断等一批 TCP/TLS 信令缺陷；此前 1.0.12 的 G.722 宽频、视频总开关等一并包含）。1.0.14 进行中：崩溃现场记录（REQ-LOG-009，见「已知陷阱」的日志条）。
+当前开发版本 **1.0.14**（1.0.13 已定版并合并到 master，含 **SIP 信令 TLS(SIPS) 传输（REQ-ACC-006）**——传输新增 tls、sips:// 拉起、本端自签 TLS 监听、TCP/TLS 信令保活，以及真机联调修出的来电接听/振铃取消/长通话挂断等一批 TCP/TLS 信令缺陷；此前 1.0.12 的 G.722 宽频、视频总开关等一并包含）。1.0.14 进行中：崩溃现场记录（REQ-LOG-009，见「已知陷阱」的日志条）、**媒体加密 SRTP（REQ-MEDIA-009，SDES/`a=crypto`，见「重要约定」的 SRTP 条）**。
 版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），
 正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
@@ -17,7 +17,7 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 | 领域 | 选型 | 说明 |
 | --- | --- | --- |
 | SIP 信令 | github.com/emiago/sipgo v1.6.0 | UDP/TCP/**TLS**（TLS 自带，标准库 crypto/tls，无新依赖；REQ-ACC-006 见 `internal/sip/tls.go`），DialogClientSession / DialogServerSession |
-| 媒体 | pion/rtp、pion/rtcp、pion/sdp/v3、pion/stun、github.com/zaf/g711、libopus（cgo） | RTCP 为 v1.2.x 新 API（CompoundPacket/Goodbye，非旧版 Bye）；音频扩展编解码里 **G.722 是纯 Go**（`internal/media/g722`，任何构建都带），Opus 由 `-tags audio` 启用（cgo 静态库，见下） |
+| 媒体 | pion/rtp、pion/rtcp、pion/sdp/v3、pion/stun、**pion/srtp/v3**（媒体加密，纯 Go）、github.com/zaf/g711、libopus（cgo） | RTCP 为 v1.2.x 新 API（CompoundPacket/Goodbye，非旧版 Bye）；音频扩展编解码里 **G.722 是纯 Go**（`internal/media/g722`，任何构建都带），Opus 由 `-tags audio` 启用（cgo 静态库，见下） |
 | 音频设备 | github.com/gen2brain/malgo v0.11.26 | miniaudio 绑定，**CGO**；`-tags noaudio` 切空后端（纯 Go 构建/测试） |
 | GUI | fyne.io/fyne/v2 v2.8.1 | 要求 UI 运行在主线程 |
 | WebSocket | github.com/coder/websocket | 仅监听 127.0.0.1，无 token 鉴权 |
@@ -44,12 +44,20 @@ build.bat
 #   dist/sip-phone-windows-386.exe            Windows 386 托盘版（交叉，静态，需 i686-w64-mingw32-gcc）
 ./build.sh
 
-# 测试：CGO 包（audio）需要 gcc。用 build.bat 同款工具链：
+# 测试（推荐）：固定路径运行器——把测试二进制构建到仓库内 .testbin/ 再执行。
+# Windows 防火墙按"程序路径"放行，go test 每次换临时目录会被当成新程序反复弹窗，
+# 这个脚本让路径固定（放行一次即可）。会自动探测 WinLibs gcc，参数见脚本头部：
+./scripts/test.sh                                  # 默认全部测试包
+./scripts/test.sh -p ./internal/media/ -- -run SRTP -v   # -- 之后是 go test 的测试参数
+./scripts/test.sh -p ./internal/sip/
+
+# 测试（等价的手工方式）：CGO 包（audio）需要 gcc，用 build.bat 同款工具链：
 export CC="<WinLibs mingw64/bin/gcc.exe 路径>"   # build.bat 输出里可见
 export CGO_ENABLED=1
 go test ./internal/media/ ./internal/wsapi/ ./internal/sip/ ./internal/ui/ ./internal/updater/
-# 带 Opus 的包还要 -tags audio（需先跑 scripts/build-audio-libs.bat 生成静态库，
-# 并把 third_party/audio/<目标>/{include,lib} 经 CGO_CFLAGS/CGO_LDFLAGS 传入）：
+# 带 Opus / 视频的包还要 -tags（需先跑 scripts/build-audio-libs.bat / build-video-libs.bat
+# 生成静态库，并把 third_party/{audio,video}/<目标>/{include,lib} 经
+# CGO_CFLAGS/CGO_LDFLAGS 传入，或直接用 GOFLAGS="-tags=video" ./scripts/test.sh）：
 go test -tags audio ./internal/media/
 
 # 运行
@@ -147,7 +155,8 @@ internal/
   sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理；
               netwatch.go 为注册看护：休眠唤醒/网络切换后立即重新注册，REQ-CALL-009；
               tls.go 为 TLS 传输：客户端配置 + 自签证书 + 本端 TLS 监听，REQ-ACC-006）
-  media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus/G.722 编解码、播放环形缓冲、SDP 协商
+  media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus/G.722 编解码、播放环形缓冲、SDP 协商，
+              媒体加密 SRTP（srtp.go，REQ-MEDIA-009）
   media/g722/  G.722 纯 Go 算法（QMF + 双子带自适应 ADPCM；golden 向量在 testdata/）
   audio/      音频设备：malgo 后端（全双工采集/播放、设备枚举/选择、提示音）
   wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳、网页视频订阅 video.go）
@@ -171,7 +180,8 @@ web/
               notifyUpdate，查询在软电话侧）
 release/      发布到更新站点的配置与元数据：release.conf（站点/应用 ID/令牌）、
               app.json（应用级元数据，经站点 metadata 接口写入）、icon.svg（图标，经 icon 接口写入）
-scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）与一键发布（release.sh/.bat）
+scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）、固定路径测试运行器
+              （test.sh，防火墙只弹一次）与一键发布（release.sh/.bat）
 docs/         design.md（架构设计：分层与依赖、各模块职责、关键决策、目录地图——新同学先看这份）、
               requirements.md（需求）、ws-protocol.md（WS 协议）、auto-update.md（自动更新与
               更新站点接入：规范摘要、REST API、参考实现、接入清单）；changelog.md 在仓库根目录
@@ -340,7 +350,17 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   也表示 TLS（默认端口 5061，前缀优先于 `?transport=`）。**服务器证书默认不校验**（内网自签开箱即用），
   勾选「校验服务器证书」后按系统根证书 + 主机名校验；**不做客户端证书（mTLS）**；本端 TLS 监听的证书是
   自动生成的自签名证书（`<实例目录>/tls/local-{cert,key}.pem`，RSA 2048、SAN 含本机各网卡 IP）。
-  **只加密信令，媒体仍是明文 RTP**（SRTP 是 REQ-MEDIA-009），界面与文档都要这么写。
+  **只加密信令**：媒体是否加密由「媒体加密」决定（SRTP，REQ-MEDIA-009，默认「支持」= 本端不主动
+  声明、对端要求才配合），界面与文档都要写清楚两者是两件事。
+- **媒体加密 SRTP（REQ-MEDIA-009）的口径**：**SDES-SRTP（RFC 4568）**——密钥随 SDP 的
+  `a=crypto:… inline:<base64(主密钥‖盐)>` 交换，**只加密 RTP/RTCP**（音频、视频、DTMF 事件包；
+  SIP 信令不归它管）。四档 `account.srtp`（配置页「媒体加密」下拉）：
+  **关闭**（不协商，对端要求也按明文应答）/ **支持**（默认：本端 offer **不带** crypto，来电带
+  crypto 则配合）/ **建议**（offer 带 crypto，对端不接受则明文继续）/ **必要**（对端没有可接受的
+  crypto 就失败：呼入 488、呼出挂断、重协商去掉 crypto 回 488）。六个套件按序写在 offer 里
+  （`AES_CM_128_HMAC_SHA1_80` 第一），answer **复用对端选中的 tag 与套件、只换自己的密钥**；
+  不认识的套件/带 lifetime/MKI/会话参数的行一律跳过。**不做** DTLS-SRTP（RFC 5763/5764）、ZRTP、
+  客户端证书。SDES 的密钥在 SDP 里明文传，**只有配合 TLS 信令才有意义**（配置页已提示）。
 
 ## 已知陷阱（修改相关代码前必读）
 
@@ -438,6 +458,30 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   `crash.log` 一直被占、归档改名必失败。
 - **日志轮转：Windows 上删除/改名文件前必须先关自己的句柄**（`internal/logx/logx.go` 的 `rotate`/`gzipFile`）。Windows 要求**所有**句柄都带 `FILE_SHARE_DELETE` 才允许删/改名，而 Go 的 `os.OpenFile` 只申请 `FILE_SHARE_READ|FILE_SHARE_WRITE`（`syscall_windows.go` 的 sharemode）——**自己的句柄没关，`os.Remove`/`os.Rename` 必然失败**。历史缺陷写成 `return os.Remove(src)`（在 `defer in.Close()` 之前执行），于是"压缩完成却删不掉源文件"：日志文件永不截断（实测卡在 42.8MB）→ 尺寸一直超上限 → **之后每次写日志都再完整轮转一次**（整个文件重新 gzip 一遍，且全程持写锁）→ 写日志的线程（SIP/界面/**RTP 接收循环**）被随机卡住数百毫秒（实测同一接收循环迭代内相邻两行日志相差 494ms）。症状极具迷惑性：通话开始时的日志突发撞上轮转 → 接收循环停摆、对端媒体包在 socket 里排队后成批涌入 → 播放缓冲超深截断 → **"第一声回铃音断续"**（真因，找了很久）。另外那条路径还会让 `.1.gz~.9.gz` **内容完全相同且每次轮转 mtime 全变**（每次压的都是同一份越来越大的文件）。现在的做法：关闭 → **改名切走**（改名即完成截断）→ 立即开新文件继续写 + 后台 goroutine 压缩与归档移位（不持锁做重活）；改名失败退化为清空当前文件，连清空都不行则降级为"不再轮转"，**绝不能回到"每次写都重压整个文件"的循环**。改这里务必跑 `go test ./internal/logx/`（有回归测试）。
 - **媒体/NAT**：对称 NAT 下 UDP 映射需持续出向流量保活（早期媒体阶段 SetKeepalive 持续发静音帧）；SDP 宣告地址与 socket 绑定地址分离（SetSDPIP）；183→200 可能换 SSRC/端口（引擎已自动处理，勿移除 playPush 的重置逻辑）。
+- **SRTP（`internal/media/srtp.go`，改之前必读）**：
+  - **密钥方向搞反 = 双向全解不开**：RFC 4568 §6.1 的口径是「**SDP 里的 key 是写这条 SDP 的一方
+    用来加密它自己发出的媒体**的」——本端发送用**自己**写进 SDP 的密钥，接收用**对端**给的密钥；
+    密钥单向、套件双向。answer 还必须**复用 offer 里选中那条的 tag 与 crypto-suite**，只换密钥。
+  - **pion 的 `CreateContext` 默认 `SRTPNoReplayProtection`**（重放保护是**关**的），必须显式传
+    `SRTPReplayProtection/SRTCPReplayProtection`；否则「防重放」是假的。pion 的 `Context`
+    **不保证并发安全**：收发各一个实例、各自带锁（发送侧还会被采集回调与 RTCP 循环并发调用）。
+  - **加密启用后不能再有明文出向包**：打洞（`punchHole`）、早期媒体保活、DTMF（`SendDTMF` 自己
+    `WriteToUDP`，不经过 `sendPacket`）、RTCP（SRTCP，明文 RTCP 会被对端丢弃 → PLI 发不出去 =
+    黑屏）全都要加密。因此**协商必须早于 `setRemote`/`punchHole`**（`SDPAnswerWithDirection`/
+    `SDPApplyAnswer`/视频的 `ApplyOffer`/`ApplyAnswer` 里都是这个顺序，别调换）。
+  - **每个 m= 行独立密钥**：音频与视频各持一份 `cryptoState`（视频在 `VideoEngine` 上），
+    视频段要有自己的 crypto 行；只加密音频不加密视频会被严格的对端拒（488）。
+  - **换流（183→200 换 SSRC / 序号大跳变）要 `resetRx`**：接收侧的序号/ROC 推断沿用旧状态会算出
+    错误的 ROC，现象是「接通后解密全部失败、没有声音」。反过来，**重协商时若对端的密钥参数没变就
+    不要重建上下文**（重建同样清掉 ROC，通话超过约 22 分钟、序号绕回一次后就会解不开）——
+    `samePeerCrypto` 的短路就是为这个。
+  - **重协商必须重复带 `a=crypto`**（SDES 口径：重协商里不出现 crypto = 取消加密）；非「必要」
+    策略下按明文降级并打 Warn，「必要」策略直接回 488。
+  - **策略是四档不是开关**：`关闭` 模式下**连对端递过来的加密也不能接受**（`acceptsSRTP()` 的
+    判断一开始漏了，被 `TestSRTPRequiredFailsWhenAnswerLacksCrypto` 抓出来）；「支持」= 本端
+    offer 不带 crypto（不加密时 SDP 与历史**逐字节一致**，golden 测试钉着）。
+  - **密钥绝不能进日志**：SIP 信令记录会把整份 SDP 落盘，`logx.MaskSecrets` 里有一条专门抹
+    `a=crypto:… inline:<base64>` 的规则（套件名保留），加新日志/新脱敏规则时别绕开它。
 - **自更新重启时序**（勿简化）：重启请求只标记 `restartRequested` 并取消 ctx，**释放单实例锁与拉起新进程必须放在退出收尾**（`shutdown` 之后、进程退出之前，见 main.go 的 `spawnNewProcessIfRequested`）——顺序反了会让新进程因锁冲突转发参数后退出，或因 WS 端口仍被占用而 +1 写回配置、SIP 双注册。历史缺陷：旧 `onRestart` 释放锁+拉起进程后不退出旧进程（已修复）。Windows 上运行中的 exe **能改名不能覆盖**，替换流程为 exe→.old、.new→exe、失败回滚（`internal/updater/replace.go`，已用真实进程验证）。
 - **更新提示窗与通话面板都吸附右下角**：通话期间隐藏更新提示窗（`setCallUI` 非空闲分支），通话结束后按 `updatePopupPending` 补弹；不要在两者都可见时做偏移摆放。
 - **测试 flakiness**：`internal/sip` 全量并行跑时偶发 5s 超时失败（信令测试间资源干扰，与具体改动无关）；分组或单跑稳定。验证方式：`go test -run "<Test名>"` 单跑 + 分组复跑。

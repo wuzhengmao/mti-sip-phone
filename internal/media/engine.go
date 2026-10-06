@@ -175,6 +175,11 @@ type Engine struct {
 	// probe 媒体诊断探针（SIP_PHONE_AUDIODUMP=1 时非 nil，见 debug_probe.go）
 	probe *mediaProbe
 
+	// crypto SDES-SRTP 状态（REQ-MEDIA-009）：本段音频的密钥、收发上下文与策略。
+	// 零值 = 明文，与历史行为一致。视频是独立的一段（独立密钥），
+	// 在 VideoEngine 上另有一份。
+	crypto cryptoState
+
 	stop chan struct{}
 	wg   sync.WaitGroup
 
@@ -244,6 +249,16 @@ func (e *Engine) SetSampleRateListener(fn func(rate int)) {
 
 // PayloadType 线上使用的音频负载类型号（answer 必须复用它，RFC 3264）。
 func (e *Engine) PayloadType() uint8 { return e.payloadType() }
+
+// SetSRTPPolicy 设置媒体加密策略（REQ-MEDIA-009）。必须在生成 SDP 之前调用
+//（呼出：生成 offer 之前；呼入：解析对端 offer 之前），零值 = 关闭。
+func (e *Engine) SetSRTPPolicy(p SRTPPolicy) { e.crypto.setPolicy(p) }
+
+// SRTPActive 本次通话的音频媒体是否已加密。
+func (e *Engine) SRTPActive() bool { return e.crypto.active() }
+
+// SRTPSuite 已启用的加密套件名（未加密时空串，供日志/界面展示）。
+func (e *Engine) SRTPSuite() string { return e.crypto.suiteName() }
 
 // bindRTPRTCP 绑定一对连续 UDP 端口（RTP 与 RTCP），音频与视频各绑一对。
 //
@@ -406,6 +421,19 @@ func (e *Engine) recvLoop() {
 			logx.Logger().Debug("RTP 包解析失败", "err", err)
 			continue
 		}
+		// SDES-SRTP（REQ-MEDIA-009）：RTP 头部只认证不加密，所以先按密文解析出
+		// 头部（定位 SSRC/序号），再解密整包并用明文重新解析 payload。
+		// 解密失败（密钥不符 / 被改包 / 重放）一律丢弃——绝不能拿密文当音频解码。
+		plain, ok := e.crypto.unprotectRTP(buf[:n], &pkt.Header)
+		if !ok {
+			continue
+		}
+		if e.crypto.active() {
+			if err := pkt.Unmarshal(plain); err != nil {
+				logx.Logger().Debug("SRTP 解密后解析失败", "err", err)
+				continue
+			}
+		}
 
 		e.rxPackets.Add(1)
 		if e.probe != nil {
@@ -492,6 +520,9 @@ func (e *Engine) playPush(ssrc uint32, seq uint16, frame []int16) {
 		// 解码器由本接收协程独占（Decode 在调用本函数之前、同一协程），
 		// 此处复位不会与 Decode 并发。
 		resetCodec(e.Codec())
+		// SRTP 的接收序号/ROC 推断同样要清零：新流换了 SSRC 或序号大幅回退后，
+		// 沿用旧状态会算出错误的 ROC，表现为「接通后解密全部失败、听不到声音」。
+		e.crypto.resetRx()
 		e.ring.Write(frame)
 		return
 	}
@@ -654,6 +685,11 @@ func (e *Engine) sendPacket(codec Codec, payload []byte) {
 	if err != nil {
 		return
 	}
+	// SDES-SRTP：加密启用后**所有**出向包都必须是密文——打洞、早期媒体保活、
+	// 麦克风音频走的都是这里。漏一个明文包，对端会按认证失败丢弃甚至直接挂断。
+	if data = e.crypto.protectRTP(data, &pkt.Header); data == nil {
+		return
+	}
 	if _, err := e.conn.WriteToUDP(data, e.remote); err != nil {
 		logx.Logger().Debug("RTP 发送失败", "err", err)
 		return
@@ -741,6 +777,10 @@ func (e *Engine) rtcpRecvState() (uint16, uint32, uint64, bool) {
 // rtcpOnFeedback 音频不处理 PLI/FIR（仅视频有意义）。
 func (e *Engine) rtcpOnFeedback(rtcp.Packet) {}
 
+// RTCP 加解密（SRTP，REQ-MEDIA-009）。
+func (e *Engine) rtcpProtect(pkt []byte) []byte            { return protectRTCPPkt(&e.crypto, pkt) }
+func (e *Engine) rtcpUnprotect(pkt []byte) ([]byte, bool)  { return unprotectRTCPPkt(&e.crypto, pkt) }
+
 // SendDTMF 发送一个 DTMF 音（RFC 2833 telephone-event，负载类型 101）。
 // 异步发送：起始包（M=1）→ 持续包 → 结束包（E=1），总时长约 200ms。
 func (e *Engine) SendDTMF(digit string) {
@@ -779,6 +819,11 @@ func (e *Engine) SendDTMF(digit string) {
 			e.seq++
 			data, err := pkt.Marshal()
 			if err != nil {
+				e.sndMu.Unlock()
+				return
+			}
+			// SDES-SRTP：DTMF 也是 RTP 包，同样必须加密（它自己不走 sendPacket）
+			if data = e.crypto.protectRTP(data, &pkt.Header); data == nil {
 				e.sndMu.Unlock()
 				return
 			}
@@ -920,13 +965,15 @@ func (e *Engine) itemForPT(pt uint8) codecPT {
 
 // SDPOffer 生成本地 SDP offer（PCMA/PCMU/Opus + telephone-event，按优先级排序）。
 func (e *Engine) SDPOffer() string {
-	return e.sdp("sendrecv", allCodecItems())
+	return e.sdp("sendrecv", allCodecItems(), true)
 }
 
 // SDPOfferWithDirection 生成指定媒体方向的 SDP offer
 //（保持 re-INVITE 用：保持 sendonly / 恢复 sendrecv）。
+// re-offer 必须**重复带上 a=crypto**：SDES 的口径是"重协商里不再出现 crypto
+// 就表示不再加密"，漏掉会让对端以为本端取消了加密（密钥沿用本通首次生成的）。
 func (e *Engine) SDPOfferWithDirection(dir string) string {
-	return e.sdp(dir, allCodecItems())
+	return e.sdp(dir, allCodecItems(), true)
 }
 
 // SDPNegotiatedAnswer 呼入接听时的 200 answer：仅含协商后的编解码器
@@ -934,7 +981,7 @@ func (e *Engine) SDPOfferWithDirection(dir string) string {
 // 用 activePT（对端号）而非 codec.PayloadType()（本端号）——音频静态 PT
 // 两者相同，动态 PT（Opus）下必须用对端号。
 func (e *Engine) SDPNegotiatedAnswer() string {
-	return e.sdp("sendrecv", []codecPT{e.negotiatedItem()})
+	return e.sdp("sendrecv", []codecPT{e.negotiatedItem()}, false)
 }
 
 // SDPAnswer 解析远端 offer，协商编解码并返回本地 answer。
@@ -958,10 +1005,35 @@ func (e *Engine) SDPAnswerWithDirection(offer []byte, dir string) (string, error
 	e.dtmfPT.Store(uint32(peerDTMFPT(offer))) // 对端 DTMF 用他们自己声明的号
 	// 编解码器换了（对端号 + 新编码）：复位其内部状态、按需切换管线采样率
 	e.applyNegotiatedCodec(codec)
+	// SDES-SRTP（REQ-MEDIA-009）：必须在 setRemote/punchHole **之前**协商好——
+	// punchHole 会立刻发一个包，加密启用后那个包必须是密文（对端会丢弃甚至挂断
+	// 认证失败的明文包）。协商失败且策略要求加密时直接返回错误，由上层拒接。
+	if err := e.applySRTPOffer(offer); err != nil {
+		return "", err
+	}
 	e.setRemote(remote, rtcpPort)
 	// 远端地址更新后打洞（NAT 下对端媒体包需先有出向包放行）
 	e.punchHole()
-	return e.sdp(dir, []codecPT{{c: codec, pt: peerPT}}), nil
+	return e.sdp(dir, []codecPT{{c: codec, pt: peerPT}}, false), nil
+}
+
+// applySRTPOffer 解析 offer 里的音频段 a=crypto 并建立加密上下文（本端被叫）。
+func (e *Engine) applySRTPOffer(offer []byte) error {
+	info, err := parseMediaInfo(offer, "audio")
+	if err != nil {
+		// 解析失败不影响媒体协商本身（parseSDPOffer 已经成功过一次）
+		return nil
+	}
+	return e.crypto.applyRemoteOffer(info.Crypto)
+}
+
+// applySRTPAnswer 解析 answer 里的音频段 a=crypto 并建立加密上下文（本端主叫）。
+func (e *Engine) applySRTPAnswer(answer []byte) error {
+	info, err := parseMediaInfo(answer, "audio")
+	if err != nil {
+		return nil
+	}
+	return e.crypto.applyRemoteAnswer(info.Crypto)
 }
 
 // SDPApplyAnswer 处理远端对本地 offer 的应答：提取远端 RTP 地址并切换编解码。
@@ -979,6 +1051,11 @@ func (e *Engine) SDPApplyAnswer(answer []byte) error {
 	// 编解码器换了（183 早期媒体 → 200 可能换编码，比如 G.711 → G.722）：
 	// 复位内部状态、按需切换管线采样率（变了会让音频层重开设备）
 	e.applyNegotiatedCodec(codec)
+	// SDES-SRTP：answer 里按 tag 匹配本端 offer 的密钥；策略要求加密而
+	// 对端没接受时返回错误（由上层把本次呼叫判失败，见 ErrSRTPRequired）
+	if err := e.applySRTPAnswer(answer); err != nil {
+		return err
+	}
 	e.setRemote(remote, rtcpPort)
 	// 远端地址更新（如 183 → 200 端口变化）后重新打洞
 	e.punchHole()
@@ -996,7 +1073,9 @@ func (e *Engine) sdpIPForSDP() string {
 
 // audioSection m=audio 段（不含会话头）。
 // items 按优先级顺序（编解码器与线上号成对，见 codecPT）；telephone-event（101）恒在末尾。
-func (e *Engine) audioSection(dir string, items []codecPT) sdpSection {
+// asOffer 决定 a=crypto 的来源：offer 用本端候选（策略允许时生成），
+// answer 只在被叫协商成功后才写（RFC 4568：answer 里的 crypto 是答复，不能凭空加）。
+func (e *Engine) audioSection(dir string, items []codecPT, asOffer bool) sdpSection {
 	codecs := make([]sdpCodec, 0, len(items)+1)
 	for _, it := range items {
 		// 注意用 Name()（"PCMA" / "opus"）而不是 RTPMap()（"PCMA/8000"）——
@@ -1012,25 +1091,32 @@ func (e *Engine) audioSection(dir string, items []codecPT) sdpSection {
 		})
 	}
 	codecs = append(codecs, sdpCodec{PT: telephoneEventPT, Encoding: "telephone-event", ClockRate: 8000, FMTP: "0-16"})
+	var crypto []string
+	if asOffer {
+		crypto = e.crypto.offerLines()
+	} else {
+		crypto = e.crypto.answerLines()
+	}
 	return sdpSection{
 		Kind:     "audio",
 		Port:     e.localPort,
 		RTCPPort: e.localPort + 1,
 		Codecs:   codecs,
+		Crypto:   crypto,
 		Dir:      dir,
 	}
 }
 
-// sdp 构造纯音频 SDP 文本（会话头 + m=audio）。
-func (e *Engine) sdp(dir string, items []codecPT) string {
-	return buildSDP(e.ssrc, e.sdpIPForSDP(), []sdpSection{e.audioSection(dir, items)})
+// sdp 构造纯音频 SDP 文本（会话头 + m=audio）。asOffer 见 audioSection。
+func (e *Engine) sdp(dir string, items []codecPT, asOffer bool) string {
+	return buildSDP(e.ssrc, e.sdpIPForSDP(), []sdpSection{e.audioSection(dir, items, asOffer)})
 }
 
 // SDPOfferFor 构造呼出 / 重协商用的 offer：会话头 + m=audio + 可选 m=video。
 // videoDir 为空时按本端能力推导（能发 → sendrecv，只能收 → recvonly）；
 // v 为 nil 或本构建无视频能力时不输出 m=video。
 func SDPOfferFor(audio *Engine, v *VideoEngine, audioDir, videoDir string) string {
-	sections := []sdpSection{audio.audioSection(audioDir, allCodecItems())}
+	sections := []sdpSection{audio.audioSection(audioDir, allCodecItems(), true)}
 	if v != nil {
 		if s := v.offerSection(videoDir); s != nil {
 			sections = append(sections, *s)
@@ -1055,7 +1141,7 @@ func SDPAnswerFor(audio *Engine, v *VideoEngine, offer *Offer, audioPT uint8, vi
 	for _, kind := range order {
 		switch kind {
 		case "audio":
-			sections = append(sections, audio.audioSection("sendrecv", []codecPT{audio.itemForPT(audioPT)}))
+			sections = append(sections, audio.audioSection("sendrecv", []codecPT{audio.itemForPT(audioPT)}, false))
 		case "video":
 			var sec *sdpSection
 			if v != nil {
@@ -1075,7 +1161,7 @@ func SDPAnswerFor(audio *Engine, v *VideoEngine, offer *Offer, audioPT uint8, vi
 		}
 	}
 	if len(sections) == 0 {
-		sections = append(sections, audio.audioSection("sendrecv", []codecPT{audio.itemForPT(audioPT)}))
+		sections = append(sections, audio.audioSection("sendrecv", []codecPT{audio.itemForPT(audioPT)}, false))
 	}
 	return buildSDP(audio.ssrc, audio.sdpIPForSDP(), sections)
 }

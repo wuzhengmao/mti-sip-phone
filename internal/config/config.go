@@ -29,6 +29,7 @@ type Account struct {
 	Proxy       string `json:"proxy"`       // 出站 SIP 代理（host:port，可选，REQ-ACC-019）
 	Transport   string `json:"transport"`   // 传输协议：udp / tcp / tls（REQ-ACC-006）
 	TLSVerify   bool   `json:"tlsVerify"`   // 校验服务器证书（仅 transport=tls 生效）。默认 false = 跳过校验（REQ-ACC-006：内网自签证书场景）
+	SRTP        string `json:"srtp"`        // 媒体加密（SDES-SRTP，REQ-MEDIA-009）：off / supported / preferred / required，默认 supported（空值按默认）
 	Account     string `json:"account"`     // 账号（AOR 用户部分）
 	AuthUser    string `json:"authUser"`    // 认证 ID，为空时使用 Account
 	DisplayName string `json:"displayName"` // 显示名
@@ -211,6 +212,30 @@ func NormalizeTransport(t string) string {
 		return TransportTLS
 	default:
 		return TransportUDP
+	}
+}
+
+// 媒体加密（SDES-SRTP，REQ-MEDIA-009）策略取值。
+const (
+	SRTPOff       = "off"       // 关闭：不协商 SRTP，对端要求也按明文应答
+	SRTPSupported = "supported" // 支持（默认）：本端不主动声明，对端要求则配合加密
+	SRTPPreferred = "preferred" // 建议：本端 offer 声明 SRTP，对端不接受则明文继续
+	SRTPRequired  = "required"  // 必要：本端要求加密，对端不支持则拒绝本次通话
+)
+
+// NormalizeSRTP 规范化媒体加密策略字符串：统一小写；空值或非法值回退默认值
+// **supported**（旧配置没有该字段，零值即默认"支持"）。配置页、配置文件与
+// 协议链接共用这一份判定。
+func NormalizeSRTP(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case SRTPOff:
+		return SRTPOff
+	case SRTPPreferred:
+		return SRTPPreferred
+	case SRTPRequired:
+		return SRTPRequired
+	default:
+		return SRTPSupported
 	}
 }
 

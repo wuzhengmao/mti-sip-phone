@@ -137,3 +137,27 @@ func TestTransportNormalize(t *testing.T) {
 		t.Fatalf("tcp 默认端口应为 5060，实际 %d", p)
 	}
 }
+
+// TestSRTPNormalize 媒体加密策略的规范化（REQ-MEDIA-009）：
+// 空值/非法值一律回退默认「支持」（旧配置没有该字段）。
+func TestSRTPNormalize(t *testing.T) {
+	cases := map[string]string{
+		"":          SRTPSupported,
+		"off":       SRTPOff,
+		"OFF":       SRTPOff,
+		" supported": SRTPSupported,
+		"preferred": SRTPPreferred,
+		" Required": SRTPRequired,
+		"yes":       SRTPSupported, // 非法值回退
+		"none":      SRTPSupported,
+	}
+	for in, want := range cases {
+		if got := NormalizeSRTP(in); got != want {
+			t.Fatalf("NormalizeSRTP(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+	// 默认配置即为「支持」
+	if got := NormalizeSRTP(Default().Account.SRTP); got != SRTPSupported {
+		t.Fatalf("默认应为「支持」，实际 %q", got)
+	}
+}

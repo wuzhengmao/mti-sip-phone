@@ -267,6 +267,7 @@ func (p *Phone) answerIncoming(callID string, mode answerMode) error {
 		p.attachAudio(cs.engine)
 		cs.engine.Start()
 		p.startVideo(cs, mode == answerSendRecv)
+		p.logMediaEncryption(cs)
 		p.sink.OnEstablished(cs.id)
 	}()
 	logx.Logger().Info("已接听来电（后台发送 200 OK）", "callId", callID, "视频", mode.String())

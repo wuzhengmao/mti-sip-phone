@@ -37,7 +37,10 @@ type sdpSection struct {
 	Port     int
 	RTCPPort int // 0 = 不输出 a=rtcp
 	Codecs   []sdpCodec
-	Dir      string // 空则不输出方向属性
+	// Crypto 本端写入该媒体段的 a=crypto 属性值（SDES-SRTP，REQ-MEDIA-009）。
+	// 空则不输出——**未启用加密时 SDP 与历史逐字节一致**（golden 测试钉死）。
+	Crypto []string
+	Dir    string // 空则不输出方向属性
 	// Raw 非空时原样输出该文本段（用于 m=video 0 拒绝段：只输出 m= 行，
 	// 不带 rtpmap/rtcp/方向属性——RFC 3264 规定被拒媒体的属性无意义）。
 	Raw string
@@ -46,7 +49,7 @@ type sdpSection struct {
 // buildSDP 组装完整 SDP 文本：会话头 + 各媒体段。
 //
 // 输出顺序与原 sdp() 逐字节一致（见 TestSDPOfferGolden）：
-//   m= 行 → 全部 a=rtpmap → 全部 a=fmtp → a=rtcp → a=<方向>
+//   m= 行 → 全部 a=rtpmap → 全部 a=fmtp → 全部 a=crypto → a=rtcp → a=<方向>
 func buildSDP(ssrc uint32, ip string, sections []sdpSection) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "v=0\r\no=- %d 1 IN IP4 %s\r\ns=mti-sip-phone\r\nc=IN IP4 %s\r\nt=0 0\r\n",
@@ -74,6 +77,9 @@ func buildSDP(ssrc uint32, ip string, sections []sdpSection) string {
 				fmt.Fprintf(&b, "a=fmtp:%d %s\r\n", c.PT, c.FMTP)
 			}
 		}
+		for _, c := range s.Crypto {
+			fmt.Fprintf(&b, "a=crypto:%s\r\n", c)
+		}
 		if s.RTCPPort != 0 {
 			fmt.Fprintf(&b, "a=rtcp:%d\r\n", s.RTCPPort)
 		}
@@ -97,10 +103,18 @@ type MediaInfo struct {
 	PTs      []uint8      // 按 offer 中出现的顺序
 	Rtpmap   map[uint8]string
 	Fmtp     map[uint8]string
+	// Crypto 该媒体段的 a=crypto 属性值（SDES-SRTP），按 SDP 中出现顺序
+	//（顺序即对端的优先级）。为空表示该媒体段不加密。
+	Crypto []string
 }
 
 // ParseMedia 从 SDP 中解析指定媒体类型（"audio" / "video"）。
 func ParseMedia(body []byte, kind string) (*MediaInfo, error) {
+	return parseMediaInfo(body, kind)
+}
+
+// parseMediaInfo 从 SDP 文本解析指定媒体段（含 a=crypto 等全部属性）。
+func parseMediaInfo(body []byte, kind string) (*MediaInfo, error) {
 	sd := &sdp.SessionDescription{}
 	if err := sd.Unmarshal(body); err != nil {
 		return nil, fmt.Errorf("SDP 解析失败: %w", err)
@@ -188,6 +202,11 @@ func mediaInfoOf(sd *sdp.SessionDescription, kind string) (*MediaInfo, error) {
 
 	for _, attr := range md.Attributes {
 		switch attr.Key {
+		case "crypto":
+			// "1 AES_CM_128_HMAC_SHA1_80 inline:<base64>"（SDES-SRTP）
+			if v := strings.TrimSpace(attr.Value); v != "" {
+				info.Crypto = append(info.Crypto, v)
+			}
 		case "rtcp":
 			if v, err := strconv.Atoi(attr.Value); err == nil {
 				info.RTCPPort = v

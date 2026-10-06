@@ -109,6 +109,8 @@ type App struct {
 	accTransport      *widget.Select
 	tlsVerifyCheck    *widget.Check // 校验 TLS 服务器证书（REQ-ACC-006）
 	tlsNote           *widget.Label // 「只加密信令」提示（仅传输=tls 时显示）
+	accSRTP           *widget.Select
+	srtpNote          *widget.Label // 媒体加密（SDES-SRTP，REQ-MEDIA-009）说明
 	accAccount        *widget.Entry
 	accAuthUser       *widget.Entry
 	accPassword       *widget.Entry
@@ -530,12 +532,15 @@ func (a *App) buildSettingsPage() {
 		a.updateTLSRow(sel)
 		a.updateChkOptRow(sel)
 	})
-	// TLS（REQ-ACC-006）：只加密信令，媒体仍是明文 RTP（SRTP 是另一个需求），
-	// 界面上写清楚，免得用户以为通话内容也被加密了
+	// TLS（REQ-ACC-006）：只加密信令，媒体是否加密由下面的「媒体加密」决定。
+	// 提示**保持一行短句**：主窗体固定 320 DIP，长句会被折在难读的位置
+	//（用户两次反馈"说明行太长"，两处提示都有回归测试卡着）。
 	a.tlsVerifyCheck = widget.NewCheck("校验服务器证书（自签证书请勿勾选）", nil)
-	a.tlsNote = widget.NewLabelWithStyle(
-		"SIPS 只加密信令，通话媒体仍是明文 RTP",
-		fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+	a.tlsNote = widget.NewLabelWithStyle(tlsNoteText, fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+	// 媒体加密（SDES-SRTP，REQ-MEDIA-009）
+	a.accSRTP = widget.NewSelect(srtpLabels, nil)
+	a.srtpNote = widget.NewLabelWithStyle(srtpHint, fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+	a.srtpNote.Wrapping = fyne.TextWrapWord
 	a.accAccount = newFormEntry()
 	a.accAccount.SetPlaceHolder("账号")
 	a.accAuthUser = newFormEntry()
@@ -591,6 +596,8 @@ func (a *App) buildSettingsPage() {
 		formItem("传输", a.accTransport),
 		a.tlsVerifyCheck,
 		a.tlsNote,
+		formItem("媒体加密", a.accSRTP),
+		a.srtpNote,
 		formItem("账号", a.accAccount),
 		formItem("认证 ID", a.accAuthUser),
 		formItem("密码", a.accPassword),
@@ -1731,6 +1738,50 @@ func (a *App) bringMainToFront() {
 // ---------------------------------------------------------------------------
 
 // saveAccount 保存账户配置并触发重新注册（REQ-ACC-011）。
+// srtpLabels 媒体加密策略的下拉显示名；与 srtpValues 一一对应
+//（顺序即下拉顺序，默认项在第二个）。
+var srtpLabels = []string{"关闭", "支持（默认）", "建议", "必要"}
+
+var srtpValues = []string{
+	config.SRTPOff, config.SRTPSupported, config.SRTPPreferred, config.SRTPRequired,
+}
+
+// tlsNoteText 「只加密信令」提示（仅传输=tls 时显示）。
+// 一句话说完：媒体是否加密由下面的「媒体加密」单独决定，此处不必展开。
+const tlsNoteText = "SIPS 只加密信令"
+
+// srtpHint 媒体加密的说明文字。
+// 每档**一行、每行都短**：主窗体固定 320 DIP 宽，长行会把内容撑出可视区
+//（中文没有空格，整行会被当成一个"词"，靠折行也救不回来）。
+const srtpHint = "媒体加密（SRTP）：\n" +
+	"关闭 = 不加密\n" +
+	"支持 = 对端要求才配合（默认）\n" +
+	"建议 = 主动建议，不强制\n" +
+	"必要 = 对端不支持则拒接\n" +
+	"覆盖声音/视频/按键音\n" +
+	"密钥随信令传，建议配 TLS"
+
+// srtpValueOfLabel 下拉显示名 → 配置值（未命中按默认「支持」）。
+func srtpValueOfLabel(label string) string {
+	for i, l := range srtpLabels {
+		if l == label {
+			return srtpValues[i]
+		}
+	}
+	return config.SRTPSupported
+}
+
+// srtpLabelOfValue 配置值 → 下拉显示名。
+func srtpLabelOfValue(v string) string {
+	v = config.NormalizeSRTP(v)
+	for i, val := range srtpValues {
+		if val == v {
+			return srtpLabels[i]
+		}
+	}
+	return srtpLabels[1]
+}
+
 func (a *App) saveAccount() {
 	// 服务器与端口合并解析：host[:port]，端口省略按传输取默认
 	//（tls → 5061，其余 5060；REQ-ACC-006）
@@ -1754,6 +1805,7 @@ func (a *App) saveAccount() {
 		Proxy:       a.accProxy.Text,
 		Transport:   config.NormalizeTransport(a.accTransport.Selected),
 		TLSVerify:   a.tlsVerifyCheck.Checked,
+		SRTP:        config.NormalizeSRTP(srtpValueOfLabel(a.accSRTP.Selected)),
 		Account:     a.accAccount.Text,
 		AuthUser:    a.accAuthUser.Text,
 		Password:    a.accPassword.Text,
@@ -1796,6 +1848,7 @@ func (a *App) loadAccountIntoForm() {
 	a.accTransport.SetSelected(config.NormalizeTransport(acc.Transport))
 	a.tlsVerifyCheck.SetChecked(acc.TLSVerify)
 	a.updateTLSRow(acc.Transport)
+	a.accSRTP.SetSelected(srtpLabelOfValue(acc.SRTP))
 	a.accAccount.SetText(acc.Account)
 	a.accAuthUser.SetText(acc.AuthUser)
 	a.accPassword.SetText(acc.Password)

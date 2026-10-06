@@ -22,3 +22,6 @@ third_party/video/
 third_party/audio/
 # 抓包/调试产物（服务器侧抓包分析用）
 *.pcap
+
+# 固定路径的测试二进制（scripts/test.sh 生成，见该脚本头部的说明）
+.testbin/

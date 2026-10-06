@@ -115,6 +115,10 @@ type VideoEngine struct {
 	rxOtherPT atomic.Uint64 // 负载类型不符被丢弃的包数（诊断用）
 	txPackets atomic.Uint64
 	txBytes   atomic.Uint64
+
+	// crypto 本段视频的 SDES-SRTP 状态（REQ-MEDIA-009）。每个 m= 行有独立密钥，
+	// 所以视频这份与音频 Engine 那份互不相干（策略相同，密钥不同）。
+	crypto cryptoState
 }
 
 // FrameSink 视频帧回调。**在媒体层 goroutine 上同步调用**，实现必须立即返回：
@@ -156,6 +160,16 @@ var ErrVideoUnsupported = video.ErrUnsupported
 
 // LocalPort 本地视频 RTP 端口（SDP 用）。
 func (v *VideoEngine) LocalPort() int { return v.localPort }
+
+// SetSRTPPolicy 设置媒体加密策略（REQ-MEDIA-009）。与音频引擎同一份策略，
+// 但视频是独立的 m= 行、独立密钥。
+func (v *VideoEngine) SetSRTPPolicy(p SRTPPolicy) { v.crypto.setPolicy(p) }
+
+// SRTPActive 视频媒体是否已加密。
+func (v *VideoEngine) SRTPActive() bool { return v.crypto.active() }
+
+// SRTPSuite 视频已启用的加密套件名（未加密时空串）。
+func (v *VideoEngine) SRTPSuite() string { return v.crypto.suiteName() }
 
 // SetSDPIP 设置 SDP 宣告地址（NAT 场景与绑定地址不同）。
 func (v *VideoEngine) SetSDPIP(ip string) { v.sdpIP = ip }
@@ -245,7 +259,8 @@ func (v *VideoEngine) offerSection(dir string) *sdpSection {
 	if len(codecs) == 0 {
 		return nil
 	}
-	return &sdpSection{Kind: "video", Port: v.localPort, RTCPPort: v.localPort + 1, Codecs: codecs, Dir: dir}
+	return &sdpSection{Kind: "video", Port: v.localPort, RTCPPort: v.localPort + 1, Codecs: codecs,
+		Crypto: v.crypto.offerLines(), Dir: dir}
 }
 
 // answerSection 生成 answer 用的视频媒体段：只列协商到的那一个编码，
@@ -267,6 +282,7 @@ func (v *VideoEngine) answerSection(dir string) *sdpSection {
 	return &sdpSection{
 		Kind: "video", Port: v.localPort, RTCPPort: v.localPort + 1,
 		Codecs: []sdpCodec{{PT: pt, Encoding: c.Name, ClockRate: c.ClockRate, FMTP: fmtp}},
+		Crypto: v.crypto.answerLines(),
 		Dir:    dir,
 	}
 }
@@ -308,6 +324,13 @@ func (v *VideoEngine) ApplyOffer(info *MediaInfo) bool {
 		return false
 	}
 	v.setNegotiated(rc, peerPT, fmtp)
+	// SDES-SRTP：在 setRemote/punchHole **之前**协商（打洞包必须已经是密文）；
+	// 策略"必要"而对端视频段没给可接受参数时，本段视频整体拒绝（回 m=video 0），
+	// 而不是静默降级成明文视频。
+	if err := v.crypto.applyRemoteOffer(info.Crypto); err != nil {
+		logx.Logger().Warn("本机要求媒体加密，对端视频段未提供 SRTP 参数，拒绝本段视频", "err", err)
+		return false
+	}
 	v.setRemote(info.Addr, info.RTCPPort)
 	v.punchHole()
 	v.notifyState()
@@ -339,6 +362,11 @@ func (v *VideoEngine) ApplyAnswer(info *MediaInfo) bool {
 	}
 	// 呼出路径不会再构造 answer，这里只记录本端编码的 fmtp（answerSection 用不到）
 	v.setNegotiated(rc, pt, rc.FMTP)
+	// SDES-SRTP：必须在 setRemote/punchHole 之前（理由同 ApplyOffer）
+	if err := v.crypto.applyRemoteAnswer(info.Crypto); err != nil {
+		logx.Logger().Warn("本机要求媒体加密，对端 answer 未接受视频 SRTP", "err", err)
+		return false
+	}
 	v.setRemote(info.Addr, info.RTCPPort)
 	v.punchHole()
 	v.notifyState()
@@ -620,6 +648,11 @@ func (v *VideoEngine) rtcpOnFeedback(pkt rtcp.Packet) {
 	}
 }
 
+// RTCP 加解密（SRTP，REQ-MEDIA-009）：视频的 PLI/FIR 也走 RTCP，
+// 加密启用后必须走 SRTCP，否则请求根本到不了对端（画面一直黑）。
+func (v *VideoEngine) rtcpProtect(pkt []byte) []byte           { return protectRTCPPkt(&v.crypto, pkt) }
+func (v *VideoEngine) rtcpUnprotect(pkt []byte) ([]byte, bool) { return unprotectRTCPPkt(&v.crypto, pkt) }
+
 // --- 收发 ---
 
 func (v *VideoEngine) punchHole() {
@@ -635,6 +668,10 @@ func (v *VideoEngine) punchHole() {
 	}
 	pkt := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: v.payloadType(), SSRC: v.ssrc}}
 	if data, err := pkt.Marshal(); err == nil {
+		// SRTP：打洞包同样是 RTP 包，加密启用后必须是密文
+		if data = v.crypto.protectRTP(data, &pkt.Header); data == nil {
+			return
+		}
 		_, _ = v.conn.WriteToUDP(data, remote)
 	}
 }
@@ -710,6 +747,10 @@ func (v *VideoEngine) sendFrame(frame []byte) {
 		if err != nil {
 			continue
 		}
+		// SRTP：整个视频流的出向包都必须是密文
+		if data = v.crypto.protectRTP(data, &pkt.Header); data == nil {
+			continue
+		}
 		if _, err := v.conn.WriteToUDP(data, remote); err != nil {
 			logx.Logger().Debug("视频 RTP 发送失败", "err", err)
 			return
@@ -774,6 +815,17 @@ func (v *VideoEngine) recvLoop() {
 			}
 			continue
 		}
+		// SRTP：PT 在明文头里，过滤完再解密（省掉无谓的解密开销）；
+		// 解密失败一律丢弃，绝不拿密文去重组/解码。
+		plain, ok := v.crypto.unprotectRTP(buf[:n], &pkt.Header)
+		if !ok {
+			continue
+		}
+		if v.crypto.active() {
+			if err := pkt.Unmarshal(plain); err != nil {
+				continue
+			}
+		}
 		if v.rxPackets.Add(1) == 1 {
 			logx.Logger().Info("收到首个视频 RTP 包",
 				"pt", pkt.PayloadType, "ssrc", pkt.SSRC, "len", n)
@@ -805,6 +857,8 @@ func (v *VideoEngine) handleRTP(pkt *rtp.Packet) {
 			v.hasSeq = false
 			v.waitKey = true
 			dep.Reset()
+			// SRTP：换流后接收侧的序号/ROC 状态也要清零，否则新流全部解密失败
+			v.crypto.resetRx()
 		case gap > 0:
 			// 丢包：当前访问单元已不可用，必须整帧丢弃
 			//（视频不能像音频那样填静音）。三件事缺一不可：

@@ -3,6 +3,7 @@ package ui
 import (
 	"image"
 	"math"
+	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -384,5 +385,33 @@ func TestInstanceColumnShift(t *testing.T) {
 	SetInstanceSlot(-3) // 非法值忽略：仍是上一个有效槽位
 	if instanceSlot != 2 {
 		t.Fatalf("非法槽位不应改写当前值：%d", instanceSlot)
+	}
+}
+
+// TestSRTPHintFitsWindow 媒体加密的说明文字必须塞得进固定 320 DIP 宽的主窗体
+//（用户实测过：一行太长的中文说明会把窗体撑开）。中文没有空格，整行会被当成
+// 一个"词"，光靠 TextWrapWord 折不开——所以**每一行都要短**，这里逐行卡住。
+func TestSRTPHintFitsWindow(t *testing.T) {
+	test.NewApp()
+	// 主窗体固定 320 DIP 宽（SetFixedSize），说明的**每一行**都要自己塞得进去。
+	// 长行虽然会被 Fyne 折行，但会折在"…对端要求则配合；建议 ="这种地方，读起来
+	// 断断续续（用户实测反馈"说明行太长了"），所以这里按**不折行**量每行的自然宽度。
+	const maxLineWidth = 280 // 320 DIP 减去内边距与滚动条，留点余量
+	widthOf := func(s string) float32 {
+		l := widget.NewLabelWithStyle(s, fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+		return l.MinSize().Width // 不设 Wrapping：量的是整行不折行时的自然宽度
+	}
+	for _, note := range []string{srtpHint, tlsNoteText} {
+		for _, line := range strings.Split(note, "\n") {
+			if w := widthOf(line); w > maxLineWidth {
+				t.Fatalf("说明行过宽（%.0f > %d DIP），会被折到难读的位置：%q", w, maxLineWidth, line)
+			}
+		}
+	}
+	// 反例（证明这道卡量得出宽度、不是恒过的空断言）：早先把三档写在一行的句子，
+	// 按同一口径必须被判超限。
+	long := "支持 = 不主动声明，对端要求则配合；建议 = 主动建议但不强制；必要 = 对端不支持则拒绝通话。"
+	if w := widthOf(long); w <= maxLineWidth {
+		t.Fatalf("反例没被判超限（%.0f），说明本测试量不出宽度、形同虚设", w)
 	}
 }

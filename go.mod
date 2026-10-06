@@ -13,12 +13,13 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/mozillazg/go-pinyin v0.21.0
 	github.com/pion/mediadevices v0.10.0
-	github.com/pion/rtcp v1.2.18
+	github.com/pion/rtcp v1.2.19
 	github.com/pion/rtp v1.10.5
 	github.com/pion/sdp/v3 v3.0.20
+	github.com/pion/srtp/v3 v3.1.3
 	github.com/pion/stun v0.6.1
 	github.com/zaf/g711 v1.4.0
-	golang.org/x/sys v0.30.0
+	golang.org/x/sys v0.41.0
 	modernc.org/sqlite v1.34.0
 )
 
@@ -27,6 +28,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
+	github.com/pion/transport/v5 v5.1.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	modernc.org/gc/v3 v3.0.0-20240107210532-573471604cb6 // indirect
 	modernc.org/libc v1.55.3 // indirect
