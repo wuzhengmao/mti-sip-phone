@@ -6,6 +6,52 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
+## [1.0.14] - 2026-10-07
+
+### 修复
+
+- **Windows 32 位（386）版本恢复摄像头采集**：此前 386 产物没有任何采集后端（设置页摄像头选择置灰、视频通话只能看对方），根子是上游 mediadevices（v0.10.0）的 DirectShow 桥 `camera_windows.hpp` 里 `SampleCB` / `BufferCB` 两个回调漏写 `STDMETHODCALLTYPE`，与 mingw `qedit.h` 里 `ISampleGrabberCB` 的 `__stdcall` 在 i686 上是真实的调用约定冲突、编不过（x86_64 上该属性被忽略，所以 amd64 一直无事）。现在把这份驱动**复制进仓库**（`internal/video/dshow`，MIT，来源与改动见文件头注释）并补上调用约定标记，**amd64 与 386 共用同一份实现**（不再用上游的 camera 包）。实测：两个架构都能枚举设备、打开并采到帧（386 在 64 位 Windows 上经 WOW64 运行，用的是系统自带的 32 位 DirectShow 组件）。
+- **Windows 产物改为静态链接，不再依赖 MinGW 运行时 DLL**：amd64 托盘版与控制台版此前动态依赖 `libwinpthread-1.dll` / `libstdc++-6.dll` / `libgcc_s_seh-1.dll` —— 它们是 **MinGW 工具链的运行时、Windows 并不自带**，而发布包（tar.gz 里只有 exe）不附带这些 DLL，在没装 MinGW 的机器上会直接报"缺少 libwinpthread-1.dll"启动失败；386 目标因历史原因一直是静态链接，本次 amd64 与控制台版一并加上 `-extldflags -static`。现在两个 Windows 产物的导入表只剩 `ole32` / `quartz` 这类**系统组件**（DirectShow 用），单文件可直接分发。
+- **两处 Linux 侧构建缺陷**：① `internal/ui/topmost_linux.go` 用了 `sync` / `sync/atomic` 却没写进 import——**Linux 专有文件在 Windows 上根本不参与编译**（`build.bat`、`go test`、`go vet` 全都看不见），到 Linux 上跑 `build.sh` 才报 `undefined: sync`；② Linux 交叉（amd64 ⇄ arm64）未显式给 `CXX`，AEC 的 C++ 桥（`apm_bridge.cc`）进来后链接驱动落到**宿主**的 `/usr/bin/g++`，拿 aarch64 目标文件去链接、报 `Relocations in generic ELF (EM: 183)`——现在交叉目标显式使用目标架构的 g++，缺 `g++-<triple>` 包时**跳过该目标并打印安装提示**（只有交叉 gcc 是不够的：C++ 源要 cc1plus、`-lstdc++` 要目标架构的 libstdc++）。
+
+### 新增
+
+- **音频预处理：回声消除 / 降噪 / 自动增益**（REQ-MEDIA-007，webrtc-audio-processing 1.3）：外放时的自激回声、风扇/键盘底噪、说话远近导致的音量忽大忽小，现在由 WebRTC 的音频处理模块（AEC3 + NS + AGC）在本地处理。**默认开回声消除与降噪，自动增益默认关**（它会与通话面板的手动麦克风增益较劲）；设置页「音频设备」卡片里新增「音频预处理」小节三个勾选框，**改动立即保存、从下一通电话生效**（音频流在每通电话开始时重建）。
+  - **处理点在全双工音频回调里**：参考信号就是"本拍即将播放的样本"，采集样本按 AEC → NS → AGC 处理后才进编码；APM 只吃定长 10ms 帧，回调的任意帧长（WASAPI 共享模式不保证）由一层分帧缓冲累积/切帧，采集路径因此多出不到 10ms 的延迟。8 kHz（G.711/Opus）与 16 kHz（G.722）都支持。
+  - **构建**：静态库（abseil + webrtc-audio-processing）由 `scripts/build-audio-libs.sh` 的 APM 目标生成到 `third_party/audio/<target>/{include,lib}`，构建脚本探测到 `libwebrtc-audio-processing-1.a` 就自动加 `apm` 标签；**缺库时该构建降级为无预处理**（三个开关置灰），与 Opus 各自独立降级。Windows（WinLibs，含 386）与 Linux（含 arm64 交叉）都已验证；补丁随仓库放在 `scripts/patches/webrtc-audio-processing-1.3/`（新增一条：glibc 2.39 起没有 `<sys/prctl.h>`，Linux 上必须改）。
+  - **实测体积**：exe 增加约 0.9 MB（amd64 45.4→46.3 MB、386 40.6→41.5 MB）；AEC 效果回归测试 `go test -tags apm ./internal/audio/`（合成延迟衰减回声，抑制 ≈27 dB）。
+  - 已知限制：`mobile_mode`（移动端省 CPU 档）与 NS/AGC 同时开启会让 APM 的 ProcessStream 返回 -11（实测 8k/16k 均如此），因此使用默认的桌面档 AEC3。
+- **窗口位置记忆 + 视频窗口锁定**（REQ-UI-040 / REQ-VIDEO-015）：
+  - **通话面板**：无边框窗口没有标题栏可拖，改在**顶部居中画一条 50% 宽、2px 高的细线**当“抓手”（距顶约 4px，深色主题深灰、浅色主题浅灰）——**鼠标移上去变成四向箭头的“可移动”光标**（Fyne 标准光标没有 move 这种，用自绘位图：黑色主体 + 1px 白描边，深浅背景都看得清），按住这条线拖动即可移动窗口。抓取区域只有那一小条（比细线略高、容易抓，且不伸进第一行内容），不抢面板按钮的点击与名称备注的悬停。**面板不带锁**（随时可拖）。
+  - **视频窗口**：工具栏新增**锁按钮**（默认**锁上**，锁定时窗口既不能移动也不能用边框改大小：标题栏拖动、双击最大化、系统菜单的移动/大小、Win+方向键与贴靠全部无效，**关闭与最小化照常**；锁的状态不持久化，会话内记忆）。
+  - **两个窗口的位置都记住**：用户拖动结束就落盘（`ui.callPanel` / `ui.videoWindow` 的 `moved`+`x`/`y`，各实例各自一份），下次弹出、退出重启后都固定在同一位置；**没移动过时仍走原来的默认摆放**（通话面板吸附工作区右下角、多实例按槽位整列左移；视频窗口贴通话面板正上方、右边缘对齐，尺寸变化时照样重新对齐）。视频窗口的**「置顶」**与**本地回显的旋转/水平镜像**一并持久化，**远端画面的旋转/镜像不记录**（每次启动归零）；桌面按钮与网页 `video.setTransform` 任一侧改动都会写进配置。
+  - **拖动实现**（两处共用）：按**屏幕绝对光标**做锚点（Windows `GetCursorPos` + `SetWindowPos`；Linux/X11 `XQueryPointer` + `XMoveWindow`），不用 Fyne `DragEvent` 的窗口相对坐标——窗口跟着光标走时相对坐标会自反馈，表现为抖动或跟不动。拖动会话跑在自己的 goroutine 里（~60Hz 跟随），UI 线程只负责开始/结束。
+  - **锁定实现**（只针对视频窗口）：它是带系统标题栏的普通窗口，Windows 侧装**窗口过程钩子**拦 `WM_NCLBUTTONDOWN`(HTCAPTION/边框)、`WM_SYSCOMMAND`(SC_MOVE/SC_SIZE/SC_MAXIMIZE) 与 `WM_WINDOWPOSCHANGING`（兜住 Win+方向键/贴靠这类外壳直接 `SetWindowPos` 的路径，程序化移动与全屏切换经放行标志不受影响），并用 `WM_EXITSIZEMOVE` 记录用户拖动结束；只拦消息、**不碰窗口样式**（改了会让 GLFW 的边框缓存失准）。Linux/X11 客户端拦不住 WM 的移动，用"显示期间轮询位置、被挪走就挪回"兜底，尺寸改用 `WM_NORMAL_HINTS` min=max 让 WM 直接拒绝缩放。
+  - **越界回退**：保存的位置若已不在当前屏幕范围内（拔掉副屏、改分辨率），摆放时回退默认位置并记一条日志，**但不清除配置值**（屏幕回来还能用）。坐标一律物理像素、屏幕绝对、窗口矩形左上角；`config.save` 补了互斥锁（临时文件名固定，并发保存会写出半截配置）。
+  - 内部：`internal/ui/ui_window_pos.go`（纯逻辑：可达性判定与拖动位移，带单测）、`internal/ui/topmost_*.go` 三个平台实现、`config.UIConfig` 新增字段与 `config.NormalizeVideoRotation`。
+- **SIP 域名可配**（REQ-ACC-022）：SIP 账户新增「域名」输入框（可选，留空 = 用 SIP 服务器地址，**历史行为一字不变**）。配了域名后，**URI 里的域**用它——REGISTER 的 R-URI/From/To、呼出 INVITE 的 From 与 To/R-URI（拨纯号码时补成 `sip:号码@域名`），这样 AOR 与身份就是服务端认的域名；**报文仍发往 Server:Port**（域名多半只在服务器内部能解析，本机不一定解析得了）：注册用 sipgo 的 `SetDestination`，呼叫用首条 `Route: <sip:服务器:端口;lr>`（与既有的出站代理同一手法，**代理配置优先**）。Contact 不受影响（永远是对端如何找到本机）。域名可写 `sip:`/`sips:` 前缀、`user@`、端口，规范化时自动去掉。
+- **声明 IP：Via/Contact/SDP 三处统一可配**（REQ-ACC-023）：SIP 账户新增「声明 IP」——**可输入的下拉**（与主窗体拨号框同款）：**留空 = 自动**（默认，与从前一致：STUN 公网地址 → 本机出口 IP → hostname），下拉候选是本机可用网卡 IPv4，也可直接手填（必须是 IP 字面量——SDP 的 `c=` 行写域名非法，填错当场提示而不是静默退回自动）。候选**过滤掉回环、链路本地与虚拟网卡**（Hyper-V/WSL/VMware/VirtualBox/Docker/VPN/TAP，按 MAC 厂商前缀与网卡名双重判定），并**按可达性排序：公网地址在前、RFC1918 内网地址在后**（本机实测候选从一堆虚拟地址收敛到真实网卡那一个）。指定后该地址**优先于 STUN**，并同时出现在 **Contact 主机、SDP 的 `c=`/`o=`、Via 的 sent-by** 三处。Via 是通过反射写 sipgo 的 `Client.host`（与 rport 动态切换同一手法，版本不匹配时只告警、重启后仍生效），**保存账户即生效**；它只改"对外声明"，连接依然绑本机真实网卡。
+- **媒体加密：SRTP（SDES，RFC 4568）**（REQ-MEDIA-009）：此前只有信令走 TLS，**通话内容仍是明文 RTP**（抓包能直接听）；现在音频、视频、DTMF 按键音全部加密，并带完整性校验与防重放（改包/重放的包直接丢弃）。配置页新增「媒体加密」四档（`account.srtp`）：
+  - **关闭**：完全不协商 SRTP；对端单方面要求加密也不接受（本次通话明文，由对端决定是否拒接）。
+  - **支持**（**默认**）：本端发起呼叫时**不声明** SRTP；来电的对端要求加密（offer 带 `a=crypto`）时**配合加密**并回带 crypto 的 answer。
+  - **建议**：本端呼叫时在 offer 里声明 SRTP，对端不接受则按明文继续（界面日志会明确写"未加密"）。
+  - **必要**：必须加密——呼入的 offer 没有可接受的 crypto 回 **488 Not Acceptable Here**；呼出时对端 answer 没接受则本次呼叫判失败（挂断并显示原因）；对端在重协商（re-INVITE）里去掉了 crypto 同样回 488。
+  - **界面**：配置页新增「媒体加密」下拉（关闭/支持（默认）/建议/必要），下面按**一档一行**列出各档含义（主窗体固定 320 DIP 宽，长句会被折到难读的位置）；原先那条长提示「SIPS 只加密信令；通话媒体（声音/视频）需另设「媒体加密」」精简为「**SIPS 只加密信令**」。两处提示都有回归测试卡着行宽。
+  - **协议**：密钥随 SDP 的 `a=crypto:… inline:<base64(主密钥‖盐)>` 交换（SDES），**密钥方向按 RFC 4568 §6.1**——SDP 里的密钥是"写这条 SDP 的一方加密它自己发出的媒体"用的，所以收发各一把、单向；answer **复用对端选中那条的 tag 与套件**，只换自己的密钥。套件支持六种（`AES_CM_128_HMAC_SHA1_80` 优先，另有 AES-256-CM、SHA1_32 与 `AEAD_AES_128/256_GCM`）；对端不认识的套件名/带 lifetime/MKI/会话参数的行一律跳过，不认识的 offer 就退回明文。
+  - **实现要点**：每个 m= 行（音频、视频各一段）用**独立的密钥**；密钥用 crypto/rand、**每通电话新生成**、通话内重协商复用；接收侧开**重放保护**（窗口 64，pion 的默认是**关**的，必须显式打开）；打洞包、早期媒体保活、DTMF、RTCP（SRTCP）全部走加密（漏一个明文包对端会判流失败）；换流（183→200 换 SSRC/序号跳变）时重置接收侧序号/ROC 状态，否则表现为"接通后解密全失败、没声音"。
+  - **密钥不进日志**：SIP 信令记录（REQ-LOG-008）会把整份 SDP 落盘，`a=crypto` 的密钥已在脱敏规则里抹掉（套件名保留，排查看得出用的什么算法）。
+  - ⚠️ **SDES 的密钥在 SDP 里明文传输**，安全性依赖信令加密——配置页提示「建议与 TLS 传输同时使用」。**只加密媒体，不改变 SIP 信令的加密方式**（那是 REQ-ACC-006 的 TLS）。不做 DTLS-SRTP、ZRTP、客户端证书。
+  - 内部：新增 `internal/media/srtp.go`（套件表、密钥生成与 `a=crypto` 解析、收发上下文、四档策略的状态机）；`internal/media/srtp_test.go`（套件往返、篡改/重放拒绝、offer/answer 协商、四档策略语义、真实 UDP 收发）；`config.NormalizeSRTP`；`logx.MaskSecrets` 新增 crypto 密钥脱敏（含回归测试）。依赖新增 `github.com/pion/srtp/v3`（纯 Go，无 CGO）。
+- **崩溃现场记录**（REQ-LOG-009，排查能力）：多实例联调时沙箱实例「用着用着就没了」，而**日志停在半截、一句线索都没有**。根因是**这类退出根本不产生任何日志**——托盘版是 GUI 子系统构建（`-H=windowsgui`，**没有控制台**），未捕获的 panic、运行期致命错误（并发 map 读写、栈溢出）、cgo 里的非法内存访问，都由 Go 运行期打印到 **stderr** 后 `exit(2)`：GUI 子系统下 stderr 无处可去，消息直接蒸发；Windows 事件日志也不会有记录（进程是"**自己**退出"的，不是被异常终止，所以既没有 Application Error、也没有 WER 报告）。现在：
+  - `debug.SetCrashOutput`（Go 1.24+）把运行期崩溃输出**另写一份**到日志目录的 `crash.log`（含全部 goroutine 栈与「fatal error: unexpected signal」这类 cgo 崩溃现场）；**下次启动**自动归档为 `crash-<时间>.log`（最多留 9 份）并在主日志里打一条 WARN「上次运行的崩溃现场已归档（上次是异常退出）」——**从此"崩溃"与"被杀掉/正常退出"可以区分**；`crash.log` 里只有启动标题行（上次正常退出）时直接清空重来，不会误报。标题行写明版本、平台、pid、实例槽位与启动参数，一个文件里躺着多次运行也分得清。
+  - **stderr 没有去处时**（GUI 子系统从资源管理器/快捷方式启动，那正是托盘版的常见启动方式）把 `os.Stderr` 接到日志目录的 `stderr.log`，收下 Fyne/GLFW 这类直接往标准错误写的信息；**有控制台、或被显式重定向**（`> 日志 2>&1`）时一律不动，免得把用户自己要的输出抢走。
+  - 需求文档同步：REQ-LOG-009。
+  - **SIP 信令记录不受日志等级影响**（澄清，无行为变更）：勾选「记录 SIP 信令」后，信令走的是**独立的输出目标**（`logx.traceOut`，直接写日志文件），根本不经过 slog 的等级过滤——把日志级别调到 warn/error 也照样逐条落盘。原先那条开启提示写着"（DEBUG 级）"，容易被误读成受级别控制，文案已改为「不受日志级别影响」，并补了一条回归测试（等级=error 时信令仍必须落盘）钉住该行为。
+- **新增 Windows on ARM64 构建目标**（`dist/sip-phone-windows-arm64.exe`，Win/Linux 两个构建脚本都支持）：arm64 版 Windows 电脑（Surface Pro X、骁龙本）此前**没有产物**——GCC 系的 mingw-w64 根本没有 `aarch64-w64-mingw32` 目标（`gcc-mingw-w64-*`、WinLibs、MSYS2 的 mingw64/mingw32 都出不了它，MSYS2 的 clangarm64 是"ARM64 机器上的本机环境"，不是 x64 上的交叉），必须换成 **llvm-mingw**（clang + lld + mingw-w64 sysroot，解压即用，官方提供 Windows 与 Linux 宿主的包）。两个脚本的探测顺序是 PATH → `LLVM_MINGW=<解压目录>` → 默认位置，**探测不到就跳过该目标并打印安装步骤**（不影响其余产物）。产物导入表只有系统 DLL（UCRT，无 libwinpthread/libgcc），单文件可直接分发。
+  - **该目标目前是基础版**：视频、Opus、音频预处理（AEC/NS/AGC）三套静态库都还没有 arm64 版本，需要另为 `aarch64-w64-mingw32` 编库（OpenH264 与 abseil 是 C++，而 llvm-mingw 带的是 libc++ 而非 libstdc++，构建脚本的 `-lstdc++` 得跟着改），因此脚本刻意**不对该目标做库探测**，固定构建为 G.711/G.722 + 音频设备 + 界面 + 信令 + WS 的基础版。
+  - 已知限制：**尚未在真机（Windows on ARM64 设备）上运行验证**，目前只完成编译验证与 PE 头检查（ARM64 / GUI 子系统）；x64 Windows 跑不了 ARM64 程序，验收需要对应设备。
+- **文档交付：用户使用手册与 SDK 开发指南**：新增 `docs/user-manual.md`（面向最终用户：安装与运行环境、配置页逐项说明、拨号/来电/通话/视频/通话记录/通信录/托盘、`sip://` 拉起与多开、自动更新、故障排查与数据文件位置）与 `docs/sdk-guide.md`（面向前端集成者：5 分钟上手、全部 API 与事件参考、视频订阅专章、**16 条避坑清单**、调试建议）。两份文档逐项对照实现核校（改掉若干"想当然"的描述：托盘是**单击**唤出、界面上并无视频分辨率设置项、SIP 账户需点「保存并注册」等）。同时按**五种产物**（Windows x64/x86/ARM64、Linux x64/arm64）统一梳理了各文档的平台清单与能力矩阵（含"无视频能力的构建里视频入口全部隐藏、配置页视频设备区置灰"的口径），把 Go 版本要求更正为 **1.24+**、补充「**Windows 10 及以上**」的运行要求（Go 1.22 起官方不再支持 Win7/8），并修正 REQ-UI-002（托盘交互按实现为单击）。
+
 ## [1.0.13] - 2026-10-06
 
 ### 修复

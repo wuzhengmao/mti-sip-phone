@@ -62,6 +62,23 @@ func rotateIconSVG(color string) string {
 </svg>`
 }
 
+// lockIconSVG 窗口锁定图标（Material Design lock path）：通话面板与视频窗口
+// 左上角的小锁用（REQ-UI-040 / REQ-VIDEO-015）。闭锁 = 锁定中。
+func lockIconSVG(color string) string {
+	path := `M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z`
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<path fill="` + color + `" d="` + path + `"/>
+</svg>`
+}
+
+// unlockIconSVG 窗口解锁图标（Material Design lock_open path）：开锁 = 可拖动。
+func unlockIconSVG(color string) string {
+	path := `M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6h1.9c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm0 12H6V10h12v10z`
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<path fill="` + color + `" d="` + path + `"/>
+</svg>`
+}
+
 // pinIconSVG 置顶图标（Material Design push_pin path）：视频窗口工具栏用。
 func pinIconSVG(color string) string {
 	path := `M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z`
@@ -97,6 +114,10 @@ var (
 	IconMirror = fyne.NewStaticResource("mirror.svg", []byte(mirrorIconSVG("#ffffff")))
 	// IconPin 视频窗口置顶开关（工具栏）。
 	IconPin = fyne.NewStaticResource("pin.svg", []byte(pinIconSVG("#ffffff")))
+	// IconLockClosed / IconLockOpen 视频窗口的锁定开关（工具栏，REQ-VIDEO-015）：
+	// 白图标，蓝底（锁定中）与灰底（已解锁）上都清晰。
+	IconLockClosed = fyne.NewStaticResource("lock.svg", []byte(lockIconSVG("#ffffff")))
+	IconLockOpen   = fyne.NewStaticResource("unlock.svg", []byte(unlockIconSVG("#ffffff")))
 
 	// IconPhoneRed 未注册状态托盘图标（红色话机）。
 	IconPhoneRed = fyne.NewStaticResource("phone-red.svg", []byte(phoneIconSVG("#e53935")))

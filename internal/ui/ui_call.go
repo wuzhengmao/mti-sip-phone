@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"mti-sip-phone/internal/config"
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
 )
@@ -73,6 +74,9 @@ func (a *App) buildCallPanelIfNeeded() {
 	// 12px 内边距（MinSize 高 43px），所以用 plainText 系列自绘。
 	a.callTip = newTooltipLayer()
 	a.callName = newCallNameBox(a.callTip)
+
+	// 顶部拖动条（REQ-UI-040）：无边框面板的"抓手"，悬停变可移动光标、拖动即移窗。
+	a.callGrip = newCallGrip(a.onCallPanelDragStart, a.onCallPanelDragEnd)
 	// 状态/时长用**自绘单行文本**（不是 widget.Label）：本项目主题把
 	// SizeNameInnerPadding 提到 12，widget.Label 的 MinSize 是"文字 + 上下各 12"
 	// （高 43px），与第一行的自绘名称（高 19px、左边缘 0）既对不齐左边缘、
@@ -141,8 +145,10 @@ func (a *App) buildCallPanelIfNeeded() {
 	// 内容会撑满画布，Border 的中心区→网格→三行等分填满窗口）
 	a.callRows = container.NewStack()
 	// 顶层再叠一个提示图层（备注悬停用，见 ui_tooltip.go）：提示只是绘制在
-	// 最上层、不参与命中测试，所以不会挡住面板上的按钮
-	w.SetContent(container.NewStack(a.callRows, a.callTip))
+	// 最上层、不参与命中测试，所以不会挡住面板上的按钮。
+	// 拖动条（REQ-UI-040）夹在中间：定位层本身不参与命中测试，只有顶部那
+	// 一小条"抓手"参与（见 callGrip/callGripLayer）。
+	w.SetContent(container.NewStack(a.callRows, container.New(callGripLayer{}, a.callGrip), a.callTip))
 	// 关闭画布内边距：四周留白由 rebuildCallRows 统一控制，
 	// 避免与主题 padding 叠加导致视觉不一致（REQ-UI-025 修订）
 	w.SetPadded(false)
@@ -1140,6 +1146,148 @@ func (a *App) showConfirmIn(parent fyne.Window, title, content string, cb func(b
 // callNameMaxW 通话面板上对端名称的最大宽度（面板只有 260px 宽，同一行右边
 // 还要放接听/保持按钮，名字长了必须截断，不能把按钮挤出去）。
 const callNameMaxW = 190
+
+// ---- 通话面板顶部的拖动条（REQ-UI-040）----
+//
+// 面板是无边框窗口，没有标题栏可拖；顶部的这条细线就是它的"抓手"：
+// 悬停变"可移动"光标，按住拖即可移动窗口，拖完记录位置（下次弹出、重启沿用）。
+// 没有锁——面板本来就小，随时可拖比多一次"解锁"更顺手。
+const (
+	// callGripLineTop 细线距面板顶边的距离（DIP）。
+	callGripLineTop = 4
+	// callGripLineHeight 细线高度（DIP）。
+	callGripLineHeight = 2
+	// callGripHitH 可抓取区域的高度（DIP）：比细线高一截，2px 太难点中；
+	// 取 12 也不会碰到第一行内容（三行内容从 y=14 才开始）。
+	callGripHitH = 12
+)
+
+// 拖动条颜色：深色主题用深灰、浅色主题用浅灰（都由调用方按主题变体选）。
+var (
+	colorGripDark  = color.NRGBA{R: 0x55, G: 0x5a, B: 0x61, A: 0xff} // 深色主题：深灰
+	colorGripLight = color.NRGBA{R: 0xc6, G: 0xca, B: 0xce, A: 0xff} // 浅色主题：浅灰
+)
+
+// callGripColor 按当前主题明暗取拖动条颜色。
+func callGripColor() color.NRGBA {
+	if fyne.CurrentApp() != nil && fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantLight {
+		return colorGripLight
+	}
+	return colorGripDark
+}
+
+// callGrip 通话面板顶部的拖动条：**只**在自身这一小块区域（面板宽度的一半、
+// 12px 高）里可拖，不实现 Tappable/Hoverable，所以面板上的按钮点击、名称悬停
+// 完全不受影响；实现了 Cursorable——指针停上来时鼠标变成"可移动"样式。
+type callGrip struct {
+	widget.BaseWidget
+	line        *canvas.Rectangle
+	onDragStart func()
+	onDragEnd   func()
+}
+
+func newCallGrip(onStart, onEnd func()) *callGrip {
+	g := &callGrip{onDragStart: onStart, onDragEnd: onEnd}
+	g.line = canvas.NewRectangle(callGripColor())
+	g.line.CornerRadius = callGripLineHeight / 2 // 两端小圆角，像一条"握把"
+	g.ExtendBaseWidget(g)
+	return g
+}
+
+// MinSize 拖动条自身的尺寸：宽度取面板宽度的一半（居中对齐见 callGripLayer），
+// 高度是可抓取区域的高度（比细线高一截）。
+func (g *callGrip) MinSize() fyne.Size {
+	return fyne.NewSize(callPanelWidth/2, callGripHitH)
+}
+
+func (g *callGrip) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(container.New(callGripLineLayout{}, g.line))
+}
+
+// Refresh 重取细线颜色：主题明暗切换时 Fyne 会刷新控件树，颜色得跟着变
+// （深色主题深灰、浅色主题浅灰）。
+func (g *callGrip) Refresh() {
+	g.line.FillColor = callGripColor()
+	g.line.Refresh()
+	g.BaseWidget.Refresh()
+}
+
+// Cursor 悬停到拖动条上时显示"可移动"光标。
+func (g *callGrip) Cursor() desktop.Cursor { return moveCursor{} }
+
+// Dragged 每帧都会被调，但只有第一次需要真正开始拖动会话（重复 begin 会
+// 重新锚定，窗口反而跟不动）；会话自己按 ~60Hz 跟随光标，UI 线程零负担。
+func (g *callGrip) Dragged(*fyne.DragEvent) {
+	if g.onDragStart != nil {
+		g.onDragStart()
+	}
+}
+
+func (g *callGrip) DragEnd() {
+	if g.onDragEnd != nil {
+		g.onDragEnd()
+	}
+}
+
+// callGripLineLayout 把细线摆在抓手区域里：满宽、距顶 callGripLineTop、
+// 高 callGripLineHeight（其余是看不见的可抓取留白）。
+type callGripLineLayout struct{}
+
+func (callGripLineLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	return fyne.NewSize(0, callGripLineTop+callGripLineHeight)
+}
+
+func (callGripLineLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	if len(objs) == 0 {
+		return
+	}
+	o := objs[0]
+	o.Resize(fyne.NewSize(size.Width, callGripLineHeight))
+	o.Move(fyne.NewPos(0, callGripLineTop))
+}
+
+// callGripLayer 把拖动条摆在面板顶部正中的定位层。
+// 本身不实现任何指针接口（点击/悬停/拖动都穿透），只有拖动条那一小块参与命中测试。
+type callGripLayer struct{}
+
+func (callGripLayer) MinSize([]fyne.CanvasObject) fyne.Size { return fyne.NewSize(0, 0) }
+
+func (callGripLayer) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	if len(objs) == 0 {
+		return
+	}
+	o := objs[0]
+	m := o.MinSize()
+	o.Resize(m)
+	o.Move(fyne.NewPos((size.Width-m.Width)/2, 0))
+}
+
+// onCallPanelDragStart 拖动开始（拖动条上按下并移动超过阈值才会到这里）。
+func (a *App) onCallPanelDragStart() {
+	if a.callW == nil || a.callDragging {
+		return
+	}
+	a.callDragging = true
+	beginCallPanelDrag(a.callW)
+}
+
+// onCallPanelDragEnd 拖动结束：读回窗口位置并持久化（下次弹出、重启后都用它）。
+func (a *App) onCallPanelDragEnd() {
+	a.callDragging = false
+	if a.callW == nil {
+		return
+	}
+	x, y, ok := endCallPanelDrag(a.callW)
+	if !ok {
+		return // 读不到位置（句柄/会话异常）就不写，别把默认摆放误存成"用户位置"
+	}
+	if p := a.cfg.UI.CallPanel; p.Moved && p.X == x && p.Y == y {
+		return
+	}
+	a.cfg.UI.CallPanel = config.WindowPlacement{Moved: true, X: x, Y: y}
+	a.persistConfig()
+	logx.Logger().Info("通话面板位置已保存", "x", x, "y", y)
+}
 
 // callNameBox 通话面板行1的对端名称：号码 + 通信录名称 + ★（常用），
 // 名称上可悬停出备注提示（REQ-UI-037）。

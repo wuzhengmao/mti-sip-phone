@@ -44,9 +44,10 @@ const (
 // Manager 音频设备管理：全局单例，一次仅支持一路通话的音频流。
 type Manager struct {
 	mu            sync.Mutex
-	micID         string // 当前选择的麦克风 ID，空 = 系统默认
-	speakerID     string // 当前选择的扬声器 ID，空 = 系统默认
-	ringSpeakerID string // 振铃音专用扬声器 ID，空 = 系统默认
+	micID         string     // 当前选择的麦克风 ID，空 = 系统默认
+	speakerID     string     // 当前选择的扬声器 ID，空 = 系统默认
+	ringSpeakerID string     // 振铃音专用扬声器 ID，空 = 系统默认
+	preprocess    Preprocess // 音频预处理开关（REQ-MEDIA-007），随通话流生效
 	engine        *media.Engine
 	backend       Backend
 	running       bool // 音频流是否已启动
@@ -190,6 +191,15 @@ func (m *Manager) SetRingSpeaker(deviceID string) {
 	m.ringSpeakerID = deviceID
 	m.mu.Unlock()
 	logx.Logger().Info("振铃设备已切换", "device", deviceID)
+}
+
+// SetPreprocess 设置音频预处理开关（REQ-MEDIA-007）。
+// 音频流在每次通话开始时重建，所以改动**从下一通（或下一次关流重开）生效**；
+// 已经建立的通话不受影响（与设备选择的语义一致）。
+func (m *Manager) SetPreprocess(p Preprocess) {
+	m.mu.Lock()
+	m.preprocess = p
+	m.mu.Unlock()
 }
 
 // Devices 返回麦克风与扬声器列表；后端未就绪时返回空列表。
@@ -340,7 +350,7 @@ func (m *Manager) startStreamFor(engine *media.Engine) {
 	m.mu.Unlock()
 
 	// 不持锁调用后端：设备打开可能阻塞数十秒
-	if err := backend.Start(mic, speaker, engine); err != nil {
+	if err := backend.Start(mic, speaker, engine, m.preprocess); err != nil {
 		m.mu.Lock()
 		m.running = false
 		m.streamRate = 0

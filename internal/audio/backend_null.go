@@ -26,7 +26,7 @@ func (b *nullBackend) Devices() ([]core.AudioDevice, []core.AudioDevice) {
 		[]core.AudioDevice{{ID: "", Name: "默认（无音频后端）"}}
 }
 
-func (b *nullBackend) Start(micID, speakerID string, engine *media.Engine) error {
+func (b *nullBackend) Start(micID, speakerID string, engine *media.Engine, pre Preprocess) error {
 	go func() {
 		ticker := time.NewTicker(20 * time.Millisecond)
 		defer ticker.Stop()

@@ -4,9 +4,9 @@
 
 ## 项目概述
 
-mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
+mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x64 / arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.13**（已定版并合并到 master；含 **SIP 信令 TLS(SIPS) 传输（REQ-ACC-006）**——传输新增 tls、sips:// 拉起、本端自签 TLS 监听、TCP/TLS 信令保活，以及真机联调修出的来电接听/振铃取消/长通话挂断等一批 TCP/TLS 信令缺陷；此前 1.0.12 的 G.722 宽频、视频总开关等一并包含）。
+当前开发版本 **1.0.14**（1.0.13 已定版并合并到 master，含 **SIP 信令 TLS(SIPS) 传输（REQ-ACC-006）**——传输新增 tls、sips:// 拉起、本端自签 TLS 监听、TCP/TLS 信令保活，以及真机联调修出的来电接听/振铃取消/长通话挂断等一批 TCP/TLS 信令缺陷；此前 1.0.12 的 G.722 宽频、视频总开关等一并包含）。1.0.14 进行中：崩溃现场记录（REQ-LOG-009，见「已知陷阱」的日志条）、**媒体加密 SRTP（REQ-MEDIA-009，SDES/`a=crypto`，见「重要约定」的 SRTP 条）**。
 版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），
 正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
@@ -17,7 +17,7 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 | 领域 | 选型 | 说明 |
 | --- | --- | --- |
 | SIP 信令 | github.com/emiago/sipgo v1.6.0 | UDP/TCP/**TLS**（TLS 自带，标准库 crypto/tls，无新依赖；REQ-ACC-006 见 `internal/sip/tls.go`），DialogClientSession / DialogServerSession |
-| 媒体 | pion/rtp、pion/rtcp、pion/sdp/v3、pion/stun、github.com/zaf/g711、libopus（cgo） | RTCP 为 v1.2.x 新 API（CompoundPacket/Goodbye，非旧版 Bye）；音频扩展编解码里 **G.722 是纯 Go**（`internal/media/g722`，任何构建都带），Opus 由 `-tags audio` 启用（cgo 静态库，见下） |
+| 媒体 | pion/rtp、pion/rtcp、pion/sdp/v3、pion/stun、**pion/srtp/v3**（媒体加密，纯 Go）、github.com/zaf/g711、libopus（cgo） | RTCP 为 v1.2.x 新 API（CompoundPacket/Goodbye，非旧版 Bye）；音频扩展编解码里 **G.722 是纯 Go**（`internal/media/g722`，任何构建都带），Opus 由 `-tags audio` 启用（cgo 静态库，见下） |
 | 音频设备 | github.com/gen2brain/malgo v0.11.26 | miniaudio 绑定，**CGO**；`-tags noaudio` 切空后端（纯 Go 构建/测试） |
 | GUI | fyne.io/fyne/v2 v2.8.1 | 要求 UI 运行在主线程 |
 | WebSocket | github.com/coder/websocket | 仅监听 127.0.0.1，无 token 鉴权 |
@@ -31,25 +31,36 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 # 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.11-rc），
 # 正式构建用 SIP_PHONE_RELEASE=1（发布脚本会设）；不经脚本的 go build/go run 是基础版本号。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
-#   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO）
-#   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
-#   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标）
+#   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO，静态）
+#   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试，静态）
+#   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标；静态）
+#   dist/sip-phone-windows-arm64.exe          ARM64 托盘版（需 llvm-mingw，缺失则跳过该目标；
+#                                             无视频/Opus/AEC 静态库 → 基础版，见「交叉编译说明」）
 build.bat
 
 # Linux 一键构建（本机 GUI 版 + 交叉 Windows GUI / 对侧 Linux 架构版，均 CGO，输出 dist/）：
 #   dist/sip-phone-linux-<本机arch>           本机 Linux 托盘版
 #   dist/sip-phone-linux-<对侧arch>           交叉版（amd64 主机→arm64，arm64 主机→amd64；需对侧
 #                                             架构的交叉 gcc + 图形栈开发包，缺失则跳过并打印准备步骤）
-#   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉，需 x86_64-w64-mingw32-gcc）
+#   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉，静态，需 x86_64-w64-mingw32-gcc）
 #   dist/sip-phone-windows-386.exe            Windows 386 托盘版（交叉，静态，需 i686-w64-mingw32-gcc）
+#   dist/sip-phone-windows-arm64.exe          Windows ARM64 托盘版（交叉，基础版，需 llvm-mingw，缺失则跳过）
 ./build.sh
 
-# 测试：CGO 包（audio）需要 gcc。用 build.bat 同款工具链：
+# 测试（推荐）：固定路径运行器——把测试二进制构建到仓库内 .testbin/ 再执行。
+# Windows 防火墙按"程序路径"放行，go test 每次换临时目录会被当成新程序反复弹窗，
+# 这个脚本让路径固定（放行一次即可）。会自动探测 WinLibs gcc，参数见脚本头部：
+./scripts/test.sh                                  # 默认全部测试包
+./scripts/test.sh -p ./internal/media/ -- -run SRTP -v   # -- 之后是 go test 的测试参数
+./scripts/test.sh -p ./internal/sip/
+
+# 测试（等价的手工方式）：CGO 包（audio）需要 gcc，用 build.bat 同款工具链：
 export CC="<WinLibs mingw64/bin/gcc.exe 路径>"   # build.bat 输出里可见
 export CGO_ENABLED=1
 go test ./internal/media/ ./internal/wsapi/ ./internal/sip/ ./internal/ui/ ./internal/updater/
-# 带 Opus 的包还要 -tags audio（需先跑 scripts/build-audio-libs.bat 生成静态库，
-# 并把 third_party/audio/<目标>/{include,lib} 经 CGO_CFLAGS/CGO_LDFLAGS 传入）：
+# 带 Opus / 视频的包还要 -tags（需先跑 scripts/build-audio-libs.bat / build-video-libs.bat
+# 生成静态库，并把 third_party/{audio,video}/<目标>/{include,lib} 经
+# CGO_CFLAGS/CGO_LDFLAGS 传入，或直接用 GOFLAGS="-tags=video" ./scripts/test.sh）：
 go test -tags audio ./internal/media/
 
 # 运行
@@ -102,7 +113,12 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 - **Linux → Windows GUI**：用 mingw-w64 直接交叉（`build.sh` 已内置，
   `-H=windowsgui`）。glfw 的 C 源码与 mingw 专用头（`glfw/deps/mingw`）随
   go-gl/glfw 模块自带，malgo 自带 miniaudio.c，链接目标只有 mingw 自带的
-  系统导入库，**无需 Windows SDK**。386 目标加 `-extldflags -static` 免 DLL。
+  系统导入库，**无需 Windows SDK**。**两个 mingw 目标都加 `-extldflags -static`**：
+  mingw 运行时（libwinpthread/libstdc++/libgcc）是 **MinGW 工具链的东西、Windows
+  并不自带**，不静态化的话产物必须在装了这些 DLL（或装了 MinGW）的机器上才启动得
+  起来；静态化后导入表只剩 ole32/quartz 这类系统组件（DirectShow 用）。
+  产物要求 **Windows 10 及以上**：Go 1.22 起官方就不再支持 Win7/8（运行时要
+  `ProcessPrng` 这类 Win10 才有的 API），属工具链的硬限制，别再答复"能不能支持 Win7"。
   Debian/Ubuntu 的 mingw-w64 工具链在 **amd64 与 arm64 主机上都有包**，
   所以 arm64 构建机同样能出这两个 Windows 产物，无需禁用。
 - **Linux 交叉对侧架构 GUI（amd64 ⇄ arm64）**：glfw 的 Linux 后端会同时编
@@ -123,6 +139,22 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 - Windows 386 GUI 需 32 位 MinGW，build.bat 依次探测 `C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe`
   （MSYS2 `mingw-w64-i686-gcc`）与 `%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe`
   （WinLibs i686 posix-dwarf-ucrt 解压即用）；两者都缺则跳过 386 目标。
+- **Windows arm64 GUI 只能用 llvm-mingw**（`https://github.com/mstorsjo/llvm-mingw`，
+  解压即用、无需 Docker/虚拟机）：**GCC 系的 mingw-w64 没有 aarch64-w64-mingw32 目标**，
+  `gcc-mingw-w64-*`、WinLibs、MSYS2 的 mingw64/mingw32 都出不了它（MSYS2 的 clangarm64 是
+  **ARM64 机器上的本机环境**，不是 x64 上的交叉）。包按宿主分：Windows 取
+  `llvm-mingw-<版本>-ucrt-x86_64.zip`，Linux 取 `...-ucrt-ubuntu-22.04-{x86_64,aarch64}.tar.xz`，
+  内含一份 clang + lld + mingw-w64 sysroot，靠 `--target=aarch64-w64-mingw32` 出目标码
+  （工具名 `aarch64-w64-mingw32-clang{,++}`，posix 线程模型）。两个构建脚本的探测顺序都是
+  PATH → `LLVM_MINGW=<解压目录>` → 默认位置（build.bat 是 `%USERPROFILE%\tools\llvm-mingw`，
+  build.sh 另试 `$HOME/tools/llvm-mingw`、`/opt/llvm-mingw`、`/usr/local/llvm-mingw`），
+  **探测不到就跳过该目标并打印上述安装步骤**（不会让整个构建失败）。
+  该产物的 glfw/miniaudio 都是架构无关的 C，直接编过；导入表只有系统 DLL（UCRT），
+  无 libwinpthread/libgcc 依赖。**视频/Opus/AEC 的静态库都没有 arm64 版本**（要另为
+  aarch64-w64-mingw32 编库，且 OpenH264/abseil 是 C++、llvm-mingw 带的是 libc++ 而非
+  libstdc++，脚本里的 `-lstdc++` 得跟着改），所以该目标**固定为基础版**（G.711/G.722 +
+  音频设备 + 界面 + 信令 + WS）：build.bat/build.sh 都刻意**不对它做库探测**，免得打印
+  「跑 build-video-libs 生成」这种对该目标无效的提示。
 
 > 注意：`internal/protocol` 的 Windows 注册表实现按构建标签拆分在
 > `register_windows.go`（导入 x/sys/windows/registry 会破坏 Linux
@@ -135,7 +167,8 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 cmd/sip-phone/main.go   入口：命令行/单实例/协议注册/开机自启/组装各层/GUI 主循环
 internal/
   config/     JSON 配置加载与保存（密码 AES-256-GCM 加密、原子写入）
-  logx/       slog 日志：滚动+gzip 归档、信令跟踪 TraceSIP（自动脱敏）
+  logx/       slog 日志：滚动+gzip 归档、信令跟踪 TraceSIP（自动脱敏）、崩溃现场记录
+              （crash.go/crash_test.go：debug.SetCrashOutput → crash.log，REQ-LOG-009）
   core/       应用核心：状态机、事件总线（发布-订阅）、Telephony 抽象接口。
               calllog.go 定义通话记录接口与采集点（REQ-CALL-007），实现在
               internal/calllog：单 worker FIFO 队列串行执行全部 SQL、
@@ -146,7 +179,8 @@ internal/
   sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理；
               netwatch.go 为注册看护：休眠唤醒/网络切换后立即重新注册，REQ-CALL-009；
               tls.go 为 TLS 传输：客户端配置 + 自签证书 + 本端 TLS 监听，REQ-ACC-006）
-  media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus/G.722 编解码、播放环形缓冲、SDP 协商
+  media/      媒体引擎：RTP/RTCP 收发、PCMA/PCMU/Opus/G.722 编解码、播放环形缓冲、SDP 协商，
+              媒体加密 SRTP（srtp.go，REQ-MEDIA-009）
   media/g722/  G.722 纯 Go 算法（QMF + 双子带自适应 ADPCM；golden 向量在 testdata/）
   audio/      音频设备：malgo 后端（全双工采集/播放、设备枚举/选择、提示音）
   wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳、网页视频订阅 video.go）
@@ -170,10 +204,13 @@ web/
               notifyUpdate，查询在软电话侧）
 release/      发布到更新站点的配置与元数据：release.conf（站点/应用 ID/令牌）、
               app.json（应用级元数据，经站点 metadata 接口写入）、icon.svg（图标，经 icon 接口写入）
-scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）与一键发布（release.sh/.bat）
+scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）、固定路径测试运行器
+              （test.sh，防火墙只弹一次）与一键发布（release.sh/.bat）
 docs/         design.md（架构设计：分层与依赖、各模块职责、关键决策、目录地图——新同学先看这份）、
               requirements.md（需求）、ws-protocol.md（WS 协议）、auto-update.md（自动更新与
-              更新站点接入：规范摘要、REST API、参考实现、接入清单）；changelog.md 在仓库根目录
+              更新站点接入：规范摘要、REST API、参考实现、接入清单）、
+              user-manual.md（用户使用手册：面向最终用户）、sdk-guide.md（SDK 开发指南：
+              面向前端集成者；**改 SDK/WS 的对外行为后这两份要同步**）；changelog.md 在仓库根目录
 ```
 
 ## 分层架构与事件流
@@ -252,19 +289,23 @@ libopus 构建很轻（秒级，无 nasm/pkg-config 依赖，x86 的 SIMD 走编
 - 丢包补静音（不做 PLC，与 G.711 一致）；编解码器是**包级共享实例**，实现了 `resetter`，
   通话开始/换流/换编码时复位。
 
-**四个目标的可行性**（都是交叉编译，宿主机位数无关）：
+**五个目标的可行性**（Windows 的三个都是交叉编译，宿主机位数无关）：
 
 | 目标 | FFmpeg | libvpx | OpenH264 | 摄像头 |
 | --- | --- | --- | --- | --- |
 | windows-amd64 | ✓ | ✓ | ✓ | ✓ |
-| windows-386 | ✓ | ✓ | ✓ | **不可用**（见下） |
+| windows-386 | ✓ | ✓ | ✓ | ✓（见下） |
+| windows-arm64 | —— | —— | —— | ——（基础版：三套静态库无 arm64 版本，无视频即无摄像头） |
 | linux-amd64 / arm64 | ✓ | ✓ | ✓ | ✓（V4L2） |
 
-Windows 386 的摄像头**编不过**，是上游限制：mediadevices 的 `camera_windows.hpp`
-回调 `HRESULT SampleCB(...)` 漏了 `STDMETHODCALLTYPE`，而 mingw 的 `qedit.h` 里
-`ISampleGrabberCB::SampleCB` 带 `__stdcall`。x86_64 上 `__stdcall` 被忽略所以能编，
-**i686 上是真实的调用约定冲突**。用 `-D__stdcall=` 强行编会让整份 COM 调用变 cdecl，
-运行期必崩，不要试。所以 386 走 `camera_other.go`：编解码可用、摄像头不可用。
+**Windows 摄像头是仓库内自带的一份 DirectShow 驱动**（`internal/video/dshow`，
+从 mediadevices v0.10.0 的 `pkg/driver/camera` 复制，MIT）：上游那份在 i686 上
+**编不过**——`camera_windows.hpp` 的回调 `HRESULT SampleCB(...)` 漏了
+`STDMETHODCALLTYPE`，而 mingw 的 `qedit.h` 里 `ISampleGrabberCB::SampleCB` 带
+`__stdcall`；x86_64 上 `__stdcall` 被忽略所以能编，**i686 上是真实的调用约定冲突**。
+复制品只补了这两处声明（`SampleCB`/`BufferCB` 的声明与定义都加
+`STDMETHODCALLTYPE`），**amd64 与 386 共用**，别再改回上游的 camera 包。
+⚠️ 用 `-D__stdcall=` 之类的宏强行编会让整份 COM 调用变 cdecl，运行期必崩，不要试。
 
 **32 位（windows-386）的 FFmpeg 必须 `--disable-x86asm`**（脚本里已加）：不关的话
 H.264 解码会崩在 FFmpeg 自己的 AVX 去块滤波里——gdb 实测栈是
@@ -316,7 +357,8 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 
 - **交流、文档、注释、提交信息、界面文案一律中文**。
 - **Git 工作流**：开发在分支上进行（工作分支 dev，master 为收口分支）；**会话中修改的代码不得自动提交**——提交与 push 必须经用户人工确认后执行，且**不自动合并到 master**（合并 master 需用户明确指示）。
-- **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
+- **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**重启只针对"本来就在跑的那几个"**：先 `Get-CimInstance Win32_Process … | Select CommandLine` **记录下当前实例（含 `-instance N` / `sip://…` 之类的启动参数）**，kill 之后**按原参数把这一组拉起来**——不要无条件启动 3 个实例（用户没开的别替他开）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
+- **简单的界面改动（文案、占位提示、字段增删）不用自动截图确认**——用户自己会看（2026-10-06 明确要求："这些简单的 ui 改动，不用每次都自动点击截图确认"）。合成鼠标截图那套探针（`D:\cache\temp\guiprobe\probe.ps1`）只在**布局/交互类改动**（新页面、自定义布局、定位、滚轮）或**用户报障需要复现**时才用。
 - 版本 1.0.11 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
 - 弹窗按钮文案「确定/取消」；**弹窗的 parent 必须是当前可见的窗口**——Fyne 把对话框画在父窗口的画布上，主窗体隐藏到托盘时弹在主窗体上用户根本看不见。默认走 `a.dialogParent()`（主窗体不可见且通话记录窗口开着就用它），从记录窗口发起的用 `showXxxIn(a.historyW, …)`；**永远不要传 nil**（dialog 的 parent 为 nil 直接 panic）。
 - **通话记录（REQ-CALL-007）的写入口径**：开始/接通/结束三个时刻在 `core.App` 里**直接入队**（不订阅事件总线——总线容量 64、满即丢，通话记录不能建立在会丢事件的东西上），且**先写记录再 `publishCall`**（界面收到 `call.terminated` 会立刻查库刷新，顺序反了就查不到新记录）。同一通话重复上报结束的幂等由存储层的 `ended_at=0` 条件兜住，**不要**在核心层再加"是否首次结束"的状态。库里时间戳 0 表示"未接通/进行中"（0 与 `time.Time{}` 的互转只在 `internal/calllog` 的 `toMillis/fromMillis` 里做，别把 1970 年漏到界面）。
@@ -339,7 +381,35 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   也表示 TLS（默认端口 5061，前缀优先于 `?transport=`）。**服务器证书默认不校验**（内网自签开箱即用），
   勾选「校验服务器证书」后按系统根证书 + 主机名校验；**不做客户端证书（mTLS）**；本端 TLS 监听的证书是
   自动生成的自签名证书（`<实例目录>/tls/local-{cert,key}.pem`，RSA 2048、SAN 含本机各网卡 IP）。
-  **只加密信令，媒体仍是明文 RTP**（SRTP 是 REQ-MEDIA-009），界面与文档都要这么写。
+  **只加密信令**：媒体是否加密由「媒体加密」决定（SRTP，REQ-MEDIA-009，默认「支持」= 本端不主动
+  声明、对端要求才配合），界面与文档都要写清楚两者是两件事。
+- **媒体加密 SRTP（REQ-MEDIA-009）的口径**：**SDES-SRTP（RFC 4568）**——密钥随 SDP 的
+  `a=crypto:… inline:<base64(主密钥‖盐)>` 交换，**只加密 RTP/RTCP**（音频、视频、DTMF 事件包；
+  SIP 信令不归它管）。四档 `account.srtp`（配置页「媒体加密」下拉）：
+  **关闭**（不协商，对端要求也按明文应答）/ **支持**（默认：本端 offer **不带** crypto，来电带
+  crypto 则配合）/ **建议**（offer 带 crypto，对端不接受则明文继续）/ **必要**（对端没有可接受的
+  crypto 就失败：呼入 488、呼出挂断、重协商去掉 crypto 回 488）。六个套件按序写在 offer 里
+  （`AES_CM_128_HMAC_SHA1_80` 第一），answer **复用对端选中的 tag 与套件、只换自己的密钥**；
+  不认识的套件/带 lifetime/MKI/会话参数的行一律跳过。**不做** DTLS-SRTP（RFC 5763/5764）、ZRTP、
+  客户端证书。SDES 的密钥在 SDP 里明文传，**只有配合 TLS 信令才有意义**（配置页已提示）。
+- **SIP 域名（REQ-ACC-022）与声明 IP（REQ-ACC-023）的口径**：
+  - 域名只改 **URI 里的域**（REGISTER 的 R-URI/From/To、呼出 INVITE 的 From 与 To/R-URI，
+    纯号码补成 `sip:号码@域名`），**网络目的地永远是 Server:Port**——域名多半只在服务器内部
+    解析，本机不一定解析得了：注册走 `req.SetDestination(serverDest(acc))`（401 重试会原样
+    带上，`cloneRequest` 里有 `SetDestination`），呼叫走首条 `Route: <sip:服务器:端口;lr>`
+    （与出站代理同一手法，**代理配置优先**）。`req.Destination()` 是先看 Route、再看 R-URI
+    ——这是 sipgo 里唯一能把"URI 指向谁"与"报文发给谁"分开的办法。留空 = 用 Server（历史行为）。
+  - 「声明 IP」在界面上是**可输入的下拉**（`widget.SelectEntry`，与主窗体拨号框同款）：
+    候选由 `sip.LocalIPv4s()` 给出——**滤掉回环与虚拟网卡**（Hyper-V/WSL/VMware/
+    VirtualBox/Docker/VPN/TAP，按 MAC 前缀 + 网卡名双重判定）与链路本地地址，
+    并**按可达性排序（公网 → CGNAT → RFC1918 私网）**；留空 = 自动，也可手填任意 IP。
+    误伤真实网卡比漏掉虚拟网卡更糟（用户会以为"列表是空的"），加名字关键词时要克制。
+  - 声明 IP 同时写三处：Contact 主机、SDP 的 `c=`/`o=`（`SetSDPIP`）、**Via 的 sent-by**
+    （`setClientHost` 反射写 sipgo 的私有 `Client.host`，与 `setClientRPort` 同一手法与降级策略，
+    保存账户即生效）。**只改"声明"不改绑定**：transport 层只在 Via 没写主机时才用连接地址回填
+    （sipgo `overrideSentBy`，且要求 Host 与 Port 都为 0 才回填）。优先级：声明 IP > STUN > 出口 IP
+    ——`localHost()` 里声明 IP 先返回，所以配了它之后 STUN 虽仍在探测（netwatch 照旧重探/清空），
+    结果**不再影响** Contact 与 SDP。
 
 ## 已知陷阱（修改相关代码前必读）
 
@@ -425,13 +495,48 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **通话面板窗口控制按平台拆分**：`ui_call.go`/`ui.go` 只调用平台函数（`moveCallWindowToCorner`、`callWindowTitle`、`markTrayQuit`、面板尺寸常量），实现分别在 `topmost_windows.go`（Win32）与 `topmost_linux.go`（X11）——**勿把任一侧的逻辑写进共享文件**。Linux 侧靠 `driver.NativeWindow.RunNative` 取 X11 窗口号（回调收到 `driver.X11WindowContext`），需经 `fyne.DoAndWait` 在主线程取；`fyne.DoAndWait` 不可在主线程调用（会 panic），故 `moveCallWindowToCorner` 内部起 goroutine。Wayland 会话下 X11 手段全部无效（不能自定位、去装饰看合成器）——所以 Linux 默认把后端固定到 X11（见下方「Linux 桌面后端」条）。X11 侧还额外把 `_NET_WM_STATE` 写成**窗口属性**（不只发 ClientMessage），因为 Xwayland 下没有独立 X11 窗口管理器处理消息。但**任务栏条目在 labwc 下无法由客户端去掉**（实测属性/消息都不生效）：任务栏走 foreign-toplevel 协议，该协议没有 skip-taskbar 字段，`_NET_WM_STATE_SKIP_TASKBAR` 不会透传。要隐藏只能用 labwc 自己的窗口规则（`~/.config/labwc/rc.xml`，labwc ≥0.6.4）：`<windowRule title="SIP" skipTaskbar="yes" skipWindowSwitcher="yes"/>`——按 `title` 匹配（面板标题恒以 `SIP` 开头，主窗体是 `mti-sip-phone …`），**勿按 `identifier` 匹配**（Xwayland 下两窗口 WM_CLASS 相同，会连主窗体一起隐藏）。用户已确认该条目可接受，不要再在客户端代码里尝试修它。
 - **服务端心跳（REQ-ACC-020/021）与 OPTIONS 的关系，别想当然**：**整套机制只对 UDP 传输生效**（`heartbeatWanted()`：开关打开 **且** 传输是 udp；`optchk` 标记、传输层计数、间隔学习、2.5 周期超时重注册四处都受它管，设置页在 tcp/tls 下把勾选项置灰——用户要求）。启用后只是注册报文的 **User-Agent 带 `optchk`**，服务端据此定期发 OPTIONS 探测；**OPTIONS 不要专门处理——sipgo 默认回 405，实测 OpenSIPS 接受**。曾实现过"逐字回抄的 200 + Contact + 重传缓存"，服务端仍判探测失败并摘注册（NAT/rport 下它登记的是改写后的外部地址，与我们的 Contact 对不上）。**心跳计数必须挂在传输层读钩子（`readFilter`）上**：服务端的探测复用**同一个 Via branch**，sipgo 会把 Timer J（32 秒）内相同 branch 的请求当**重传**、不再回调 handler——按 handler 计数会把 10 秒的心跳看成 ~40 秒。超时判定是 **2.5 个周期**（`hbOverdueFactor`）：先置**未注册**（托盘/圆点变红、原因"服务端心跳超时"），再立即重新注册，触发一次后复位。
 - **信令日志唯一出口是 `internal/sip/tracer.go` 的全局跟踪器**（sipgo 传输层钩子 + 「SIP 信令记录」开关）：**业务代码里不要再散点调 `logx.TraceSIP`**，否则同一条报文在日志里出现两份（历史缺陷，已清理 11 处）；跟踪器里另有"非 SIP 载荷不记"的过滤（挡掉服务端/NAT 的四个 0 字节保活包）。
+- **「软件凭空消失、日志停在半截」= 崩溃输出没有去处，不是没崩**：托盘版是 GUI 子系统
+  （`-H=windowsgui`），**没有控制台**——未捕获的 panic、运行期致命错误（并发 map 读写、
+  栈溢出）、cgo 里的非法内存访问都只写 **stderr** 后 `exit(2)`；Windows 事件日志**也不会有
+  记录**（那是进程"**自己**退出"的，既没有 Application Error 也没有 WER 报告）。所以
+  「事件日志里干干净净」**不能**说明没崩。`internal/logx/crash.go`（REQ-LOG-009）现在把这份
+  输出落盘到日志目录 `crash.log`（下次启动归档为 `crash-<时间>.log`，并在主日志里 WARN
+  「上次是异常退出」）——排查「实例跑着跑着没了」第一站就是它：**空文件 = 不是崩溃**（正常
+  退出或被 taskkill 杀掉）。改这里注意：`debug.SetCrashOutput` 内部 **dup** 句柄且**同一进程
+  内不会释放**，所以同进程里重复安装（测试）要先 `SetCrashOutput(nil, …)`，否则 Windows 下
+  `crash.log` 一直被占、归档改名必失败。
 - **日志轮转：Windows 上删除/改名文件前必须先关自己的句柄**（`internal/logx/logx.go` 的 `rotate`/`gzipFile`）。Windows 要求**所有**句柄都带 `FILE_SHARE_DELETE` 才允许删/改名，而 Go 的 `os.OpenFile` 只申请 `FILE_SHARE_READ|FILE_SHARE_WRITE`（`syscall_windows.go` 的 sharemode）——**自己的句柄没关，`os.Remove`/`os.Rename` 必然失败**。历史缺陷写成 `return os.Remove(src)`（在 `defer in.Close()` 之前执行），于是"压缩完成却删不掉源文件"：日志文件永不截断（实测卡在 42.8MB）→ 尺寸一直超上限 → **之后每次写日志都再完整轮转一次**（整个文件重新 gzip 一遍，且全程持写锁）→ 写日志的线程（SIP/界面/**RTP 接收循环**）被随机卡住数百毫秒（实测同一接收循环迭代内相邻两行日志相差 494ms）。症状极具迷惑性：通话开始时的日志突发撞上轮转 → 接收循环停摆、对端媒体包在 socket 里排队后成批涌入 → 播放缓冲超深截断 → **"第一声回铃音断续"**（真因，找了很久）。另外那条路径还会让 `.1.gz~.9.gz` **内容完全相同且每次轮转 mtime 全变**（每次压的都是同一份越来越大的文件）。现在的做法：关闭 → **改名切走**（改名即完成截断）→ 立即开新文件继续写 + 后台 goroutine 压缩与归档移位（不持锁做重活）；改名失败退化为清空当前文件，连清空都不行则降级为"不再轮转"，**绝不能回到"每次写都重压整个文件"的循环**。改这里务必跑 `go test ./internal/logx/`（有回归测试）。
 - **媒体/NAT**：对称 NAT 下 UDP 映射需持续出向流量保活（早期媒体阶段 SetKeepalive 持续发静音帧）；SDP 宣告地址与 socket 绑定地址分离（SetSDPIP）；183→200 可能换 SSRC/端口（引擎已自动处理，勿移除 playPush 的重置逻辑）。
+- **SRTP（`internal/media/srtp.go`，改之前必读）**：
+  - **密钥方向搞反 = 双向全解不开**：RFC 4568 §6.1 的口径是「**SDP 里的 key 是写这条 SDP 的一方
+    用来加密它自己发出的媒体**的」——本端发送用**自己**写进 SDP 的密钥，接收用**对端**给的密钥；
+    密钥单向、套件双向。answer 还必须**复用 offer 里选中那条的 tag 与 crypto-suite**，只换密钥。
+  - **pion 的 `CreateContext` 默认 `SRTPNoReplayProtection`**（重放保护是**关**的），必须显式传
+    `SRTPReplayProtection/SRTCPReplayProtection`；否则「防重放」是假的。pion 的 `Context`
+    **不保证并发安全**：收发各一个实例、各自带锁（发送侧还会被采集回调与 RTCP 循环并发调用）。
+  - **加密启用后不能再有明文出向包**：打洞（`punchHole`）、早期媒体保活、DTMF（`SendDTMF` 自己
+    `WriteToUDP`，不经过 `sendPacket`）、RTCP（SRTCP，明文 RTCP 会被对端丢弃 → PLI 发不出去 =
+    黑屏）全都要加密。因此**协商必须早于 `setRemote`/`punchHole`**（`SDPAnswerWithDirection`/
+    `SDPApplyAnswer`/视频的 `ApplyOffer`/`ApplyAnswer` 里都是这个顺序，别调换）。
+  - **每个 m= 行独立密钥**：音频与视频各持一份 `cryptoState`（视频在 `VideoEngine` 上），
+    视频段要有自己的 crypto 行；只加密音频不加密视频会被严格的对端拒（488）。
+  - **换流（183→200 换 SSRC / 序号大跳变）要 `resetRx`**：接收侧的序号/ROC 推断沿用旧状态会算出
+    错误的 ROC，现象是「接通后解密全部失败、没有声音」。反过来，**重协商时若对端的密钥参数没变就
+    不要重建上下文**（重建同样清掉 ROC，通话超过约 22 分钟、序号绕回一次后就会解不开）——
+    `samePeerCrypto` 的短路就是为这个。
+  - **重协商必须重复带 `a=crypto`**（SDES 口径：重协商里不出现 crypto = 取消加密）；非「必要」
+    策略下按明文降级并打 Warn，「必要」策略直接回 488。
+  - **策略是四档不是开关**：`关闭` 模式下**连对端递过来的加密也不能接受**（`acceptsSRTP()` 的
+    判断一开始漏了，被 `TestSRTPRequiredFailsWhenAnswerLacksCrypto` 抓出来）；「支持」= 本端
+    offer 不带 crypto（不加密时 SDP 与历史**逐字节一致**，golden 测试钉着）。
+  - **密钥绝不能进日志**：SIP 信令记录会把整份 SDP 落盘，`logx.MaskSecrets` 里有一条专门抹
+    `a=crypto:… inline:<base64>` 的规则（套件名保留），加新日志/新脱敏规则时别绕开它。
 - **自更新重启时序**（勿简化）：重启请求只标记 `restartRequested` 并取消 ctx，**释放单实例锁与拉起新进程必须放在退出收尾**（`shutdown` 之后、进程退出之前，见 main.go 的 `spawnNewProcessIfRequested`）——顺序反了会让新进程因锁冲突转发参数后退出，或因 WS 端口仍被占用而 +1 写回配置、SIP 双注册。历史缺陷：旧 `onRestart` 释放锁+拉起进程后不退出旧进程（已修复）。Windows 上运行中的 exe **能改名不能覆盖**，替换流程为 exe→.old、.new→exe、失败回滚（`internal/updater/replace.go`，已用真实进程验证）。
 - **更新提示窗与通话面板都吸附右下角**：通话期间隐藏更新提示窗（`setCallUI` 非空闲分支），通话结束后按 `updatePopupPending` 补弹；不要在两者都可见时做偏移摆放。
 - **测试 flakiness**：`internal/sip` 全量并行跑时偶发 5s 超时失败（信令测试间资源干扰，与具体改动无关）；分组或单跑稳定。验证方式：`go test -run "<Test名>"` 单跑 + 分组复跑。
 - **malgo 回调帧长不固定**：WASAPI 共享模式下回调 frameCount 不保证等于 20ms（160 样本），不要假设固定帧长读写引擎。
 - **build.bat（cmd 解析）**：`if (...)` 块内的 `echo` 文本不要同时出现括号与尾部 `...`——cmd 会把 `(...)` 当命令组，报「此时不应有 ...。」并中断整个构建（不回显 errorlevel）。多分支输出用 `goto` 标签而不要塞进 if/else 块。
+- **平台专有文件在别的平台上根本不参与编译，本机的绿灯说明不了任何事**：`*_linux.go`（以及 `_other.go`）被构建约束排除，Windows 上的 `build.bat`、`go test`、`go vet` **全都看不见它们**。踩过：`internal/ui/topmost_linux.go` 用了 `sync`/`atomic` 却没写进 import（2026-10，窗口位置记忆那次加的代码），Windows 侧一路正常，用户跑到 Linux 上 `build.sh` 才报 `undefined: sync`。**改了 linux 专有文件必须到 Linux 上编一次再提交**。Windows 上能做的最小交叉检查是 `GOOS=linux CGO_ENABLED=0 go build -tags noaudio ./internal/...`（只覆盖不带 cgo 的包；`internal/ui` 因 fyne 依赖 cgo 查不到，只能靠 Linux 构建）。另外可以机械扫一遍：找出「用了 `xxx.` 却没 import」的文件（写个一次性脚本比对 import 列表即可，比逐个 file 目测可靠）。
 - **32 位 Win32 调用**：`SetWindowLongPtrW` / `GetWindowLongPtrW` 是 **64 位专属导出**，32 位 user32.dll 里没有该符号，`LazyProc.Call` 找不到过程会直接 panic；GUI 子系统（`-H=windowsgui`）无控制台，panic 无任何可见输出，表现为「一操作就静默崩溃」。`topmost_windows.go` 的 `setCallWindowClamp` 用 `Find()` 失败回退到 `SetWindowLongW`（32 位 LONG_PTR 与 LONG 同宽，语义等价）。新增任何 Win32 调用前先确认该导出在 32 位下存在。
 - **Linux 桌面后端：Wayland + libdecor（必读）**：`internal/ui/glfw_linux.go` 的 `prepareGLFW()`（在 `ui.Run()` 开头调用，必须早于第一个窗口创建）做两件事：
   - **关闭 libdecor**（`glfw.InitHint(glfw.WaylandLibdecor, glfw.WaylandDisableLibdecor)`）：GLFW 在 Wayland 下默认优先用它画装饰，而 libdecor 释放 frame 时先销毁 xdg_toplevel、后销毁 decoration，违反 xdg-decoration 协议，wlroots 0.17+ 的合成器（labwc/sway）会判定协议错误并**断开该客户端的 Wayland 连接**。连锁反应极具迷惑性：连接已死 → 新建窗口的 EGL 建面必然失败（报错文案是假失败的 `EGL: Failed to create window surface: Success`）→ 而 go-gl 绑定的 `acceptError` 会把 PlatformError **吞成 nil error**，Fyne 因此留下没有 viewport 的僵尸窗口（通话面板显示不出来、之后主窗体也拉不起来），同时主循环卡死在 `glfwPollEvents`，托盘退出与 SIGTERM 全失效（只能 kill -9），但 SIP/WS goroutine 照常工作。
@@ -466,9 +571,9 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   2. libvpx 的 `vpx_dsp_rtcd.h` 等由 `rtcd.pl` 按架构生成，沿用 64 位的表会引用
      只存在于 `fwd_txfm_ssse3_x86_64.asm` 的符号 → 32 位链接报 `_ssse3` 未定义。
 - **视频静态库：链接必须带 `-lstdc++`**（OpenH264 是 C++ 实现，用到
-  `operator delete(void*, unsigned int)` 这类 C++14 定长释放）。Windows 上 386 目标因
-  摄像头被排除、Go 改用 `gcc` 链接（amd64 有 C++ 摄像头源所以自动走 g++）；**Linux 上
-  本包没有 C++ 源、Go 一律用 `gcc` 链接**，同样中招（实测 Debian 报
+  `operator delete(void*, unsigned int)` 这类 C++14 定长释放）。Windows 上本包的
+  构建含 C++ 源（摄像头 dshow_windows.cpp），Go 会自动改用 g++ 链接；**Linux 上
+  本包没有 C++ 源、Go 一律用 `gcc` 链接**，就中招了（实测 Debian 报
   `undefined reference to 'operator new(unsigned long)'` / `__gxx_personality_v0`）。
   两处都在 `internal/video/ffmpeg.go` 的 `#cgo LDFLAGS` 里显式加上。
 - **cgo 前导块（`/* ... */`）里的 `//` 注释中不能出现星号加斜杠**——那是 C 块注释的
@@ -478,17 +583,27 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **视频静态库：Windows 链接必须显式 `-lwinpthread`**。mingw 下 libvpx 检测到
   pthread.h 就用 pthread 线程模型，其 `.a` 里有大量 `pthread_*`/`sem_*` 未定义符号
   （实测 70 处）。WinLibs 是 **posix** 线程模型的工具链，gcc/g++ 驱动会**隐式**带上
-  libwinpthread（所以 Windows 产物动态依赖 `libwinpthread-1.dll`，分发时要一起给），
+  libwinpthread（产物本身因 `-extldflags -static` 并不依赖 `libwinpthread-1.dll`），
   本机构建因此从不暴露；Debian 的 mingw 不会自动带，交叉链接报
   `undefined reference to 'pthread_mutex_lock'` / `'sem_post'`。已在
   `#cgo windows LDFLAGS` 显式加上（重复链接同一库是空操作，对两条路径都无副作用）。
 - **交叉 Windows 必须显式给 `CXX`**（`build.sh` 已设成与 CC 同前缀的 g++，并在带视频
   时检查它存在）。Go 的 `cfg.DefaultCXX` 对交叉目标返回裸 `"g++"`，也就是**宿主的**
   g++；而 cgo 编 C++ 与「包里含 C++ 源时的链接驱动」都走 CXX。不带视频时 Windows
-  交叉没有 C++ 源，所以一直没暴露；`-tags video` 引入 mediadevices 的
-  `camera_windows.cpp` 后就变成「用 Linux 的 g++ 编 Windows 源码」——`<iostream>`、
-  `<unistd.h>` 都能找到、**唯独 `<dshow.h>` 找不到**（实测，报错极具误导性），链接
-  同样会落到宿主 g++。Debian 上 mingw 的 g++ 是独立包（`g++-mingw-w64-*`）。
+  交叉没有 C++ 源，所以一直没暴露；`-tags video` 引入摄像头的 C++ 源
+  （`internal/video/dshow/dshow_windows.cpp`）后就变成「用 Linux 的 g++ 编 Windows
+  源码」——`<iostream>`、`<unistd.h>` 都能找到、**唯独 `<dshow.h>` 找不到**（实测，
+  报错极具误导性），链接同样会落到宿主 g++。Debian 上 mingw 的 g++ 是独立包
+  （`g++-mingw-w64-*`）。
+  **Linux 交叉（amd64 ⇄ arm64）同理，而且更容易中招**：2026-10 之前仓库里一个 C++
+  源都没有，所以那条路径一直没设 CXX 也没事；`internal/audio/apm_bridge.cc`（AEC，
+  `-tags apm`）进来之后，linux 交叉的链接驱动就变成了**宿主的** `/usr/bin/g++`——
+  拿 aarch64 的目标文件去链接，报 `Relocations in generic ELF (EM: 183)` /
+  `file in wrong format`，错误里唯一的人话只有 `/usr/bin/g++` 那一行（实测）。
+  `build.sh` 的 linux 交叉现在也显式给 CXX（`${CROSS_TRIPLE}-g++`，可用 `CROSS_CXX`
+  覆盖），并在「开了视频/AEC 却找不到它」时**跳过该目标并提示装
+  `g++-aarch64-linux-gnu`**——C++ 源要 cc1plus、`-lstdc++` 要目标架构的 libstdc++，
+  两者都在这个包里（只有交叉 gcc 是不够的）。
 - **视频静态库：FFmpeg 必须 `--disable-autodetect`**（只关 `--disable-libdrm` 不够）。
   autodetect 类外部库不受 `--disable-everything` 约束，会按宿主装的开发包自动启用：
   踩过的是 libdrm（走 pkg-config，Linux 构建机装了 libdrm-dev 就把 `hwcontext_drm.o`

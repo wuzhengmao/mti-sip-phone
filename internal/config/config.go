@@ -8,10 +8,12 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +31,9 @@ type Account struct {
 	Proxy       string `json:"proxy"`       // 出站 SIP 代理（host:port，可选，REQ-ACC-019）
 	Transport   string `json:"transport"`   // 传输协议：udp / tcp / tls（REQ-ACC-006）
 	TLSVerify   bool   `json:"tlsVerify"`   // 校验服务器证书（仅 transport=tls 生效）。默认 false = 跳过校验（REQ-ACC-006：内网自签证书场景）
+	SRTP        string `json:"srtp"`        // 媒体加密（SDES-SRTP，REQ-MEDIA-009）：off / supported / preferred / required，默认 supported（空值按默认）
+	Domain      string `json:"domain"`      // SIP 域名（可选）：From/To/R-URI 里的域。留空 = 用 Server（REQ-ACC-022）
+	PublicIP    string `json:"publicIP"`    // 对外声明的 IP（可选）：Via/Contact/SDP 里写的地址。留空 = 自动（STUN → 本机出口 IP），REQ-ACC-023
 	Account     string `json:"account"`     // 账号（AOR 用户部分）
 	AuthUser    string `json:"authUser"`    // 认证 ID，为空时使用 Account
 	DisplayName string `json:"displayName"` // 显示名
@@ -55,6 +60,17 @@ type AudioConfig struct {
 	MicID         string `json:"micId"`         // 麦克风设备 ID，空 = 系统默认
 	SpeakerID     string `json:"speakerId"`     // 扬声器设备 ID，空 = 系统默认
 	RingSpeakerID string `json:"ringSpeakerId"` // 振铃音专用扬声器 ID，空 = 系统默认
+
+	// —— 音频预处理（REQ-MEDIA-007，webrtc-audio-processing）——
+	// 三个开关都走"默认值由 Default() 给、Load 先取 Default 再反序列化覆盖"的
+	// 老路，所以旧配置缺字段时仍然拿到默认值。
+	//
+	// 默认：AEC（回声消除）与 NS（降噪）**开**——外放时的自激回声是软电话
+	// 最常见的投诉，降噪基本无损；AGC（自动增益）**关**：它会和 REQ-MEDIA-006
+	// 的手动麦克风增益"较劲"，先让用户按需开启。
+	AEC bool `json:"aec"` // 回声消除
+	NS  bool `json:"ns"`  // 降噪
+	AGC bool `json:"agc"` // 自动增益
 }
 
 // 摄像头禁用标志：CameraID 取该值时表示不使用摄像头。
@@ -87,10 +103,47 @@ func (v VideoConfig) Enabled() bool { return !v.Disabled }
 // CameraUsable 摄像头是否可用（总开关启用且未被禁用）。
 func (v VideoConfig) CameraUsable() bool { return v.Enabled() && v.CameraID != CameraDisabled }
 
+// WindowPlacement 窗口位置记忆（物理像素 = 窗口矩形左上角）。
+//
+// Moved=false 表示用户**从未移动过**该窗口，位置一律由程序按默认口径摆放
+// （通话面板：工作区右下角 + 多实例列偏移；视频窗口：通话面板正上方、右边缘对齐），
+// 此时 X/Y 无意义。用户拖动过一次之后默认摆放不再覆盖，改用这里记下的位置
+// （重启后依然生效）。保存值越界（显示器拔掉/分辨率变化）时摆放会回退默认，
+// 但**不清掉**配置值，屏幕回来还能用。
+type WindowPlacement struct {
+	Moved bool `json:"moved,omitempty"`
+	X     int  `json:"x,omitempty"`
+	Y     int  `json:"y,omitempty"`
+}
+
 // UIConfig 界面配置。
 type UIConfig struct {
 	IncomingAlwaysOnTop bool `json:"incomingAlwaysOnTop"` // 来电窗口置顶
 	CallAlwaysOnTop     bool `json:"callAlwaysOnTop"`     // 通话面板置顶
+
+	// 通话面板 / 视频窗口的位置记忆（REQ-UI-040 / REQ-VIDEO-015）。
+	CallPanel   WindowPlacement `json:"callPanel,omitempty"`
+	VideoWindow WindowPlacement `json:"videoWindow,omitempty"`
+
+	// VideoTopmost 视频窗口置顶（REQ-VIDEO-015）：原为「会话内记忆」，
+	// 现在随窗口位置一并持久化（默认 false = 不置顶）。
+	VideoTopmost bool `json:"videoTopmost,omitempty"`
+
+	// LocalPreviewRotation / LocalPreviewMirror 本地回显的旋转（0/90/180/270）与
+	// 水平镜像（REQ-VIDEO-015）。**只记本地回显**——远端画面的旋转/镜像按用户
+	// 要求仍是会话内状态，不落盘（每次启动归零）。
+	LocalPreviewRotation int  `json:"localPreviewRotation,omitempty"`
+	LocalPreviewMirror   bool `json:"localPreviewMirror,omitempty"`
+}
+
+// NormalizeVideoRotation 规范化画面旋转角：先取 360 的模，非 90 的整倍数归 0
+// （手改配置写坏时不留半吊子角度）。与 core.SetVideoRotation 的口径一致。
+func NormalizeVideoRotation(deg int) int {
+	deg = ((deg % 360) + 360) % 360
+	if deg%90 != 0 {
+		return 0
+	}
+	return deg
 }
 
 // 更新检查周期的取值范围（分钟）：1 分钟 ~ 24 小时。
@@ -174,6 +227,8 @@ func Default() *Config {
 			Level: "info",
 			File:  true,
 		},
+		// 音频预处理（REQ-MEDIA-007）：AEC/NS 默认开，AGC 默认关
+		Audio: AudioConfig{AEC: true, NS: true},
 		Video: VideoConfig{
 			Width:  640,
 			Height: 480,
@@ -201,7 +256,7 @@ const (
 )
 
 // NormalizeTransport 规范化传输协议字符串：统一小写；空值或非法值回退 udp
-//（旧配置没有 tls 字段，零值行为与从前一致）。配置文件、界面下拉、sip:// / sips://
+// （旧配置没有 tls 字段，零值行为与从前一致）。配置文件、界面下拉、sip:// / sips://
 // 链接解析三处共用这一份判定。
 func NormalizeTransport(t string) string {
 	switch strings.ToLower(strings.TrimSpace(t)) {
@@ -211,6 +266,62 @@ func NormalizeTransport(t string) string {
 		return TransportTLS
 	default:
 		return TransportUDP
+	}
+}
+
+// NormalizeDomain 规范化 SIP 域名：去掉空白、`sip:`/`sips:` 前缀与 `user@`，
+// 并丢掉端口部分（**注册/呼叫的网络目的地始终是 Server:Port**，域只是 URI 里的
+// 名字，见 REQ-ACC-022）。空串 = 不配置（用 Server 作域）。
+func NormalizeDomain(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	for _, p := range []string{"sips:", "sip:"} {
+		if len(s) >= len(p) && strings.EqualFold(s[:len(p)], p) {
+			s = s[len(p):]
+		}
+	}
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	if i := strings.LastIndex(s, ":"); i >= 0 && !strings.Contains(s[i:], "]") {
+		s = s[:i] // host:port → host（IPv6 字面量有 ']'，不动）
+	}
+	return strings.Trim(s, "[] ")
+}
+
+// NormalizePublicIP 规范化"对外声明的 IP"：只接受 IP 字面量（SDP 的 c= 行必须
+// 是 IP，域名会被拒），非法值一律当未配置（返回空 = 自动）。
+func NormalizePublicIP(s string) string {
+	s = strings.Trim(strings.TrimSpace(s), "[]")
+	if ip := net.ParseIP(s); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+// 媒体加密（SDES-SRTP，REQ-MEDIA-009）策略取值。
+const (
+	SRTPOff       = "off"       // 关闭：不协商 SRTP，对端要求也按明文应答
+	SRTPSupported = "supported" // 支持（默认）：本端不主动声明，对端要求则配合加密
+	SRTPPreferred = "preferred" // 建议：本端 offer 声明 SRTP，对端不接受则明文继续
+	SRTPRequired  = "required"  // 必要：本端要求加密，对端不支持则拒绝本次通话
+)
+
+// NormalizeSRTP 规范化媒体加密策略字符串：统一小写；空值或非法值回退默认值
+// **supported**（旧配置没有该字段，零值即默认"支持"）。配置页、配置文件与
+// 协议链接共用这一份判定。
+func NormalizeSRTP(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case SRTPOff:
+		return SRTPOff
+	case SRTPPreferred:
+		return SRTPPreferred
+	case SRTPRequired:
+		return SRTPRequired
+	default:
+		return SRTPSupported
 	}
 }
 
@@ -306,13 +417,28 @@ func Load(path string) (*Config, error) {
 	if cfg.Video.BitrateKbps <= 0 || cfg.Video.BitrateKbps == 512 {
 		cfg.Video.BitrateKbps = 1024
 	}
+	// 窗口位置记忆：旋转角规范化（0/90/180/270），Moved/坐标零值即默认。
+	cfg.UI.LocalPreviewRotation = NormalizeVideoRotation(cfg.UI.LocalPreviewRotation)
 	return cfg, nil
 }
 
 // Save 保存配置到磁盘（原子写入，密码加密后落盘）。
 func (c *Config) Save(path string) error { return save(c, path) }
 
+// saveMu 串行化落盘。
+//
+// 写盘本身已经是"临时文件 + rename"的原子写，但**临时文件名固定**
+// （path + ".tmp"）且整个过程没有锁：两个 goroutine 并发保存时，会出现
+// "A 把 tmp rename 走、B 的 fd 继续往同一个 inode 写"——落盘内容成了两份
+// 配置拼起来的半截 JSON。写点本来就多（设置页、WS 侧、参数转发、拨号历史），
+// 窗口拖动结束/画面变换又新增了两个，加一把锁最省心（写盘是低频快操作，
+// 串行化的代价可忽略）。
+var saveMu sync.Mutex
+
 func save(c *Config, path string) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	// 密码加密：仅内存明文参与序列化前加密
 	if c.Account.Password != "" {
 		enc, err := encryptPassword(c.Account.Password)

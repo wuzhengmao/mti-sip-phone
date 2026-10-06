@@ -109,6 +109,10 @@ type App struct {
 	accTransport      *widget.Select
 	tlsVerifyCheck    *widget.Check // 校验 TLS 服务器证书（REQ-ACC-006）
 	tlsNote           *widget.Label // 「只加密信令」提示（仅传输=tls 时显示）
+	accSRTP           *widget.Select
+	srtpNote          *widget.Label // 媒体加密（SDES-SRTP，REQ-MEDIA-009）说明
+	accDomain         *widget.Entry // SIP 域名（REQ-ACC-022，留空用服务器地址）
+	accIPSelect       *widget.SelectEntry
 	accAccount        *widget.Entry
 	accAuthUser       *widget.Entry
 	accPassword       *widget.Entry
@@ -116,6 +120,13 @@ type App struct {
 	accEnabled        *widget.Check
 	micSelect         *widget.Select
 	speakerSelect     *widget.Select
+	aecCheck          *widget.Check // 音频预处理：回声消除（REQ-MEDIA-007）
+	nsCheck           *widget.Check // 降噪
+	agcCheck          *widget.Check // 自动增益
+	preprocessHint    *widget.Label
+	aecDesc           *widget.Label // 三个开关下面各自的说明（常驻）
+	nsDesc            *widget.Label
+	agcDesc           *widget.Label
 	ringSpeakerSelect *widget.Select
 	logFileCheck      *widget.Check
 	sipTraceCheck     *widget.Check
@@ -143,6 +154,10 @@ type App struct {
 	micBtn         *compactButton    // 麦克风开关（REQ-UI-023）
 	pulseStop      chan struct{}     // 振铃脉动动画停止通道
 	ringFlashRect  *canvas.Rectangle // 振铃边框闪烁描边（无边框窗口用，REQ-UI-025 修订）
+
+	// 窗口拖动（REQ-UI-040）：面板顶部的拖动条（抓手）
+	callGrip     *callGrip
+	callDragging bool // 本次拖动会话是否已开始（DragEnd 前不再重复 begin）
 
 	// 主窗口呼叫状态控件
 	keypadBtns []*widget.Button // 3×4 拨号键（空闲输入号码 / 通话中发 DTMF）
@@ -194,13 +209,13 @@ type App struct {
 	updShown           bool              // 提示窗当前是否显示（Fyne 无 Visible 查询）
 
 	// ---- 视频（REQ-VIDEO-*）----
-	callRow        *fyne.Container  // 主窗体「呼叫 + 视频呼叫」按钮行（视频按钮显隐要重排）
-	videoCallBtn   *compactButton   // 主窗体「视频呼叫」按钮（需求 3）
-	videoAnswerBtn *compactButton   // 来电弹窗「视频接听」按钮（需求 4）
-	videoBtn       *compactButton   // 通话面板「关闭视频」开关（需求 8）
-	videoCallCheck *widget.Check    // 设置页「启用视频通话」总开关（REQ-VIDEO-014）
-	camSelect      *widget.Select   // 设置页摄像头选择（需求 2）
-	camHint        *widget.Label    // 摄像头说明行（本构建不支持时改成提示文字）
+	callRow        *fyne.Container // 主窗体「呼叫 + 视频呼叫」按钮行（视频按钮显隐要重排）
+	videoCallBtn   *compactButton  // 主窗体「视频呼叫」按钮（需求 3）
+	videoAnswerBtn *compactButton  // 来电弹窗「视频接听」按钮（需求 4）
+	videoBtn       *compactButton  // 通话面板「关闭视频」开关（需求 8）
+	videoCallCheck *widget.Check   // 设置页「启用视频通话」总开关（REQ-VIDEO-014）
+	camSelect      *widget.Select  // 设置页摄像头选择（需求 2）
+	camHint        *widget.Label   // 摄像头说明行（本构建不支持时改成提示文字）
 	camIDs         map[string]string
 
 	videoW          fyne.Window   // 视频窗口（懒创建）
@@ -217,8 +232,14 @@ type App struct {
 	videoFullscreen bool
 	webVideoOn      bool // 有网页正在接收视频画面（REQ-VIDEO-009，此时不显示视频窗口）
 	ringbackOn      bool // 正在放本地回铃音（没有早期媒体时自己放，避免重复放）
-	videoTopmost    bool // 视频窗口是否被用户置顶（默认不置顶，手动开启）
+	videoTopmost    bool // 视频窗口是否被用户置顶（REQ-VIDEO-015：已持久化到配置）
 	videoShown      bool // 视频窗口当前是否显示（Fyne 无 Visible() 查询 API，只能自己记）
+
+	// 视频窗口的锁（REQ-VIDEO-015）：默认锁上（不能移动/改大小），点锁按钮
+	// 解锁后可拖动。**会话内记忆、不持久化**（用户确认）：通话结束/窗口隐藏
+	// 都不复位，程序重启回到默认「锁上」。
+	//（通话面板没有锁：顶部拖动条随时可拖，见 REQ-UI-040）
+	videoLocked bool
 
 	// 帧投递：媒体层 goroutine 写、主线程读（合并刷新，见 ui_video.go）
 	remoteFrame   atomic.Pointer[frameRef]
@@ -267,6 +288,19 @@ func New(c *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath strin
 		// 视频：默认开（会话内记忆，不持久化）
 		videoOn:   true,
 		previewOn: true,
+		// 视频窗口的锁：默认锁上（会话内记忆，不持久化，REQ-VIDEO-015）
+		videoLocked: true,
+	}
+	// 视频窗口置顶与本地回显的旋转/镜像从配置恢复（REQ-VIDEO-015）。
+	// 变换的权威状态在 core（桌面与网页共用）：这里播种，网页连上时
+	// system.state 里的 video 字段就与桌面一致；**远端**变换按用户要求
+	// 不持久化，显式归零。
+	if cfg != nil {
+		ui.videoTopmost = cfg.UI.VideoTopmost
+		c.SetVideoRotation(core.VideoChannelLocal, cfg.UI.LocalPreviewRotation)
+		c.SetVideoMirror(core.VideoChannelLocal, cfg.UI.LocalPreviewMirror)
+		c.SetVideoRotation(core.VideoChannelRemote, 0)
+		c.SetVideoMirror(core.VideoChannelRemote, false)
 	}
 	if desk, ok := ui.fyne.(desktop.App); ok {
 		ui.desk = desk
@@ -287,6 +321,12 @@ func (a *App) Run() {
 	a.buildMainWindow()
 	a.buildTray()
 	a.subscribeEvents()
+	// 视频窗口"用户挪动了"回调（REQ-VIDEO-015）：Windows 是窗口过程的
+	// WM_EXITSIZEMOVE、Linux 是守护 goroutine 的轮询，都可能不在主线程，
+	// 统一 fyne.Do 回主线程再写配置。
+	SetVideoWindowMoveHook(func(x, y int) {
+		fyne.Do(func() { a.onVideoWindowUserMoved(x, y) })
+	})
 	a.watchWSPortFocus() // WS 端口输入框失焦保存与重启提示
 	// 音频后端在后台初始化（音频服务不可达时可能耗时数十秒）：就绪后
 	// 刷新设置页的设备列表。回调在后台 goroutine，需 fyne.Do 回主线程。
@@ -323,15 +363,19 @@ func (a *App) buildMainWindow() {
 	a.fyne.Settings().SetTheme(&dialTheme{})
 	a.watchThemeChanges()
 
+	// 顶层提示图层（备注/说明悬停用，见 ui_tooltip.go）**必须先建**：设置页的
+	// ⓘ 图标（REQ-MEDIA-007）在构建时就把它捕获进去了，晚建会拿到 nil。
+	a.mainTip = newTooltipLayer()
 	a.buildDialPage()
 	a.buildSettingsPage()
+	// 音频预处理开关按配置回填（REQ-MEDIA-007；本构建没有 APM 时置灰）
+	a.applyPreprocessForm()
 	a.buildHistoryPage()
 	a.buildContactsPage()
 
 	// 窗口内容 = 当前页 + 顶层提示图层（备注悬停用，见 ui_tooltip.go）。
 	// 切页只换 Objects[0]，提示图层恒为 Objects[1]：它不含 Hoverable/Tappable，
 	// 命中测试会穿透到下面的页面，绘制顺序上又在最上层、不受滚动裁剪。
-	a.mainTip = newTooltipLayer()
 	a.mainContent = container.NewStack(a.dialPage, a.mainTip)
 	w.SetContent(a.mainContent)
 	w.Resize(fyne.NewSize(320, 620)) // 更窄的宽度 + 按键增高后的总高
@@ -530,12 +574,15 @@ func (a *App) buildSettingsPage() {
 		a.updateTLSRow(sel)
 		a.updateChkOptRow(sel)
 	})
-	// TLS（REQ-ACC-006）：只加密信令，媒体仍是明文 RTP（SRTP 是另一个需求），
-	// 界面上写清楚，免得用户以为通话内容也被加密了
+	// TLS（REQ-ACC-006）：只加密信令，媒体是否加密由下面的「媒体加密」决定。
+	// 提示**保持一行短句**：主窗体固定 320 DIP，长句会被折在难读的位置
+	//（用户两次反馈"说明行太长"，两处提示都有回归测试卡着）。
 	a.tlsVerifyCheck = widget.NewCheck("校验服务器证书（自签证书请勿勾选）", nil)
-	a.tlsNote = widget.NewLabelWithStyle(
-		"SIPS 只加密信令，通话媒体仍是明文 RTP",
-		fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+	a.tlsNote = widget.NewLabelWithStyle(tlsNoteText, fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+	// 媒体加密（SDES-SRTP，REQ-MEDIA-009）
+	a.accSRTP = widget.NewSelect(srtpLabels, nil)
+	a.srtpNote = widget.NewLabelWithStyle(srtpHint, fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+	a.srtpNote.Wrapping = fyne.TextWrapWord
 	a.accAccount = newFormEntry()
 	a.accAccount.SetPlaceHolder("账号")
 	a.accAuthUser = newFormEntry()
@@ -583,14 +630,29 @@ func (a *App) buildSettingsPage() {
 	a.accStunServer = newFormEntry()
 	a.accStunServer.SetPlaceHolder("stun.l.google.com:19302")
 
+	// 域名（REQ-ACC-022）：From/To/R-URI 里的域，可留空（留空 = 用 SIP 服务器地址）
+	a.accDomain = newFormEntry()
+	a.accDomain.SetPlaceHolder("可选，留空用 SIP 服务器地址")
+
+	// 声明 IP（REQ-ACC-023）：可输入的下拉（与主窗体拨号框同款）——候选是本机
+	// 可用网卡 IP（已滤掉回环与虚拟网卡，公网地址排在前面），也可以直接手填。
+	// **不填 = 自动**（STUN → 本机出口 IP）——标题 + 占位提示已说清，不再单独加说明行。
+	a.accIPSelect = widget.NewSelectEntry(sip.LocalIPv4s())
+	a.accIPSelect.SetPlaceHolder("不填时自动（STUN/本机出口 IP）")
+	a.accIPSelect.Wrapping = fyne.TextWrapOff
+	a.accIPSelect.Scroll = fyne.ScrollNone
+
 	accCard := container.NewVBox(
 		widget.NewLabelWithStyle("SIP 账户", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		a.accEnabled,
 		formItem("SIP服务器", a.accServerAddr),
 		formItem("代理服务器", a.accProxy),
+		formItem("域名", a.accDomain),
 		formItem("传输", a.accTransport),
 		a.tlsVerifyCheck,
 		a.tlsNote,
+		formItem("媒体加密", a.accSRTP),
+		a.srtpNote,
 		formItem("账号", a.accAccount),
 		formItem("认证 ID", a.accAuthUser),
 		formItem("密码", a.accPassword),
@@ -598,6 +660,7 @@ func (a *App) buildSettingsPage() {
 		formItem("注册到期时间（秒）", a.accExpires),
 		a.rportCheck,
 		a.chkOptCheck,
+		formItem("声明 IP（Via/Contact/SDP）", a.accIPSelect),
 		a.accStunCheck,
 		formItem("STUN 服务器", a.accStunServer),
 		saveBtn,
@@ -609,6 +672,21 @@ func (a *App) buildSettingsPage() {
 	a.ringSpeakerSelect = widget.NewSelect([]string{}, nil)
 	refreshDevicesBtn := widget.NewButtonWithIcon("刷新设备", theme.ViewRefreshIcon(), a.refreshDevices)
 
+	// 音频预处理（REQ-MEDIA-007）：说明文字要自动折行（主窗体固定宽度，
+	// 不折行会把窗口撑宽——与摄像头说明行同样的处理）。
+	a.aecCheck = widget.NewCheck("回声消除（AEC）", a.onPreprocessChanged)
+	a.nsCheck = widget.NewCheck("降噪（NS）", a.onPreprocessChanged)
+	a.agcCheck = widget.NewCheck("自动增益（AGC）", a.onPreprocessChanged)
+	// 每条说明常驻显示在对应勾选项下面（自动折行：主窗体固定 320 宽）
+	a.aecDesc = widget.NewLabel(preprocessAECNote)
+	a.aecDesc.Wrapping = fyne.TextWrapWord
+	a.nsDesc = widget.NewLabel(preprocessNSNote)
+	a.nsDesc.Wrapping = fyne.TextWrapWord
+	a.agcDesc = widget.NewLabel(preprocessAGCNote)
+	a.agcDesc.Wrapping = fyne.TextWrapWord
+	a.preprocessHint = widget.NewLabel(preprocessUnsupportedText)
+	a.preprocessHint.Wrapping = fyne.TextWrapWord
+	a.preprocessHint.Hide() // 默认（支持时）不显示
 	audioCard := container.NewVBox(
 		widget.NewLabelWithStyle("音频设备", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		formItem("麦克风", a.micSelect),
@@ -616,6 +694,16 @@ func (a *App) buildSettingsPage() {
 		formItem("振铃设备", a.ringSpeakerSelect),
 		widget.NewLabel("振铃音专用播放设备，可选其他扬声器"),
 		refreshDevicesBtn,
+		// 音频预处理（REQ-MEDIA-007）：三个开关，改动立即保存、**下一通电话生效**
+		//（音频流在每次通话开始时重建）。
+		widget.NewLabelWithStyle("音频预处理", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		a.aecCheck,
+		a.aecDesc,
+		a.nsCheck,
+		a.nsDesc,
+		a.agcCheck,
+		a.agcDesc,
+		a.preprocessHint,
 	)
 
 	// ---- 视频设备（REQ-VIDEO-002/005/014）----
@@ -1021,7 +1109,7 @@ func (a *App) onVideoCallButton() {
 
 // cameraUsable 摄像头当前是否可用于发送本地视频（REQ-VIDEO-005）。
 func (a *App) cameraUsable() bool {
-	// 没有摄像头后端的构建（Windows 386）也要算"不可用"：否则会显示
+	// 没有摄像头后端的构建（darwin 这类目标）也要算"不可用"：否则会显示
 	//「视频接听」按钮（点了却没有本地画面）。视频总开关关闭（REQ-VIDEO-014）
 	// 同样算不可用——此时整个视频功能都不该出现。
 	if !a.core.VideoUsable() || !a.core.CameraSupported() {
@@ -1058,6 +1146,9 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		if a.callW != nil {
 			a.callW.Hide()
 		}
+		// 挂断/隐藏时拖动可能没等到 DragEnd（面板藏了就不再收指针事件）：
+		// 收掉拖动会话，免得窗口在后台被继续拖着走（REQ-UI-040）
+		cancelCallPanelDrag(a.callW)
 		if a.callTip != nil {
 			a.callTip.hide() // 面板藏了，提示不能留在屏幕上
 		}
@@ -1097,7 +1188,7 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		a.callStateLabel.SetText("呼叫中")
 		a.rebuildCallRows(dialingButtons)
 		showCallWindow(a.callW) // 平台函数：Windows 下不占任务栏（见 showWindowAsTool）
-		moveCallWindowToCorner(a.callW)
+		a.placeCallWindow()
 		a.startTimer()
 
 	case uiRinging:
@@ -1112,7 +1203,7 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		a.rebuildCallRows(ringingButtons)
 		showCallWindow(a.callW)
 		a.callW.RequestFocus()
-		moveCallWindowToCorner(a.callW)
+		a.placeCallWindow()
 		a.startTimer() // 振铃时长
 
 	case uiInCall:
@@ -1126,12 +1217,34 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		a.callStateLabel.SetText("通话中")
 		a.rebuildCallRows(incallButtons)
 		showCallWindow(a.callW)
-		moveCallWindowToCorner(a.callW)
+		a.placeCallWindow()
 		a.startTimer() // 通话时长从 0 开始
 	}
 	// 视频回显摆位随通话阶段变化（振铃期铺满窗口 / 接通后回右上角小窗），
 	// 每次状态切换都按新口径同步一次（用户要求）。
 	a.applyLocalVideoVisibility()
+}
+
+// placeCallWindow 摆通话面板（每次状态切换都调，REQ-UI-040）：
+//   - 用户**移动过**（配置里有位置）→ 移到保存的位置，默认摆放不再覆盖；
+//     保存的位置越界（拔屏/换分辨率）时记一条日志并回退默认；
+//   - 没移动过 → 沿用原来的"工作区右下角 + 多实例列偏移"。
+func (a *App) placeCallWindow() {
+	if a.callW == nil {
+		return
+	}
+	u := a.cfg.UI.CallPanel
+	if u.Moved {
+		scale := a.callW.Canvas().Scale()
+		w := int(callPanelWidth * scale)
+		h := int(callPanelHeight * scale)
+		if sx, sy, sw, sh := screenBounds(); windowPosUsable(u.X, u.Y, w, h, sx, sy, sw, sh) {
+			moveCallPanelToSaved(a.callW, u.X, u.Y)
+			return
+		}
+		logx.Logger().Info("通话面板保存的位置已不在屏幕上，回退默认摆放", "x", u.X, "y", u.Y)
+	}
+	moveCallWindowToCorner(a.callW)
 }
 
 // ---- 多实例（沙箱槽位）的窗口排布（REQ-NFR-007）----
@@ -1731,6 +1844,55 @@ func (a *App) bringMainToFront() {
 // ---------------------------------------------------------------------------
 
 // saveAccount 保存账户配置并触发重新注册（REQ-ACC-011）。
+// srtpLabels 媒体加密策略的下拉显示名；与 srtpValues 一一对应
+// （顺序即下拉顺序，默认项在第二个）。
+var srtpLabels = []string{"关闭", "支持（默认）", "建议", "必要"}
+
+var srtpValues = []string{
+	config.SRTPOff, config.SRTPSupported, config.SRTPPreferred, config.SRTPRequired,
+}
+
+// declaredIPValue 表单 → 配置值：留空/非法一律当"自动"（空串）。
+func (a *App) declaredIPValue() string {
+	return config.NormalizePublicIP(a.accIPSelect.Text)
+}
+
+// tlsNoteText 「只加密信令」提示（仅传输=tls 时显示）。
+// 一句话说完：媒体是否加密由下面的「媒体加密」单独决定，此处不必展开。
+const tlsNoteText = "SIPS 只加密信令"
+
+// srtpHint 媒体加密的说明文字。
+// 每档**一行、每行都短**：主窗体固定 320 DIP 宽，长行会把内容撑出可视区
+// （中文没有空格，整行会被当成一个"词"，靠折行也救不回来）。
+const srtpHint = "媒体加密（SRTP）：\n" +
+	"关闭 = 不加密\n" +
+	"支持 = 对端要求才配合（默认）\n" +
+	"建议 = 主动建议，不强制\n" +
+	"必要 = 对端不支持则拒接\n" +
+	"覆盖声音/视频/按键音\n" +
+	"密钥随信令传，建议配 TLS"
+
+// srtpValueOfLabel 下拉显示名 → 配置值（未命中按默认「支持」）。
+func srtpValueOfLabel(label string) string {
+	for i, l := range srtpLabels {
+		if l == label {
+			return srtpValues[i]
+		}
+	}
+	return config.SRTPSupported
+}
+
+// srtpLabelOfValue 配置值 → 下拉显示名。
+func srtpLabelOfValue(v string) string {
+	v = config.NormalizeSRTP(v)
+	for i, val := range srtpValues {
+		if val == v {
+			return srtpLabels[i]
+		}
+	}
+	return srtpLabels[1]
+}
+
 func (a *App) saveAccount() {
 	// 服务器与端口合并解析：host[:port]，端口省略按传输取默认
 	//（tls → 5061，其余 5060；REQ-ACC-006）
@@ -1742,6 +1904,13 @@ func (a *App) saveAccount() {
 	if expires <= 0 {
 		expires = 300
 	}
+	// 声明 IP（REQ-ACC-023）：填了内容就必须是合法 IP——SDP 的 c= 行只认
+	// IP 字面量，写域名/写错会在协商时静默变成"自动"，不如当场拦下。
+	declaredIP := a.declaredIPValue()
+	if strings.TrimSpace(a.accIPSelect.Text) != "" && declaredIP == "" {
+		a.showInfo("提示", "「声明 IP」请填合法 IP（如 10.168.5.10），或留空表示自动")
+		return
+	}
 	acc := config.Account{
 		Enabled:     a.accEnabled.Checked,
 		Server:      host,
@@ -1752,8 +1921,11 @@ func (a *App) saveAccount() {
 		STUNEnabled: a.accStunCheck.Checked,
 		STUNServer:  a.accStunServer.Text,
 		Proxy:       a.accProxy.Text,
+		Domain:      config.NormalizeDomain(a.accDomain.Text),
+		PublicIP:    declaredIP,
 		Transport:   config.NormalizeTransport(a.accTransport.Selected),
 		TLSVerify:   a.tlsVerifyCheck.Checked,
+		SRTP:        config.NormalizeSRTP(srtpValueOfLabel(a.accSRTP.Selected)),
 		Account:     a.accAccount.Text,
 		AuthUser:    a.accAuthUser.Text,
 		Password:    a.accPassword.Text,
@@ -1796,6 +1968,11 @@ func (a *App) loadAccountIntoForm() {
 	a.accTransport.SetSelected(config.NormalizeTransport(acc.Transport))
 	a.tlsVerifyCheck.SetChecked(acc.TLSVerify)
 	a.updateTLSRow(acc.Transport)
+	a.accSRTP.SetSelected(srtpLabelOfValue(acc.SRTP))
+	a.accDomain.SetText(acc.Domain)
+	// 声明 IP：直接回填（留空 = 自动）。值不在候选里也能显示——它就是可输入的
+	// 下拉，手填过的地址保存后要能原样回来
+	a.accIPSelect.SetText(config.NormalizePublicIP(acc.PublicIP))
 	a.accAccount.SetText(acc.Account)
 	a.accAuthUser.SetText(acc.AuthUser)
 	a.accPassword.SetText(acc.Password)
@@ -1948,6 +2125,62 @@ func openInFileManager(path string) error {
 	return fmt.Errorf("当前平台不支持打开文件管理器")
 }
 
+// 音频预处理的三条说明（REQ-MEDIA-007）：直接显示在各自勾选项的**下面**
+// （用户要求：试过 ⓘ+提示那套，效果都差，常驻一行反而最省事最稳）。
+// 文案只讲"作用"，不带 (AEC)/(NS)/(AGC) 后缀——勾选项标签上已经有缩写。
+const (
+	preprocessAECNote = "用正在播放的声音当参考，消掉麦克风里的扬声器回声（外放时防自激）"
+	preprocessNSNote  = "压掉风扇、键盘这类稳态背景噪声"
+	preprocessAGCNote = "自动调整麦克风音量，与通话面板的手动增益叠加"
+	// preprocessUnsupportedText 本构建没编进 APM 时的说明（这种情况才常驻显示）。
+	preprocessUnsupportedText = "本构建未包含音频预处理（缺 webrtc-audio-processing 静态库，" +
+		"见 scripts/build-audio-libs.sh）。"
+)
+
+// applyPreprocessForm 把音频预处理开关回填到界面（REQ-MEDIA-007），
+// 本构建没有 APM 时置灰并说明原因。
+func (a *App) applyPreprocessForm() {
+	if a.aecCheck == nil {
+		return
+	}
+	a.loadingForm = true // 回填期间屏蔽 OnChanged 自动保存
+	a.aecCheck.SetChecked(a.cfg.Audio.AEC)
+	a.nsCheck.SetChecked(a.cfg.Audio.NS)
+	a.agcCheck.SetChecked(a.cfg.Audio.AGC)
+	a.loadingForm = false
+
+	if audio.PreprocessSupported() {
+		a.aecCheck.Enable()
+		a.nsCheck.Enable()
+		a.agcCheck.Enable()
+		a.preprocessHint.Hide() // 支持时不需要"本构建未包含"那行
+		return
+	}
+	a.aecCheck.Disable() // 本构建没编进 APM：开关无意义
+	a.nsCheck.Disable()
+	a.agcCheck.Disable()
+	a.preprocessHint.Show()
+}
+
+// onPreprocessChanged 音频预处理开关变化：写配置 + 立即下发给音频管理器
+// （音频流在每通电话开始时重建，因此从下一通生效）。
+func (a *App) onPreprocessChanged(bool) {
+	if a.loadingForm || a.aecCheck == nil {
+		return
+	}
+	a.cfg.Audio.AEC = a.aecCheck.Checked
+	a.cfg.Audio.NS = a.nsCheck.Checked
+	a.cfg.Audio.AGC = a.agcCheck.Checked
+	if a.audioMgr != nil {
+		a.audioMgr.SetPreprocess(audio.Preprocess{
+			AEC: a.cfg.Audio.AEC, NS: a.cfg.Audio.NS, AGC: a.cfg.Audio.AGC,
+		})
+	}
+	a.persistConfig()
+	logx.Logger().Info("音频预处理开关已更新",
+		"回声消除", a.cfg.Audio.AEC, "降噪", a.cfg.Audio.NS, "自动增益", a.cfg.Audio.AGC)
+}
+
 // refreshDevices 刷新音频设备列表（枚举真实系统设备，REQ-MEDIA-002）。
 // 枚举可能耗时（ALSA 会逐个探测设备），放到后台 goroutine 执行、结果
 // 回到主线程应用；音频后端尚未就绪时先显示占位，就绪后由 OnReady 再刷。
@@ -2093,12 +2326,12 @@ func (a *App) refreshCameras() {
 		return
 	}
 	if !a.core.CameraSupported() {
-		// 编解码可用但**本平台没有摄像头后端**（Windows 386 这类目标）。
+		// 编解码可用但**本平台没有摄像头后端**（darwin 这类目标）。
 		// 这里必须与"没插摄像头"区分开：否则用户会在空列表里选「禁用」，
 		// 把共用配置写坏（64 位版也跟着不发送本地视频了——实测踩过）。
 		a.camSelect.Disable()
 		a.applyCameraList(nil, "此版本不支持摄像头")
-		a.camHint.SetText("本版本（32 位）不支持摄像头采集：视频通话只能看对方，不发送本地画面")
+		a.camHint.SetText("本版本不支持摄像头采集：视频通话只能看对方，不发送本地画面")
 		return
 	}
 	if a.core.VideoCallEnabled() {

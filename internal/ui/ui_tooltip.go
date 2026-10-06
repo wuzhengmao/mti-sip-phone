@@ -54,7 +54,15 @@ type tooltipLayer struct {
 	box   *fyne.Container
 
 	shown bool
-	pos   fyne.Position // 图层内坐标
+	above bool // true = 显示在指针/控件**上方**（配置页的 ⓘ 用）
+	// absPos 画布**绝对**坐标；换算成图层内坐标放在 Layout 里做——show 的那一刻
+	// 图层可能还没布局过（origin 取到 0），直接换算会把提示画到错误的位置
+	//（表现为"第一次点了看不见/位置不对，之后就正常"）。
+	absPos fyne.Position
+	pos    fyne.Position // 图层内坐标（Layout 里由 absPos 换算）
+
+	// shownText 当前显示的文字：Cursor() 驱动的悬停据此判断"要不要换内容"，
+	shownText string
 }
 
 func newTooltipLayer() *tooltipLayer {
@@ -76,21 +84,22 @@ func (l *tooltipLayer) CreateRenderer() fyne.WidgetRenderer {
 // 抬高，否则窗口/页面会被这块"什么都没有"的层撑大）。
 func (l *tooltipLayer) MinSize() fyne.Size { return fyne.NewSize(0, 0) }
 
-// show 在画布绝对坐标 absPos 处弹出提示（越界会自动翻转/钳制）。
+// show 在画布绝对坐标 absPos 处弹出提示（默认在指针**右下**，越界会自动翻转/钳制）。
 func (l *tooltipLayer) show(text string, absPos fyne.Position) {
+	l.showAt(text, absPos)
+}
+
+func (l *tooltipLayer) showAt(text string, absPos fyne.Position) {
 	if text == "" {
 		l.hide()
 		return
 	}
-	// 画布绝对坐标 → 图层内坐标：主窗体内容带 padding，不能直接用绝对坐标
-	origin := fyne.Position{}
-	if app := fyne.CurrentApp(); app != nil && app.Driver() != nil {
-		origin = app.Driver().AbsolutePositionForObject(l)
-	}
-	l.pos = absPos.Subtract(origin).Add(fyne.NewPos(tooltipOffsetX, tooltipOffsetY))
+	l.absPos = absPos
 	l.label.SetText(text)
+	l.shownText = text
 	l.shown = true
 	l.box.Show()
+	l.box.Refresh() // 首次显示时标签的尺寸可能还没算出来，显示前强制重排一次
 	l.Refresh()
 }
 
@@ -100,6 +109,7 @@ func (l *tooltipLayer) hide() {
 		return
 	}
 	l.shown = false
+	l.shownText = ""
 	l.box.Hide()
 	l.Refresh()
 }
@@ -132,6 +142,13 @@ func (lay tooltipBoxLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	if !l.shown {
 		return
 	}
+	// 画布绝对坐标 → 图层内坐标（在这里换算：布局时原点一定是最新的）
+	origin := fyne.Position{}
+	if app := fyne.CurrentApp(); app != nil && app.Driver() != nil {
+		origin = app.Driver().AbsolutePositionForObject(l)
+	}
+	l.pos = l.absPos.Subtract(origin).Add(fyne.NewPos(tooltipOffsetX, tooltipOffsetY))
+
 	tw := l.label.fullWidth()
 	if tw > tooltipMaxW {
 		tw = tooltipMaxW
@@ -160,8 +177,6 @@ func (lay tooltipBoxLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	label.Move(fyne.NewPos(x+tooltipPadX, y+tooltipPadY))
 }
 
-// ---------------------------------------------------------------------------
-// 可悬停文本
 // ---------------------------------------------------------------------------
 
 // hoverNote 可悬停的单行文本：鼠标停住 tooltipDelay 后弹出备注提示，

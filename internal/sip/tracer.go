@@ -21,7 +21,8 @@ func SetTraceEnabled(enabled bool) {
 	sip.SIPDebug = enabled
 	if enabled {
 		sip.SIPDebugTracer(&tracer{})
-		logx.Logger().Info("SIP 信令跟踪已开启（DEBUG 级，敏感信息脱敏）")
+		// 信令记录走独立输出目标，**不受日志级别影响**（勾选即必定落盘）
+		logx.Logger().Info("SIP 信令跟踪已开启（不受日志级别影响，敏感信息脱敏）")
 	} else {
 		sip.SIPDebugTracer(nil)
 		logx.Logger().Debug("SIP 信令跟踪已关闭")

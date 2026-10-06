@@ -1,4 +1,4 @@
-//go:build video && cgo && windows && amd64
+//go:build video && cgo && windows
 
 package video
 
@@ -10,24 +10,25 @@ import (
 	"time"
 
 	"github.com/pion/mediadevices/pkg/driver"
-	_ "github.com/pion/mediadevices/pkg/driver/camera" // 副作用注册 DirectShow 摄像头驱动
 	"github.com/pion/mediadevices/pkg/frame"
 	"github.com/pion/mediadevices/pkg/io/video"
 	"github.com/pion/mediadevices/pkg/prop"
 
+	// 副作用导入：把 DirectShow 摄像头驱动注册进 driver 管理器。
+	// 这是仓库内的一份实现（从 mediadevices 的 pkg/driver/camera 复制，
+	// 补上了上游漏写的 STDMETHODCALLTYPE 调用约定）——**amd64 与 386 共用**。
+	// 不能改回上游的 camera 包：它在 i686 上编不过，windows-386 会再次丢摄像头。
+	_ "mti-sip-phone/internal/video/dshow"
+
 	"mti-sip-phone/internal/logx"
 )
 
-// Windows 摄像头：DirectShow，走 github.com/pion/mediadevices 的 camera 驱动
-// （cgo + C++，链接 mingw 自带的 strmiids/ole32/oleaut32/quartz）。
+// Windows 摄像头：DirectShow（cgo + C++，链接 mingw 自带的
+// strmiids/ole32/oleaut32/quartz）。
 //
-// ⚠️ **仅限 amd64，这是上游的编译期限制，不是我们偷懒**：mediadevices 的
-// camera_windows.hpp 声明的回调 `HRESULT SampleCB(...)` 漏了 STDMETHODCALLTYPE，
-// 而 mingw 的 qedit.h 里 `ISampleGrabberCB::SampleCB` 带 `__stdcall`。
-// x86_64 上 __stdcall 被忽略所以能编；**i686 上是真实的调用约定冲突**，报
-// "conflicting type attributes specified for virtual HRESULT ..."。
-// 想强行编（如 -D__stdcall=）会让整份 COM 调用变成 cdecl，运行期必崩，不要试。
-// 因此 Windows 386 目标：视频编解码可用，但摄像头不可用（走 camera_other.go）。
+// ⚠️ 上游 mediadevices 的 camera 驱动在 i686 上编不过（回调漏写
+// STDMETHODCALLTYPE，与 qedit.h 的 __stdcall 冲突），所以本仓库内保留了一份
+// 修好的副本（internal/video/dshow），两个架构都走它。
 //
 // ⚠️ 设备 ID 不稳定：mediadevices 的驱动 ID 由包装层生成，**每次进程启动都会变**。
 // 所以配置里存的是设备**名称**，打开时按 ID → 名称逐级回退（PickCamera）。
@@ -45,7 +46,7 @@ type windowsCamera struct {
 	lastRead time.Time
 }
 
-// cameraSupported Windows amd64（cgo）有 DirectShow 采集后端。
+// cameraSupported Windows（cgo）有 DirectShow 采集后端，amd64 / 386 皆可。
 func cameraSupported() bool { return true }
 
 func listCameras() ([]CameraInfo, error) {

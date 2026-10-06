@@ -45,6 +45,11 @@ type rtcpEndpoint interface {
 	rtcpRecvState() (lastSeq uint16, extSeq uint32, lost uint64, ok bool)
 	// rtcpOnFeedback 处理对端反馈包（视频用 PLI/FIR 触发关键帧；音频忽略）。
 	rtcpOnFeedback(pkt rtcp.Packet)
+	// rtcpProtect / rtcpUnprotect RTCP 的加解密（SRTP 未启用时原样返回；
+	// 加密启用后 RTCP 也必须走 SRTCP——明文 RTCP 会被对端直接丢弃，
+	// 表现是「PLI 发不出去，对端一直不发关键帧」）。
+	rtcpProtect(pkt []byte) []byte
+	rtcpUnprotect(pkt []byte) ([]byte, bool)
 }
 
 // RTCP 报告发送周期。
@@ -103,6 +108,9 @@ func (r *rtcpSession) sendBye() {
 	if err != nil {
 		return
 	}
+	if data = r.ep.rtcpProtect(data); data == nil {
+		return
+	}
 	_, _ = r.conn.WriteToUDP(data, remote)
 }
 
@@ -131,7 +139,12 @@ func (r *rtcpSession) recvLoop() {
 				return
 			}
 		}
-		pkts, err := rtcp.Unmarshal(buf[:n])
+		// SRTCP：先解密再解析（未启用加密时原样返回）
+		plain, ok := r.ep.rtcpUnprotect(buf[:n])
+		if !ok {
+			continue
+		}
+		pkts, err := rtcp.Unmarshal(plain)
 		if err != nil {
 			logx.Logger().Debug("RTCP 解析失败", "err", err)
 			continue
@@ -183,6 +196,9 @@ func (r *rtcpSession) sendPLI(mediaSSRC uint32) {
 	pli := &rtcp.PictureLossIndication{SenderSSRC: r.ep.rtcpSSRC(), MediaSSRC: mediaSSRC}
 	data, err := pli.Marshal()
 	if err != nil {
+		return
+	}
+	if data = r.ep.rtcpProtect(data); data == nil {
 		return
 	}
 	if _, err := r.conn.WriteToUDP(data, remote); err != nil {
@@ -245,6 +261,9 @@ func (r *rtcpSession) sendReport() {
 	data, err := rtcp.Marshal(pkts)
 	if err != nil {
 		logx.Logger().Debug("RTCP 报告构造失败", "err", err)
+		return
+	}
+	if data = r.ep.rtcpProtect(data); data == nil {
 		return
 	}
 	if _, err := r.conn.WriteToUDP(data, remote); err != nil {

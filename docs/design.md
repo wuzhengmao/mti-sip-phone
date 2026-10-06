@@ -14,8 +14,10 @@
 - **是什么**：Go 写的跨平台桌面 **SIP 软电话**（Windows / Linux；amd64 / 386 / arm64），常驻系统托盘，
   支持注册、呼出/呼入、保持、DTMF、语音与视频通话；对外提供**本地 WebSocket 控制接口**（网页拨号/接听/挂断、事件推送、视频订阅）与 **JS SDK**；支持 `sip://` 协议拉起与开机自启。
 - **形态**：**单进程**——GUI、SIP 信令、媒体收发、本地 WS 服务都在同一个进程里；WS 只监听 `127.0.0.1`。
-- **构建产物**（`build.bat` / `build.sh`，输出到 `dist/`）：`sip-phone-windows-amd64.exe`（托盘版，无控制台）、
+- **构建产物**（`build.bat` / `build.sh`，输出到 `dist/`；Windows 的三个都**静态链接** mingw 运行时，
+  是不依赖任何第三方 DLL 的单文件，Linux 产物依赖系统图形/音频库）：`sip-phone-windows-amd64.exe`（托盘版，无控制台）、
   `sip-phone-console.exe`（控制台版，`-headless` 无界面模式）、`sip-phone-windows-386.exe`（32 位托盘版）、
+  `sip-phone-windows-arm64.exe`（Windows on ARM64 托盘版，需 llvm-mingw，无视频/Opus/AEC 的基础版）、
   `sip-phone-linux-<arch>`（Linux 托盘版）。
 - **发布**：到独立的「软件更新中心」站点，用 `scripts/release.sh` 一键发布（见 auto-update.md）。
 
@@ -23,7 +25,7 @@
 
 | 领域 | 选型 | 说明 / 为什么 |
 | --- | --- | --- |
-| 语言 | Go 1.23+ | 单二进制分发、跨平台交叉编译、并发模型适合"信令 + 媒体 + 界面"三线并行 |
+| 语言 | Go 1.24+ | 单二进制分发、跨平台交叉编译、并发模型适合"信令 + 媒体 + 界面"三线并行 |
 | SIP 信令 | `github.com/emiago/sipgo` | 事务层/对话层/Digest 认证开箱可用；`DialogClientSession`/`DialogServerSession` 管 INVITE 对话 |
 | RTP/RTCP/SDP | `pion/rtp`、`pion/rtcp`、`pion/sdp/v3`、`pion/stun` | 纯 Go、可读可改；RTCP 用 v1.2.x 新 API（CompoundPacket/Goodbye） |
 | 语音编解码 | `zaf/g711`（PCMA/PCMU）+ **libopus**（cgo） | G.711 是必选；Opus 走官方库（FFmpeg 自带的标记 experimental，官方不认可用） |
@@ -136,7 +138,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 ### 4.4 `internal/media`（媒体引擎）
 
 - **职责**：每通电话一个 `Engine`：RTP/RTCP 收发、编解码、**播放环形缓冲**、SDP 协商（offer/answer、PT 复用规则、方向）、DTMF（RFC 4733 收发）、保活与打洞；`VideoEngine` 是**与音频平级的独立端口对**。
-- **关键文件**：`engine.go`（音频引擎 + SDP 入口）、`sdp.go`（SDP 组装/解析）、`jitter.go`（播放环形缓冲）、`codec_*.go`（PCMA/PCMU/Opus）、`video_engine.go`/`video_codec.go`（视频）。
+- **关键文件**：`engine.go`（音频引擎 + SDP 入口）、`sdp.go`（SDP 组装/解析）、`jitter.go`（播放环形缓冲）、`codec_*.go`（PCMA/PCMU/Opus）、`video_engine.go`/`video_codec.go`（视频）、`srtp.go`（**媒体加密 SDES-SRTP**：套件表、密钥生成、`a=crypto` 解析、四档策略状态机——音频与视频**各持一份** `cryptoState`，每个 m= 行独立密钥）。
 - **边界**：**不认识音频设备**——音频回调只需 `FeedMic(任意帧长)` 与 `ReadPlayback(任意帧长)`；也不认识 UI/SIP。
 - **注意**：`activePT`（线上实际 PT）与 `Codec.PayloadType()`（本端号）是两回事；`TimestampStep()` 才是时间戳步长（Opus 48000 域）。
 
@@ -228,6 +230,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 | 注册/呼叫/保持信令 | `internal/sip/phone.go`（先读 CLAUDE.md 的 sipgo 陷阱） |
 | 休眠/切网后恢复注册 | `internal/sip/netwatch.go`（墙钟跳变用 `UnixNano` 差，勿改回 `time.Sub`） |
 | SDP / 编解码协商 | `internal/media/sdp.go` + `engine.go`（`codecPT`、`activePT`、`SDPDirectionFor`） |
+| 媒体加密（SRTP） | `internal/media/srtp.go` + 各引擎的收发路径（`sendPacket`/`recvLoop`/RTCP）——**密钥方向与重协商口径先读 CLAUDE.md 的 SRTP 条**；配置项 `account.srtp`、`config.NormalizeSRTP` |
 | 抖动缓冲/延迟 | `internal/media/jitter.go`（注意播放缓冲封顶规则） |
 | 音频设备 / 提示音 / 按键音 | `internal/audio/manager.go`、`backend_malgo.go`、`tone.go` |
 | WS 方法 / 事件 | `internal/wsapi/{protocol,handler,server}.go`（协议文档同步 `docs/ws-protocol.md`） |
@@ -248,6 +251,8 @@ dist/sip-phone-windows-amd64.exe        # 托盘版（关闭窗口 = 隐藏到�
 # 3) 测试（CGO 包需要 gcc，用 build.bat 输出里的 CC 路径）
 export CC="<WinLibs mingw64/bin/gcc.exe>"; export CGO_ENABLED=1
 go test ./internal/media/ ./internal/wsapi/ ./internal/sip/ ./internal/ui/ ./internal/updater/
+# 或用固定路径运行器（.testbin/，Windows 防火墙只需放行一次，见其头部说明）：
+./scripts/test.sh -p ./internal/media/ -- -run SRTP -v
 ```
 
 **团队约定**（详见 CLAUDE.md「重要约定」）：
@@ -266,7 +271,7 @@ go test ./internal/media/ ./internal/wsapi/ ./internal/sip/ ./internal/ui/ ./int
 | 新 SDK 能力 | `web/sdk/sip-phone-sdk.js` + `.d.ts` + 测试页演示 | SDK 无构建步骤，改完重建二进制才生效（内嵌） |
 | 多路通话 | `core.App` 的 `calls` 已按 map 组织，但**有全局假设**：媒体层 Opus 编解码器是包级共享实例、UI 只显示一个通话面板、按键/DTMF 只作用于 `activeCallID` | 需要一次系统性梳理，别只改半边 |
 | 新平台（如 macOS） | 平台文件都按构建标签拆分（`topmost_other.go`、`camera_other.go`…），先补空实现再逐个替换 | 交叉编译仍受 CGO 约束 |
-| 更强的安全（SRTP / token 鉴权） | 媒体层（SDP + RTP 加密）、wsapi 接入鉴权 | 见 requirements 的待开发条目；WS 目前**无鉴权、仅回环** |
+| 更强的安全（WS token 鉴权；媒体的 DTLS-SRTP） | wsapi 接入鉴权；媒体层（DTLS 握手 + `a=fingerprint`/`a=setup`） | SDES-SRTP 已交付（REQ-MEDIA-009）；WS 目前**无鉴权、仅回环**；DTLS-SRTP 见 requirements 的待开发条目 |
 
 ## 十、读完还想再深入
 

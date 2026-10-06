@@ -1,0 +1,19 @@
+--- a/webrtc/rtc_base/platform_thread_types.cc
++++ b/webrtc/rtc_base/platform_thread_types.cc
+@@ -11,7 +11,16 @@
+ #include "rtc_base/platform_thread_types.h"
+ 
+ #if defined(WEBRTC_LINUX)
++#if defined(__has_include)
++#if __has_include(<sys/prctl.h>)
+ #include <sys/prctl.h>
++#else
++// glibc 2.39 (Ubuntu 24.04) dropped <sys/prctl.h>; <linux/prctl.h> only has the
++// constants, so declare prctl() ourselves.
++#include <linux/prctl.h>
++extern "C" int prctl(int option, ...);
++#endif
++#endif
+ #include <sys/syscall.h>
+ #endif
+ 
