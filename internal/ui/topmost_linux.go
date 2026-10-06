@@ -321,6 +321,8 @@ import "C"
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
