@@ -327,7 +327,8 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 
 - **交流、文档、注释、提交信息、界面文案一律中文**。
 - **Git 工作流**：开发在分支上进行（工作分支 dev，master 为收口分支）；**会话中修改的代码不得自动提交**——提交与 push 必须经用户人工确认后执行，且**不自动合并到 master**（合并 master 需用户明确指示）。
-- **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
+- **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**重启只针对"本来就在跑的那几个"**：先 `Get-CimInstance Win32_Process … | Select CommandLine` **记录下当前实例（含 `-instance N` / `sip://…` 之类的启动参数）**，kill 之后**按原参数把这一组拉起来**——不要无条件启动 3 个实例（用户没开的别替他开）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
+- **简单的界面改动（文案、占位提示、字段增删）不用自动截图确认**——用户自己会看（2026-10-06 明确要求："这些简单的 ui 改动，不用每次都自动点击截图确认"）。合成鼠标截图那套探针（`D:\cache\temp\guiprobe\probe.ps1`）只在**布局/交互类改动**（新页面、自定义布局、定位、滚轮）或**用户报障需要复现**时才用。
 - 版本 1.0.11 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
 - 弹窗按钮文案「确定/取消」；**弹窗的 parent 必须是当前可见的窗口**——Fyne 把对话框画在父窗口的画布上，主窗体隐藏到托盘时弹在主窗体上用户根本看不见。默认走 `a.dialogParent()`（主窗体不可见且通话记录窗口开着就用它），从记录窗口发起的用 `showXxxIn(a.historyW, …)`；**永远不要传 nil**（dialog 的 parent 为 nil 直接 panic）。
 - **通话记录（REQ-CALL-007）的写入口径**：开始/接通/结束三个时刻在 `core.App` 里**直接入队**（不订阅事件总线——总线容量 64、满即丢，通话记录不能建立在会丢事件的东西上），且**先写记录再 `publishCall`**（界面收到 `call.terminated` 会立刻查库刷新，顺序反了就查不到新记录）。同一通话重复上报结束的幂等由存储层的 `ended_at=0` 条件兜住，**不要**在核心层再加"是否首次结束"的状态。库里时间戳 0 表示"未接通/进行中"（0 与 `time.Time{}` 的互转只在 `internal/calllog` 的 `toMillis/fromMillis` 里做，别把 1970 年漏到界面）。
@@ -361,6 +362,24 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   （`AES_CM_128_HMAC_SHA1_80` 第一），answer **复用对端选中的 tag 与套件、只换自己的密钥**；
   不认识的套件/带 lifetime/MKI/会话参数的行一律跳过。**不做** DTLS-SRTP（RFC 5763/5764）、ZRTP、
   客户端证书。SDES 的密钥在 SDP 里明文传，**只有配合 TLS 信令才有意义**（配置页已提示）。
+- **SIP 域名（REQ-ACC-022）与声明 IP（REQ-ACC-023）的口径**：
+  - 域名只改 **URI 里的域**（REGISTER 的 R-URI/From/To、呼出 INVITE 的 From 与 To/R-URI，
+    纯号码补成 `sip:号码@域名`），**网络目的地永远是 Server:Port**——域名多半只在服务器内部
+    解析，本机不一定解析得了：注册走 `req.SetDestination(serverDest(acc))`（401 重试会原样
+    带上，`cloneRequest` 里有 `SetDestination`），呼叫走首条 `Route: <sip:服务器:端口;lr>`
+    （与出站代理同一手法，**代理配置优先**）。`req.Destination()` 是先看 Route、再看 R-URI
+    ——这是 sipgo 里唯一能把"URI 指向谁"与"报文发给谁"分开的办法。留空 = 用 Server（历史行为）。
+  - 「声明 IP」在界面上是**可输入的下拉**（`widget.SelectEntry`，与主窗体拨号框同款）：
+    候选由 `sip.LocalIPv4s()` 给出——**滤掉回环与虚拟网卡**（Hyper-V/WSL/VMware/
+    VirtualBox/Docker/VPN/TAP，按 MAC 前缀 + 网卡名双重判定）与链路本地地址，
+    并**按可达性排序（公网 → CGNAT → RFC1918 私网）**；留空 = 自动，也可手填任意 IP。
+    误伤真实网卡比漏掉虚拟网卡更糟（用户会以为"列表是空的"），加名字关键词时要克制。
+  - 声明 IP 同时写三处：Contact 主机、SDP 的 `c=`/`o=`（`SetSDPIP`）、**Via 的 sent-by**
+    （`setClientHost` 反射写 sipgo 的私有 `Client.host`，与 `setClientRPort` 同一手法与降级策略，
+    保存账户即生效）。**只改"声明"不改绑定**：transport 层只在 Via 没写主机时才用连接地址回填
+    （sipgo `overrideSentBy`，且要求 Host 与 Port 都为 0 才回填）。优先级：声明 IP > STUN > 出口 IP
+    ——`localHost()` 里声明 IP 先返回，所以配了它之后 STUN 虽仍在探测（netwatch 照旧重探/清空），
+    结果**不再影响** Contact 与 SDP。
 
 ## 已知陷阱（修改相关代码前必读）
 

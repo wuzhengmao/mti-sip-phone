@@ -161,3 +161,41 @@ func TestSRTPNormalize(t *testing.T) {
 		t.Fatalf("默认应为「支持」，实际 %q", got)
 	}
 }
+
+// TestDomainNormalize SIP 域名规范化：去前缀/user@/端口（REQ-ACC-022）。
+func TestDomainNormalize(t *testing.T) {
+	cases := map[string]string{
+		"":                          "",
+		"  sip.mti-sh.cn  ":         "sip.mti-sh.cn",
+		"sip:sip.mti-sh.cn":         "sip.mti-sh.cn",
+		"sips:sip.mti-sh.cn":        "sip.mti-sh.cn",
+		"sip:alice@sip.mti-sh.cn":   "sip.mti-sh.cn",
+		"sip.mti-sh.cn:5060":        "sip.mti-sh.cn",
+		"sip://sip.mti-sh.cn:5061":  "sip.mti-sh.cn",
+		"sip:1001@example.com:5060": "example.com",
+	}
+	for in, want := range cases {
+		if got := NormalizeDomain(in); got != want {
+			t.Errorf("NormalizeDomain(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+// TestPublicIPNormalize 声明 IP 只接受 IP 字面量（SDP 的 c= 行必须写 IP）。
+func TestPublicIPNormalize(t *testing.T) {
+	cases := map[string]string{
+		"":                  "",
+		"  10.168.5.10  ":   "10.168.5.10",
+		"192.168.3.15":      "192.168.3.15",
+		"[::1]":             "::1",
+		"example.com":       "", // 域名不行（SDP 会非法）
+		"10.168.5.10:5060":  "",
+		"999.1.1.1":         "",
+		"sip:10.168.5.10":   "",
+	}
+	for in, want := range cases {
+		if got := NormalizePublicIP(in); got != want {
+			t.Errorf("NormalizePublicIP(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}

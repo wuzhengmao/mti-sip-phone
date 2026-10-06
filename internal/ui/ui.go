@@ -111,6 +111,8 @@ type App struct {
 	tlsNote           *widget.Label // 「只加密信令」提示（仅传输=tls 时显示）
 	accSRTP           *widget.Select
 	srtpNote          *widget.Label // 媒体加密（SDES-SRTP，REQ-MEDIA-009）说明
+	accDomain         *widget.Entry // SIP 域名（REQ-ACC-022，留空用服务器地址）
+	accIPSelect       *widget.SelectEntry
 	accAccount        *widget.Entry
 	accAuthUser       *widget.Entry
 	accPassword       *widget.Entry
@@ -588,11 +590,24 @@ func (a *App) buildSettingsPage() {
 	a.accStunServer = newFormEntry()
 	a.accStunServer.SetPlaceHolder("stun.l.google.com:19302")
 
+	// 域名（REQ-ACC-022）：From/To/R-URI 里的域，可留空（留空 = 用 SIP 服务器地址）
+	a.accDomain = newFormEntry()
+	a.accDomain.SetPlaceHolder("可选，留空用 SIP 服务器地址")
+
+	// 声明 IP（REQ-ACC-023）：可输入的下拉（与主窗体拨号框同款）——候选是本机
+	// 可用网卡 IP（已滤掉回环与虚拟网卡，公网地址排在前面），也可以直接手填。
+	// **不填 = 自动**（STUN → 本机出口 IP）——标题 + 占位提示已说清，不再单独加说明行。
+	a.accIPSelect = widget.NewSelectEntry(sip.LocalIPv4s())
+	a.accIPSelect.SetPlaceHolder("不填时自动（STUN/本机出口 IP）")
+	a.accIPSelect.Wrapping = fyne.TextWrapOff
+	a.accIPSelect.Scroll = fyne.ScrollNone
+
 	accCard := container.NewVBox(
 		widget.NewLabelWithStyle("SIP 账户", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		a.accEnabled,
 		formItem("SIP服务器", a.accServerAddr),
 		formItem("代理服务器", a.accProxy),
+		formItem("域名", a.accDomain),
 		formItem("传输", a.accTransport),
 		a.tlsVerifyCheck,
 		a.tlsNote,
@@ -605,6 +620,7 @@ func (a *App) buildSettingsPage() {
 		formItem("注册到期时间（秒）", a.accExpires),
 		a.rportCheck,
 		a.chkOptCheck,
+		formItem("声明 IP（Via/Contact/SDP）", a.accIPSelect),
 		a.accStunCheck,
 		formItem("STUN 服务器", a.accStunServer),
 		saveBtn,
@@ -1746,6 +1762,11 @@ var srtpValues = []string{
 	config.SRTPOff, config.SRTPSupported, config.SRTPPreferred, config.SRTPRequired,
 }
 
+// declaredIPValue 表单 → 配置值：留空/非法一律当"自动"（空串）。
+func (a *App) declaredIPValue() string {
+	return config.NormalizePublicIP(a.accIPSelect.Text)
+}
+
 // tlsNoteText 「只加密信令」提示（仅传输=tls 时显示）。
 // 一句话说完：媒体是否加密由下面的「媒体加密」单独决定，此处不必展开。
 const tlsNoteText = "SIPS 只加密信令"
@@ -1793,6 +1814,13 @@ func (a *App) saveAccount() {
 	if expires <= 0 {
 		expires = 300
 	}
+	// 声明 IP（REQ-ACC-023）：填了内容就必须是合法 IP——SDP 的 c= 行只认
+	// IP 字面量，写域名/写错会在协商时静默变成"自动"，不如当场拦下。
+	declaredIP := a.declaredIPValue()
+	if strings.TrimSpace(a.accIPSelect.Text) != "" && declaredIP == "" {
+		a.showInfo("提示", "「声明 IP」请填合法 IP（如 10.168.5.10），或留空表示自动")
+		return
+	}
 	acc := config.Account{
 		Enabled:     a.accEnabled.Checked,
 		Server:      host,
@@ -1803,6 +1831,8 @@ func (a *App) saveAccount() {
 		STUNEnabled: a.accStunCheck.Checked,
 		STUNServer:  a.accStunServer.Text,
 		Proxy:       a.accProxy.Text,
+		Domain:      config.NormalizeDomain(a.accDomain.Text),
+		PublicIP:    declaredIP,
 		Transport:   config.NormalizeTransport(a.accTransport.Selected),
 		TLSVerify:   a.tlsVerifyCheck.Checked,
 		SRTP:        config.NormalizeSRTP(srtpValueOfLabel(a.accSRTP.Selected)),
@@ -1849,6 +1879,10 @@ func (a *App) loadAccountIntoForm() {
 	a.tlsVerifyCheck.SetChecked(acc.TLSVerify)
 	a.updateTLSRow(acc.Transport)
 	a.accSRTP.SetSelected(srtpLabelOfValue(acc.SRTP))
+	a.accDomain.SetText(acc.Domain)
+	// 声明 IP：直接回填（留空 = 自动）。值不在候选里也能显示——它就是可输入的
+	// 下拉，手填过的地址保存后要能原样回来
+	a.accIPSelect.SetText(config.NormalizePublicIP(acc.PublicIP))
 	a.accAccount.SetText(acc.Account)
 	a.accAuthUser.SetText(acc.AuthUser)
 	a.accPassword.SetText(acc.Password)

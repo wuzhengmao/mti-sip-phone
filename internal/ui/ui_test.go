@@ -415,3 +415,35 @@ func TestSRTPHintFitsWindow(t *testing.T) {
 		t.Fatalf("反例没被判超限（%.0f），说明本测试量不出宽度、形同虚设", w)
 	}
 }
+
+// TestDeclaredIPForm 声明 IP 是可输入的下拉（同拨号框）：留空 = 自动，
+// 选中候选 / 手填任意合法 IP 都算数，非法内容一律当"自动"（保存时会被拦下）。
+func TestDeclaredIPForm(t *testing.T) {
+	test.NewApp()
+	a := &App{}
+	a.accIPSelect = widget.NewSelectEntry([]string{"10.0.0.5", "192.168.3.15"})
+
+	// 留空 = 自动
+	a.accIPSelect.SetText("")
+	if got := a.declaredIPValue(); got != "" {
+		t.Fatalf("留空应取空（= 自动），实际 %q", got)
+	}
+
+	// 从下拉里选
+	a.accIPSelect.SetText("10.0.0.5")
+	if got := a.declaredIPValue(); got != "10.0.0.5" {
+		t.Fatalf("应取选中的地址，实际 %q", got)
+	}
+
+	// 手填（不在候选里也要能填）
+	a.accIPSelect.SetText(" 10.168.5.10 ")
+	if got := a.declaredIPValue(); got != "10.168.5.10" {
+		t.Fatalf("手填应被规范化，实际 %q", got)
+	}
+
+	// 非法输入：取值当自动（保存时用 TrimSpace(Text) != "" 来拦住）
+	a.accIPSelect.SetText("example.com")
+	if got := a.declaredIPValue(); got != "" {
+		t.Fatalf("非法输入应取空，实际 %q", got)
+	}
+}

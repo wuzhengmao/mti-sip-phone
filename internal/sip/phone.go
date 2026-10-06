@@ -243,6 +243,23 @@ func (p *Phone) noteRegisterPeer(src string) {
 	p.mu.Unlock()
 }
 
+// uriHostOf SIP URI 里用的域名（REQ-ACC-022）：配了域名就用域名，
+// 否则用 SIP 服务器地址（历史行为）。**网络目的地不受它影响**——始终是
+// Server:Port（域名只让 URI 长得对，见 sendRegister/dccInvite 里的
+// SetDestination 与 Route）。
+func uriHostOf(acc config.Account) string {
+	if d := config.NormalizeDomain(acc.Domain); d != "" {
+		return d
+	}
+	return acc.Server
+}
+
+// serverDest 注册/呼叫的实际目的地 "host:port"（域名与服务器地址不同时，
+// 报文仍要发到服务器）。
+func serverDest(acc config.Account) string {
+	return net.JoinHostPort(acc.Server, strconv.Itoa(acc.Port))
+}
+
 // hostIsServer host（不含端口）是否就是注册的 SIP 服务器：先比"最近一次
 // REGISTER 成功响应来自的 IP"（最可靠，配置写域名也成立），再比配置里的
 // server / proxy。SIP 里的域与地址都可能不带端口，所以只比 host。
@@ -463,6 +480,10 @@ func (p *Phone) Register(ctx context.Context, acc config.Account) error {
 		p.publicIP = ""
 	}
 	p.mu.Unlock()
+
+	// 声明 IP（REQ-ACC-023）：保存账户即生效——Via 的 sent-by 在这里改写，
+	// Contact/SDP 走 localHost()（读 p.acc）自动跟上。
+	p.applyDeclaredIP(acc)
 
 	// TLS（REQ-ACC-006）：校验开关即时生效（出向握手每次按它判定）；
 	// transport=tls 时确保本端 TLS 监听已启动（首次注册时才生成证书/占端口，
@@ -1122,9 +1143,15 @@ func (p *Phone) doRegister(ctx context.Context, acc config.Account) (int, error)
 func (p *Phone) sendRegister(ctx context.Context, acc config.Account, expires int) (int, error) {
 	p.sink.OnRegisterState(core.RegRegistering, "")
 
+	// 域名（REQ-ACC-022）：配了域名就用它做 URI 里的域（AOR 归属），
+	// 端口只在用服务器地址时才写（域名不带端口，报文照样发到 Server:Port）。
+	rhost := uriHostOf(acc)
 	// 请求行携带用户名（REQ-ACC-012）：OpenSIPS 等服务器的 registrar 从
 	// Request-URI 提取 location 表的 username，缺省会导致 username 为空。
-	recipient := sip.Uri{User: acc.Account, Host: acc.Server, Port: acc.Port}
+	recipient := sip.Uri{User: acc.Account, Host: rhost}
+	if acc.Domain == "" {
+		recipient.Port = acc.Port
+	}
 	// TLS：R-URI 声明 sips（RFC 3261 §10.2，registrar 域用 sips: 表示只接受 TLS）
 	if tlsInUse(acc) {
 		recipient.Scheme = "sips"
@@ -1140,11 +1167,11 @@ func (p *Phone) sendRegister(ctx context.Context, acc config.Account, expires in
 	// From / To（必须是独立的两个头对象，复用同一指针会导致 From 重复输出）
 	from := &sip.FromHeader{
 		DisplayName: acc.DisplayName,
-		Address:     sip.Uri{User: acc.Account, Host: acc.Server},
+		Address:     sip.Uri{User: acc.Account, Host: rhost},
 	}
 	to := &sip.ToHeader{
 		DisplayName: acc.DisplayName,
-		Address:     sip.Uri{User: acc.Account, Host: acc.Server},
+		Address:     sip.Uri{User: acc.Account, Host: rhost},
 	}
 	req.AppendHeader(from)
 	req.AppendHeader(to)
@@ -1171,6 +1198,10 @@ func (p *Phone) sendRegister(ctx context.Context, acc config.Account, expires in
 		// 出站代理（REQ-ACC-019）：R-URI 保持目标，网络层发往代理
 		if acc.Proxy != "" {
 			r.SetDestination(acc.Proxy)
+		} else if acc.Domain != "" {
+			// 配了域名：R-URI 是 sip:账号@域名，报文仍发到 Server:Port
+			//（域名多半只能在服务器内部解析，本机不一定能解析它）
+			r.SetDestination(serverDest(acc))
 		}
 		return nil
 	}
@@ -1309,7 +1340,7 @@ func (p *Phone) dccInvite(recipient sip.Uri, offer string, acc config.Account) (
 	// OpenSIPS 报 "bad from header"）。From 按 RFC 3261 携带 tag。
 	from := &sip.FromHeader{
 		DisplayName: acc.DisplayName,
-		Address:     sip.Uri{User: acc.Account, Host: acc.Server},
+		Address:     sip.Uri{User: acc.Account, Host: uriHostOf(acc)},
 		Params:      sip.NewParams(),
 	}
 	from.Params.Add("tag", sip.GenerateTagN(8))
@@ -1322,13 +1353,21 @@ func (p *Phone) dccInvite(recipient sip.Uri, offer string, acc config.Account) (
 		from, to,
 	}
 	// 出站代理（REQ-ACC-019）：首条 Route 指向代理（loose routing）；
-	// TLS 下代理地址也用 sips:（RFC 3261 §8.1.2：Route 与 R-URI 的保密级别一致）
+	// TLS 下代理地址也用 sips:（RFC 3261 §8.1.2：Route 与 R-URI 的保密级别一致）。
+	// 域名（REQ-ACC-022）同一个手法：R-URI/To 写域名，但报文要发到 Server:Port
+	// （域名多半只在服务器内部解析，本机不一定解析得了）。代理配置优先。
+	routeTo := ""
 	if acc.Proxy != "" {
+		routeTo = acc.Proxy
+	} else if acc.Domain != "" {
+		routeTo = serverDest(acc)
+	}
+	if routeTo != "" {
 		scheme := "sip"
 		if tr == config.TransportTLS {
 			scheme = "sips"
 		}
-		headers = append(headers, sip.NewHeader("Route", "<"+scheme+":"+acc.Proxy+";lr>"))
+		headers = append(headers, sip.NewHeader("Route", "<"+scheme+":"+routeTo+";lr>"))
 	}
 	dcc := p.dialogClient()
 	if dcc == nil {
@@ -1923,6 +1962,11 @@ func (p *Phone) localAddr() string {
 // 注意：内部的 localIP() 会做一次 UDP 拨号探测、并再取一次 p.mu（localAddr），
 // 所以公共地址必须在**放开锁之后**才取。
 func (p *Phone) localHost() string {
+	// 显式配置的"声明 IP"优先级最高（REQ-ACC-023）：配了它就不再走 STUN/
+	// 出口探测——用户既然手填了，就以它为准（Contact 与 SDP 都用这里）。
+	if ip := p.declaredIP(); ip != "" {
+		return ip
+	}
 	p.mu.Lock()
 	pub := p.publicIP
 	p.mu.Unlock()
@@ -1935,7 +1979,21 @@ func (p *Phone) localHost() string {
 	return p.client.Hostname()
 }
 
-// parseTarget 解析呼叫目标：纯号码补全为 sip:号码@服务器。
+// declaredIP 配置里显式声明的 IP（REQ-ACC-023），未配置为空串。
+func (p *Phone) declaredIP() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return config.NormalizePublicIP(p.acc.PublicIP)
+}
+
+// applyDeclaredIP 把配置的声明 IP 应用到**已经建好的** sipgo Client 上
+//（Via 的 sent-by）。Contact 与 SDP 走 localHost()，不用在这里管。
+// 账户变更（Register）时调用，因此保存配置即生效，不必重启。
+func (p *Phone) applyDeclaredIP(acc config.Account) {
+	setClientHost(p.client, config.NormalizePublicIP(acc.PublicIP))
+}
+
+// parseTarget 解析呼叫目标：纯号码补全为 sip:号码@域名（未配域名则用服务器）。
 func parseTarget(target string, acc config.Account) (sip.Uri, error) {
 	if strings.HasPrefix(strings.ToLower(target), "sip:") || strings.HasPrefix(strings.ToLower(target), "sips:") {
 		u := sip.Uri{}
@@ -1943,13 +2001,17 @@ func parseTarget(target string, acc config.Account) (sip.Uri, error) {
 			return u, fmt.Errorf("目标 URI 非法: %w", err)
 		}
 		if u.Host == "" {
-			u.Host = acc.Server
+			u.Host = uriHostOf(acc)
 		}
 		return u, nil
 	}
 	// 纯号码
 	if strings.ContainsAny(target, " \t\r\n") {
 		return sip.Uri{}, fmt.Errorf("号码包含非法字符")
+	}
+	if d := config.NormalizeDomain(acc.Domain); d != "" {
+		// 配了域名：URI 用域名（不带端口），实际发往 Server:Port（见 dccInvite）
+		return sip.Uri{User: target, Host: d}, nil
 	}
 	return sip.Uri{User: target, Host: acc.Server, Port: acc.Port}, nil
 }

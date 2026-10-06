@@ -8,6 +8,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +31,8 @@ type Account struct {
 	Transport   string `json:"transport"`   // 传输协议：udp / tcp / tls（REQ-ACC-006）
 	TLSVerify   bool   `json:"tlsVerify"`   // 校验服务器证书（仅 transport=tls 生效）。默认 false = 跳过校验（REQ-ACC-006：内网自签证书场景）
 	SRTP        string `json:"srtp"`        // 媒体加密（SDES-SRTP，REQ-MEDIA-009）：off / supported / preferred / required，默认 supported（空值按默认）
+	Domain      string `json:"domain"`      // SIP 域名（可选）：From/To/R-URI 里的域。留空 = 用 Server（REQ-ACC-022）
+	PublicIP    string `json:"publicIP"`    // 对外声明的 IP（可选）：Via/Contact/SDP 里写的地址。留空 = 自动（STUN → 本机出口 IP），REQ-ACC-023
 	Account     string `json:"account"`     // 账号（AOR 用户部分）
 	AuthUser    string `json:"authUser"`    // 认证 ID，为空时使用 Account
 	DisplayName string `json:"displayName"` // 显示名
@@ -213,6 +216,38 @@ func NormalizeTransport(t string) string {
 	default:
 		return TransportUDP
 	}
+}
+
+// NormalizeDomain 规范化 SIP 域名：去掉空白、`sip:`/`sips:` 前缀与 `user@`，
+// 并丢掉端口部分（**注册/呼叫的网络目的地始终是 Server:Port**，域只是 URI 里的
+// 名字，见 REQ-ACC-022）。空串 = 不配置（用 Server 作域）。
+func NormalizeDomain(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	for _, p := range []string{"sips:", "sip:"} {
+		if len(s) >= len(p) && strings.EqualFold(s[:len(p)], p) {
+			s = s[len(p):]
+		}
+	}
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	if i := strings.LastIndex(s, ":"); i >= 0 && !strings.Contains(s[i:], "]") {
+		s = s[:i] // host:port → host（IPv6 字面量有 ']'，不动）
+	}
+	return strings.Trim(s, "[] ")
+}
+
+// NormalizePublicIP 规范化"对外声明的 IP"：只接受 IP 字面量（SDP 的 c= 行必须
+// 是 IP，域名会被拒），非法值一律当未配置（返回空 = 自动）。
+func NormalizePublicIP(s string) string {
+	s = strings.Trim(strings.TrimSpace(s), "[]")
+	if ip := net.ParseIP(s); ip != nil {
+		return ip.String()
+	}
+	return ""
 }
 
 // 媒体加密（SDES-SRTP，REQ-MEDIA-009）策略取值。

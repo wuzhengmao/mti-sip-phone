@@ -1,6 +1,8 @@
 package logx
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -42,4 +44,29 @@ func TestMaskSecretsRegressions(t *testing.T) {
 	if strings.Contains(uri, "pw123") {
 		t.Fatalf("URI 中的密码未脱敏:\n%s", uri)
 	}
+}
+
+// TestTraceIgnoresLogLevel 信令记录**不受日志级别影响**（用户要求：勾选了就必定记录）。
+// TraceSIP 走的是独立输出目标（traceOut，见 Init），不经过 slog 的等级过滤——
+// 这条用例把该行为钉住：等级设成 error，信令仍要落盘。
+func TestTraceIgnoresLogLevel(t *testing.T) {
+	dir, err := os.MkdirTemp("", "logx-trace-level")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Init("error", dir, true, false); err != nil { // 等级 = error（最严）
+		t.Fatal(err)
+	}
+	TraceSIP("发出", "INVITE sip:2901@example.com SIP/2.0\r\nVia: SIP/2.0/TLS 10.0.0.9\r\n")
+
+	b, err := os.ReadFile(filepath.Join(dir, logFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "INVITE sip:2901@example.com") {
+		t.Fatalf("等级=error 时信令没有落盘（信令不该被等级过滤）:\n%s", string(b))
+	}
+	// 先关句柄再删目录：Windows 上文件被自己占着时删不掉（与日志轮转同一个坑）。
+	Close()
+	_ = os.RemoveAll(dir)
 }
