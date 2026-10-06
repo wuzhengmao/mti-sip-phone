@@ -6,12 +6,13 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
-## [1.0.14] - 待发布
+## [1.0.14] - 2026-10-07
 
 ### 修复
 
 - **Windows 32 位（386）版本恢复摄像头采集**：此前 386 产物没有任何采集后端（设置页摄像头选择置灰、视频通话只能看对方），根子是上游 mediadevices（v0.10.0）的 DirectShow 桥 `camera_windows.hpp` 里 `SampleCB` / `BufferCB` 两个回调漏写 `STDMETHODCALLTYPE`，与 mingw `qedit.h` 里 `ISampleGrabberCB` 的 `__stdcall` 在 i686 上是真实的调用约定冲突、编不过（x86_64 上该属性被忽略，所以 amd64 一直无事）。现在把这份驱动**复制进仓库**（`internal/video/dshow`，MIT，来源与改动见文件头注释）并补上调用约定标记，**amd64 与 386 共用同一份实现**（不再用上游的 camera 包）。实测：两个架构都能枚举设备、打开并采到帧（386 在 64 位 Windows 上经 WOW64 运行，用的是系统自带的 32 位 DirectShow 组件）。
 - **Windows 产物改为静态链接，不再依赖 MinGW 运行时 DLL**：amd64 托盘版与控制台版此前动态依赖 `libwinpthread-1.dll` / `libstdc++-6.dll` / `libgcc_s_seh-1.dll` —— 它们是 **MinGW 工具链的运行时、Windows 并不自带**，而发布包（tar.gz 里只有 exe）不附带这些 DLL，在没装 MinGW 的机器上会直接报"缺少 libwinpthread-1.dll"启动失败；386 目标因历史原因一直是静态链接，本次 amd64 与控制台版一并加上 `-extldflags -static`。现在两个 Windows 产物的导入表只剩 `ole32` / `quartz` 这类**系统组件**（DirectShow 用），单文件可直接分发。
+- **两处 Linux 侧构建缺陷**：① `internal/ui/topmost_linux.go` 用了 `sync` / `sync/atomic` 却没写进 import——**Linux 专有文件在 Windows 上根本不参与编译**（`build.bat`、`go test`、`go vet` 全都看不见），到 Linux 上跑 `build.sh` 才报 `undefined: sync`；② Linux 交叉（amd64 ⇄ arm64）未显式给 `CXX`，AEC 的 C++ 桥（`apm_bridge.cc`）进来后链接驱动落到**宿主**的 `/usr/bin/g++`，拿 aarch64 目标文件去链接、报 `Relocations in generic ELF (EM: 183)`——现在交叉目标显式使用目标架构的 g++，缺 `g++-<triple>` 包时**跳过该目标并打印安装提示**（只有交叉 gcc 是不够的：C++ 源要 cc1plus、`-lstdc++` 要目标架构的 libstdc++）。
 
 ### 新增
 
@@ -49,6 +50,7 @@
 - **新增 Windows on ARM64 构建目标**（`dist/sip-phone-windows-arm64.exe`，Win/Linux 两个构建脚本都支持）：arm64 版 Windows 电脑（Surface Pro X、骁龙本）此前**没有产物**——GCC 系的 mingw-w64 根本没有 `aarch64-w64-mingw32` 目标（`gcc-mingw-w64-*`、WinLibs、MSYS2 的 mingw64/mingw32 都出不了它，MSYS2 的 clangarm64 是"ARM64 机器上的本机环境"，不是 x64 上的交叉），必须换成 **llvm-mingw**（clang + lld + mingw-w64 sysroot，解压即用，官方提供 Windows 与 Linux 宿主的包）。两个脚本的探测顺序是 PATH → `LLVM_MINGW=<解压目录>` → 默认位置，**探测不到就跳过该目标并打印安装步骤**（不影响其余产物）。产物导入表只有系统 DLL（UCRT，无 libwinpthread/libgcc），单文件可直接分发。
   - **该目标目前是基础版**：视频、Opus、音频预处理（AEC/NS/AGC）三套静态库都还没有 arm64 版本，需要另为 `aarch64-w64-mingw32` 编库（OpenH264 与 abseil 是 C++，而 llvm-mingw 带的是 libc++ 而非 libstdc++，构建脚本的 `-lstdc++` 得跟着改），因此脚本刻意**不对该目标做库探测**，固定构建为 G.711/G.722 + 音频设备 + 界面 + 信令 + WS 的基础版。
   - 已知限制：**尚未在真机（Windows on ARM64 设备）上运行验证**，目前只完成编译验证与 PE 头检查（ARM64 / GUI 子系统）；x64 Windows 跑不了 ARM64 程序，验收需要对应设备。
+- **文档交付：用户使用手册与 SDK 开发指南**：新增 `docs/user-manual.md`（面向最终用户：安装与运行环境、配置页逐项说明、拨号/来电/通话/视频/通话记录/通信录/托盘、`sip://` 拉起与多开、自动更新、故障排查与数据文件位置）与 `docs/sdk-guide.md`（面向前端集成者：5 分钟上手、全部 API 与事件参考、视频订阅专章、**16 条避坑清单**、调试建议）。两份文档逐项对照实现核校（改掉若干"想当然"的描述：托盘是**单击**唤出、界面上并无视频分辨率设置项、SIP 账户需点「保存并注册」等）。同时按**五种产物**（Windows x64/x86/ARM64、Linux x64/arm64）统一梳理了各文档的平台清单与能力矩阵（含"无视频能力的构建里视频入口全部隐藏、配置页视频设备区置灰"的口径），把 Go 版本要求更正为 **1.24+**、补充「**Windows 10 及以上**」的运行要求（Go 1.22 起官方不再支持 Win7/8），并修正 REQ-UI-002（托盘交互按实现为单击）。
 
 ## [1.0.13] - 2026-10-06
 

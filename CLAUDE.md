@@ -208,7 +208,9 @@ scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）、
               （test.sh，防火墙只弹一次）与一键发布（release.sh/.bat）
 docs/         design.md（架构设计：分层与依赖、各模块职责、关键决策、目录地图——新同学先看这份）、
               requirements.md（需求）、ws-protocol.md（WS 协议）、auto-update.md（自动更新与
-              更新站点接入：规范摘要、REST API、参考实现、接入清单）；changelog.md 在仓库根目录
+              更新站点接入：规范摘要、REST API、参考实现、接入清单）、
+              user-manual.md（用户使用手册：面向最终用户）、sdk-guide.md（SDK 开发指南：
+              面向前端集成者；**改 SDK/WS 的对外行为后这两份要同步**）；changelog.md 在仓库根目录
 ```
 
 ## 分层架构与事件流

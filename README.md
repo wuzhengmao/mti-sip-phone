@@ -3,6 +3,8 @@
 跨平台 SIP 软电话（Go 实现）：常驻系统托盘，支持注册、呼叫、振铃、接听、挂断；通过本地 WebSocket 接口供网页控制，附带 JS SDK 与测试页面。
 
 - 架构设计：[docs/design.md](docs/design.md)（新同学先看这份）
+- 用户使用手册：[docs/user-manual.md](docs/user-manual.md)（面向最终用户：安装、配置、使用、故障排查）
+- SDK 开发指南：[docs/sdk-guide.md](docs/sdk-guide.md)（面向前端：网页集成、API、避坑）
 - 变更记录：[changelog.md](changelog.md)
 - 需求文档：[docs/requirements.md](requirements.md)
 - WS 协议：[docs/ws-protocol.md](docs/ws-protocol.md)
