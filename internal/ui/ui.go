@@ -1109,7 +1109,7 @@ func (a *App) onVideoCallButton() {
 
 // cameraUsable 摄像头当前是否可用于发送本地视频（REQ-VIDEO-005）。
 func (a *App) cameraUsable() bool {
-	// 没有摄像头后端的构建（Windows 386）也要算"不可用"：否则会显示
+	// 没有摄像头后端的构建（darwin 这类目标）也要算"不可用"：否则会显示
 	//「视频接听」按钮（点了却没有本地画面）。视频总开关关闭（REQ-VIDEO-014）
 	// 同样算不可用——此时整个视频功能都不该出现。
 	if !a.core.VideoUsable() || !a.core.CameraSupported() {
@@ -2326,12 +2326,12 @@ func (a *App) refreshCameras() {
 		return
 	}
 	if !a.core.CameraSupported() {
-		// 编解码可用但**本平台没有摄像头后端**（Windows 386 这类目标）。
+		// 编解码可用但**本平台没有摄像头后端**（darwin 这类目标）。
 		// 这里必须与"没插摄像头"区分开：否则用户会在空列表里选「禁用」，
 		// 把共用配置写坏（64 位版也跟着不发送本地视频了——实测踩过）。
 		a.camSelect.Disable()
 		a.applyCameraList(nil, "此版本不支持摄像头")
-		a.camHint.SetText("本版本（32 位）不支持摄像头采集：视频通话只能看对方，不发送本地画面")
+		a.camHint.SetText("本版本不支持摄像头采集：视频通话只能看对方，不发送本地画面")
 		return
 	}
 	if a.core.VideoCallEnabled() {

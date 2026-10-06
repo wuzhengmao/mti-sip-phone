@@ -1,6 +1,6 @@
 @echo off
 rem mti-sip-phone Windows build script: native builds, output to dist\
-rem Depends: Go 1.23+, MinGW-W64 gcc (CGO; WinLibs or MSYS2)
+rem Depends: Go 1.24+, MinGW-W64 gcc (CGO; WinLibs or MSYS2)
 rem NOTE: keep this file ASCII-only, cmd.exe parses bat as GBK on zh-CN Windows
 rem windows/386 GUI build needs 32-bit MinGW: MSYS2 (pacman -S mingw-w64-i686-gcc)
 rem or WinLibs i686 at %USERPROFILE%\tools\winlibs-i686; without it the 386
@@ -58,15 +58,19 @@ echo Version: %APP_VERSION% - release build
 :ver_done
 
 rem 1) Windows amd64 GUI: no console, tray app, CGO+audio
+rem -extldflags -static: link the mingw runtimes (libwinpthread/libstdc++/libgcc)
+rem into the exe. Without it the binary needs those DLLs on PATH -- they are NOT
+rem part of Windows, so a copy of the exe on a machine without MinGW fails to
+rem start ("libwinpthread-1.dll not found"). Same as the 386 target below.
 call :codec_setup windows-amd64
-echo [1/4] Building dist\sip-phone-windows-amd64.exe (%FEATURES%)...
-go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui" -o dist\sip-phone-windows-amd64.exe .\cmd\sip-phone
+echo [1/4] Building dist\sip-phone-windows-amd64.exe (%FEATURES%, static)...
+go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui -extldflags -static" -o dist\sip-phone-windows-amd64.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 
 rem 2) Windows console build (-headless server mode / command line debug)
 call :codec_setup windows-amd64
-echo [2/4] Building dist\sip-phone-console.exe (%FEATURES%, console/headless)...
-go build %TAGS_ARG% -ldflags "%LDFLAGS%" -o dist\sip-phone-console.exe .\cmd\sip-phone
+echo [2/4] Building dist\sip-phone-console.exe (%FEATURES%, console/headless, static)...
+go build %TAGS_ARG% -ldflags "%LDFLAGS% -extldflags -static" -o dist\sip-phone-console.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 
 rem 3) Windows 386 GUI: needs 32-bit MinGW, otherwise skipped
@@ -138,8 +142,8 @@ echo       note: GCC-based mingw-w64 has no aarch64 target, llvm-mingw is requir
 
 :summary
 echo Build OK: version %APP_VERSION%
-echo   dist\sip-phone-windows-amd64.exe          - tray GUI, no console
-echo   dist\sip-phone-console.exe                - console, headless/debug
+echo   dist\sip-phone-windows-amd64.exe          - tray GUI, no console, static
+echo   dist\sip-phone-console.exe                - console, headless/debug, static
 if defined GCC32 echo   dist\sip-phone-windows-386.exe            - tray GUI, static
 if defined ARM64_ON echo   dist\sip-phone-windows-arm64.exe          - tray GUI, base build
 if not defined ARM64_ON if defined LLVM_HINT echo   dist\sip-phone-windows-arm64.exe: %LLVM_HINT% has no aarch64-w64-mingw32-clang.exe

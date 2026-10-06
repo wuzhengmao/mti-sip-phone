@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
+mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x64 / arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
 当前开发版本 **1.0.14**（1.0.13 已定版并合并到 master，含 **SIP 信令 TLS(SIPS) 传输（REQ-ACC-006）**——传输新增 tls、sips:// 拉起、本端自签 TLS 监听、TCP/TLS 信令保活，以及真机联调修出的来电接听/振铃取消/长通话挂断等一批 TCP/TLS 信令缺陷；此前 1.0.12 的 G.722 宽频、视频总开关等一并包含）。1.0.14 进行中：崩溃现场记录（REQ-LOG-009，见「已知陷阱」的日志条）、**媒体加密 SRTP（REQ-MEDIA-009，SDES/`a=crypto`，见「重要约定」的 SRTP 条）**。
 版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），
@@ -31,9 +31,9 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 # 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.11-rc），
 # 正式构建用 SIP_PHONE_RELEASE=1（发布脚本会设）；不经脚本的 go build/go run 是基础版本号。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
-#   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO）
-#   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
-#   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标）
+#   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO，静态）
+#   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试，静态）
+#   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标；静态）
 #   dist/sip-phone-windows-arm64.exe          ARM64 托盘版（需 llvm-mingw，缺失则跳过该目标；
 #                                             无视频/Opus/AEC 静态库 → 基础版，见「交叉编译说明」）
 build.bat
@@ -42,9 +42,9 @@ build.bat
 #   dist/sip-phone-linux-<本机arch>           本机 Linux 托盘版
 #   dist/sip-phone-linux-<对侧arch>           交叉版（amd64 主机→arm64，arm64 主机→amd64；需对侧
 #                                             架构的交叉 gcc + 图形栈开发包，缺失则跳过并打印准备步骤）
-#   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉，需 x86_64-w64-mingw32-gcc）
+#   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉，静态，需 x86_64-w64-mingw32-gcc）
 #   dist/sip-phone-windows-386.exe            Windows 386 托盘版（交叉，静态，需 i686-w64-mingw32-gcc）
-#   dist/sip-phone-windows-arm64.exe          Windows ARM64 托盘版（交叉，需 llvm-mingw，缺失则跳过）
+#   dist/sip-phone-windows-arm64.exe          Windows ARM64 托盘版（交叉，基础版，需 llvm-mingw，缺失则跳过）
 ./build.sh
 
 # 测试（推荐）：固定路径运行器——把测试二进制构建到仓库内 .testbin/ 再执行。
@@ -113,7 +113,12 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 - **Linux → Windows GUI**：用 mingw-w64 直接交叉（`build.sh` 已内置，
   `-H=windowsgui`）。glfw 的 C 源码与 mingw 专用头（`glfw/deps/mingw`）随
   go-gl/glfw 模块自带，malgo 自带 miniaudio.c，链接目标只有 mingw 自带的
-  系统导入库，**无需 Windows SDK**。386 目标加 `-extldflags -static` 免 DLL。
+  系统导入库，**无需 Windows SDK**。**两个 mingw 目标都加 `-extldflags -static`**：
+  mingw 运行时（libwinpthread/libstdc++/libgcc）是 **MinGW 工具链的东西、Windows
+  并不自带**，不静态化的话产物必须在装了这些 DLL（或装了 MinGW）的机器上才启动得
+  起来；静态化后导入表只剩 ole32/quartz 这类系统组件（DirectShow 用）。
+  产物要求 **Windows 10 及以上**：Go 1.22 起官方就不再支持 Win7/8（运行时要
+  `ProcessPrng` 这类 Win10 才有的 API），属工具链的硬限制，别再答复"能不能支持 Win7"。
   Debian/Ubuntu 的 mingw-w64 工具链在 **amd64 与 arm64 主机上都有包**，
   所以 arm64 构建机同样能出这两个 Windows 产物，无需禁用。
 - **Linux 交叉对侧架构 GUI（amd64 ⇄ arm64）**：glfw 的 Linux 后端会同时编
@@ -282,19 +287,23 @@ libopus 构建很轻（秒级，无 nasm/pkg-config 依赖，x86 的 SIMD 走编
 - 丢包补静音（不做 PLC，与 G.711 一致）；编解码器是**包级共享实例**，实现了 `resetter`，
   通话开始/换流/换编码时复位。
 
-**四个目标的可行性**（都是交叉编译，宿主机位数无关）：
+**五个目标的可行性**（Windows 的三个都是交叉编译，宿主机位数无关）：
 
 | 目标 | FFmpeg | libvpx | OpenH264 | 摄像头 |
 | --- | --- | --- | --- | --- |
 | windows-amd64 | ✓ | ✓ | ✓ | ✓ |
-| windows-386 | ✓ | ✓ | ✓ | **不可用**（见下） |
+| windows-386 | ✓ | ✓ | ✓ | ✓（见下） |
+| windows-arm64 | —— | —— | —— | ——（基础版：三套静态库无 arm64 版本，无视频即无摄像头） |
 | linux-amd64 / arm64 | ✓ | ✓ | ✓ | ✓（V4L2） |
 
-Windows 386 的摄像头**编不过**，是上游限制：mediadevices 的 `camera_windows.hpp`
-回调 `HRESULT SampleCB(...)` 漏了 `STDMETHODCALLTYPE`，而 mingw 的 `qedit.h` 里
-`ISampleGrabberCB::SampleCB` 带 `__stdcall`。x86_64 上 `__stdcall` 被忽略所以能编，
-**i686 上是真实的调用约定冲突**。用 `-D__stdcall=` 强行编会让整份 COM 调用变 cdecl，
-运行期必崩，不要试。所以 386 走 `camera_other.go`：编解码可用、摄像头不可用。
+**Windows 摄像头是仓库内自带的一份 DirectShow 驱动**（`internal/video/dshow`，
+从 mediadevices v0.10.0 的 `pkg/driver/camera` 复制，MIT）：上游那份在 i686 上
+**编不过**——`camera_windows.hpp` 的回调 `HRESULT SampleCB(...)` 漏了
+`STDMETHODCALLTYPE`，而 mingw 的 `qedit.h` 里 `ISampleGrabberCB::SampleCB` 带
+`__stdcall`；x86_64 上 `__stdcall` 被忽略所以能编，**i686 上是真实的调用约定冲突**。
+复制品只补了这两处声明（`SampleCB`/`BufferCB` 的声明与定义都加
+`STDMETHODCALLTYPE`），**amd64 与 386 共用**，别再改回上游的 camera 包。
+⚠️ 用 `-D__stdcall=` 之类的宏强行编会让整份 COM 调用变 cdecl，运行期必崩，不要试。
 
 **32 位（windows-386）的 FFmpeg 必须 `--disable-x86asm`**（脚本里已加）：不关的话
 H.264 解码会崩在 FFmpeg 自己的 AVX 去块滤波里——gdb 实测栈是
@@ -560,9 +569,9 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   2. libvpx 的 `vpx_dsp_rtcd.h` 等由 `rtcd.pl` 按架构生成，沿用 64 位的表会引用
      只存在于 `fwd_txfm_ssse3_x86_64.asm` 的符号 → 32 位链接报 `_ssse3` 未定义。
 - **视频静态库：链接必须带 `-lstdc++`**（OpenH264 是 C++ 实现，用到
-  `operator delete(void*, unsigned int)` 这类 C++14 定长释放）。Windows 上 386 目标因
-  摄像头被排除、Go 改用 `gcc` 链接（amd64 有 C++ 摄像头源所以自动走 g++）；**Linux 上
-  本包没有 C++ 源、Go 一律用 `gcc` 链接**，同样中招（实测 Debian 报
+  `operator delete(void*, unsigned int)` 这类 C++14 定长释放）。Windows 上本包的
+  构建含 C++ 源（摄像头 dshow_windows.cpp），Go 会自动改用 g++ 链接；**Linux 上
+  本包没有 C++ 源、Go 一律用 `gcc` 链接**，就中招了（实测 Debian 报
   `undefined reference to 'operator new(unsigned long)'` / `__gxx_personality_v0`）。
   两处都在 `internal/video/ffmpeg.go` 的 `#cgo LDFLAGS` 里显式加上。
 - **cgo 前导块（`/* ... */`）里的 `//` 注释中不能出现星号加斜杠**——那是 C 块注释的
@@ -572,17 +581,18 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **视频静态库：Windows 链接必须显式 `-lwinpthread`**。mingw 下 libvpx 检测到
   pthread.h 就用 pthread 线程模型，其 `.a` 里有大量 `pthread_*`/`sem_*` 未定义符号
   （实测 70 处）。WinLibs 是 **posix** 线程模型的工具链，gcc/g++ 驱动会**隐式**带上
-  libwinpthread（所以 Windows 产物动态依赖 `libwinpthread-1.dll`，分发时要一起给），
+  libwinpthread（产物本身因 `-extldflags -static` 并不依赖 `libwinpthread-1.dll`），
   本机构建因此从不暴露；Debian 的 mingw 不会自动带，交叉链接报
   `undefined reference to 'pthread_mutex_lock'` / `'sem_post'`。已在
   `#cgo windows LDFLAGS` 显式加上（重复链接同一库是空操作，对两条路径都无副作用）。
 - **交叉 Windows 必须显式给 `CXX`**（`build.sh` 已设成与 CC 同前缀的 g++，并在带视频
   时检查它存在）。Go 的 `cfg.DefaultCXX` 对交叉目标返回裸 `"g++"`，也就是**宿主的**
   g++；而 cgo 编 C++ 与「包里含 C++ 源时的链接驱动」都走 CXX。不带视频时 Windows
-  交叉没有 C++ 源，所以一直没暴露；`-tags video` 引入 mediadevices 的
-  `camera_windows.cpp` 后就变成「用 Linux 的 g++ 编 Windows 源码」——`<iostream>`、
-  `<unistd.h>` 都能找到、**唯独 `<dshow.h>` 找不到**（实测，报错极具误导性），链接
-  同样会落到宿主 g++。Debian 上 mingw 的 g++ 是独立包（`g++-mingw-w64-*`）。
+  交叉没有 C++ 源，所以一直没暴露；`-tags video` 引入摄像头的 C++ 源
+  （`internal/video/dshow/dshow_windows.cpp`）后就变成「用 Linux 的 g++ 编 Windows
+  源码」——`<iostream>`、`<unistd.h>` 都能找到、**唯独 `<dshow.h>` 找不到**（实测，
+  报错极具误导性），链接同样会落到宿主 g++。Debian 上 mingw 的 g++ 是独立包
+  （`g++-mingw-w64-*`）。
   **Linux 交叉（amd64 ⇄ arm64）同理，而且更容易中招**：2026-10 之前仓库里一个 C++
   源都没有，所以那条路径一直没设 CXX 也没事；`internal/audio/apm_bridge.cc`（AEC，
   `-tags apm`）进来之后，linux 交叉的链接驱动就变成了**宿主的** `/usr/bin/g++`——

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # mti-sip-phone Linux 构建脚本：本机 Linux GUI 产物 + Windows GUI / 对侧 Linux 架构交叉产物，输出到 dist/
-# 依赖：Go 1.23+、系统 gcc（CGO）
+# 依赖：Go 1.24+、系统 gcc（CGO）
 #   - 交叉 Windows GUI 需 mingw-w64（amd64/arm64 主机均有包）：
 #       Debian/Ubuntu: sudo apt install gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
 #       Fedora:        sudo dnf install mingw64-gcc mingw32-gcc
@@ -376,6 +376,10 @@ else
 fi
 
 # Windows amd64 托盘版（参数与 build.bat 的同名目标一致：GUI 子系统无控制台）
+# -extldflags -static：把 mingw 运行时（libwinpthread/libstdc++/libgcc）链进
+# exe。不带这个参数时产物依赖这几个 DLL，而它们**不是 Windows 自带的**，
+# 拷到没装 MinGW 的机器上会起不来（"libwinpthread-1.dll not found"）。
+# Windows 386 目标一直是这么做的（见下）。
 if [ -n "$MINGW64_CC" ]; then
     codec_setup "windows-amd64"
     if [ -n "$VIDEO_ON" ] && [ ! -x "$MINGW64_CXX" ]; then
@@ -383,10 +387,10 @@ if [ -n "$MINGW64_CC" ]; then
         echo "      安装：apt install g++-mingw-w64-x86-64 / dnf install mingw64-gcc-c++"
         echo "      若不需要视频：删掉 third_party/video/windows-amd64 即可出无视频版本"
     else
-        echo "[3/5] 交叉构建 dist/sip-phone-windows-amd64.exe（${FEATURES}，CC=${MINGW64_CC} CXX=${MINGW64_CXX}）..."
+        echo "[3/5] 交叉构建 dist/sip-phone-windows-amd64.exe（${FEATURES}，静态，CC=${MINGW64_CC} CXX=${MINGW64_CXX}）..."
         printf '%s' "$CODEC_NOTES"
         CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC="$MINGW64_CC" CXX="$MINGW64_CXX" \
-            go build $(tags_args) -ldflags "$LDFLAGS -H=windowsgui" \
+            go build $(tags_args) -ldflags "$LDFLAGS -H=windowsgui -extldflags -static" \
             -o dist/sip-phone-windows-amd64.exe ./cmd/sip-phone
     fi
 else
@@ -412,7 +416,7 @@ if [ -n "$MINGW32_CC" ]; then
 else
     echo "[4/5] 跳过 Windows 386：未找到 i686-w64-mingw32-gcc"
     echo "      安装：apt install gcc-mingw-w64-i686 g++-mingw-w64-i686 / dnf install mingw32-gcc mingw32-gcc-c++"
-    echo "            （386 带视频时链接仍需 g++ 提供的 libstdc++；摄像头在 386 上不可用）"
+    echo "            （386 带视频时链接仍需 g++ 提供的 libstdc++；摄像头 C++ 源也要 g++）"
 fi
 
 # Windows arm64 托盘版。工具链是 llvm-mingw（clang），**不是** GCC 系：

@@ -38,7 +38,7 @@ func (p *Phone) videoConfig() config.VideoConfig {
 // cameraUsable 摄像头是否可用于发送本地视频（总开关 + 构建支持 + 未被禁用）。
 func (p *Phone) cameraUsable() bool {
 	// 三道门：视频功能可用（总开关 + 构建支持）、**本平台有摄像头后端**
-	//（Windows 386 没有，见 video.CameraSupported）、配置里没禁用摄像头。
+	//（darwin 没有，见 video.CameraSupported）、配置里没禁用摄像头。
 	return p.videoUsable() && video.CameraSupported() && p.videoConfig().CameraUsable()
 }
 

@@ -12,12 +12,16 @@
 
 | 系统 | 架构 |
 | --- | --- |
-| Windows | x86（32 位）/ x86_64 |
+| Windows | x86（32 位）/ x86_64 / arm64（基础版，无视频/Opus/AEC） |
 | Linux | x86_64 / arm64 |
+
+> **运行要求**：Windows 10 及以上（Go 1.24+ 的运行时不再支持 Windows 7/8——它用了 `ProcessPrng`
+> 这类 Win10 才有的 API）；Windows 产物是静态单文件，不依赖任何第三方 DLL。
+> Linux 产物依赖系统的图形/音频库（任何带桌面的发行版都具备），glibc 不低于构建机的版本。
 
 ## 构建与运行
 
-依赖：Go 1.23+、gcc（CGO，Windows 用 MinGW-W64 / MSYS2；Linux 用系统 gcc）。
+依赖：Go 1.24+、gcc（CGO，Windows 用 MinGW-W64 / MSYS2；Linux 用系统 gcc）。
 fyne 的 OpenGL 绑定依赖 CGO，需要**目标平台**的 gcc 工具链：Windows GUI 可以在
 Linux 上用 mingw-w64 交叉构建（glfw 的 C 源码与 mingw 专用头随 go-gl/glfw 模块
 自带，malgo 自带 miniaudio.c，无需 Windows SDK）；反向不成立——glfw 的 Linux
@@ -30,9 +34,9 @@ Linux 上用 mingw-w64 交叉构建（glfw 的 C 源码与 mingw 专用头随 go
 
 # Windows：一键构建（自动探测 WinLibs gcc），产物输出到 dist/：
 build.bat
-#   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频）
-#   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
-#   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标）
+#   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频，静态）
+#   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试，静态）
+#   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标；静态）
 #   dist/sip-phone-windows-arm64.exe          ARM64 托盘版（需 llvm-mingw，缺失则跳过；
 #                                             视频/Opus/AEC 静态库暂无 arm64 版 → 基础版）
 
@@ -43,7 +47,7 @@ build.bat
 ./build.sh
 #   dist/sip-phone-linux-<本机arch>           本机 Linux 托盘版
 #   dist/sip-phone-linux-<对侧arch>           交叉 Linux 托盘版
-#   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉）
+#   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉，静态）
 #   dist/sip-phone-windows-386.exe            Windows 386 托盘版（交叉，静态）
 #   dist/sip-phone-windows-arm64.exe          Windows ARM64 托盘版（交叉，基础版）
 

@@ -743,6 +743,9 @@ fi
 # 下载地址跨版本不变，用户与脚本收藏的链接不会失效；版本靠版本目录区分，
 # 站点文档也允许这种命名——文件名里有平台/架构词即可，何况 release.json 还显式声明了）。
 # 只列托盘 GUI 产物：sip-phone-console.exe 是同平台第二个候选，不发布。
+# windows-arm64 是**基础版**（无视频/Opus/音频预处理：这三套静态库还没有 arm64 版本），
+# 标题里写明，免得 ARM64 用户以为是完整功能版；该产物需要 llvm-mingw 工具链，
+# 没装时构建脚本会跳过它，这里按"缺失"处理（不影响其余）。
 ART_SRC=(
     "dist/sip-phone-windows-amd64.exe"
     "dist/sip-phone-windows-386.exe"

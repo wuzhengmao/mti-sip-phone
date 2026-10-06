@@ -5,10 +5,11 @@ package video
 /*
 #cgo LDFLAGS: -lavcodec -lswscale -lavutil -lvpx -lopenh264
 #cgo windows LDFLAGS: -lmingw32 -lws2_32 -lbcrypt -lsecur32 -luser32 -ladvapi32 -lole32 -lstdc++ -lwinpthread
-// -lstdc++：OpenH264 是 C++ 实现。Windows 上 386 目标因摄像头被排除、Go 改用 gcc
-// 链接（amd64 有 C++ 摄像头源所以自动走 g++），Linux 上本包没有 C++ 源、Go 一律用
-// gcc 链接，都必须在库后面显式带上 libstdc++，否则报 undefined reference to
-// `operator new(unsigned long)` / `__gxx_personality_v0` 等。
+// -lstdc++：OpenH264 是 C++ 实现。Windows 上本包的构建含 C++ 源（摄像头
+// dshow_windows.cpp），Go 会自动改用 g++ 链接；Linux 上本包没有 C++ 源、Go 一律用
+// gcc 链接，必须在库后面显式带上 libstdc++，否则报 undefined reference to
+// `operator new(unsigned long)` / `__gxx_personality_v0` 等（显式列出对 Windows
+// 那条路径无副作用）。
 // -lwinpthread：mingw 下 libvpx 检测到 pthread.h 就用 pthread 线程模型，其 .a 里
 // 有大量 pthread 与 sem 的未定义符号（实测 70 处；注意这里的注释不能出现
 // 星号加斜杠，那是 C 块注释的结束符，会把本前导块提前截断）。WinLibs 是 posix

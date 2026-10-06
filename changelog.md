@@ -8,6 +8,11 @@
 
 ## [1.0.14] - 待发布
 
+### 修复
+
+- **Windows 32 位（386）版本恢复摄像头采集**：此前 386 产物没有任何采集后端（设置页摄像头选择置灰、视频通话只能看对方），根子是上游 mediadevices（v0.10.0）的 DirectShow 桥 `camera_windows.hpp` 里 `SampleCB` / `BufferCB` 两个回调漏写 `STDMETHODCALLTYPE`，与 mingw `qedit.h` 里 `ISampleGrabberCB` 的 `__stdcall` 在 i686 上是真实的调用约定冲突、编不过（x86_64 上该属性被忽略，所以 amd64 一直无事）。现在把这份驱动**复制进仓库**（`internal/video/dshow`，MIT，来源与改动见文件头注释）并补上调用约定标记，**amd64 与 386 共用同一份实现**（不再用上游的 camera 包）。实测：两个架构都能枚举设备、打开并采到帧（386 在 64 位 Windows 上经 WOW64 运行，用的是系统自带的 32 位 DirectShow 组件）。
+- **Windows 产物改为静态链接，不再依赖 MinGW 运行时 DLL**：amd64 托盘版与控制台版此前动态依赖 `libwinpthread-1.dll` / `libstdc++-6.dll` / `libgcc_s_seh-1.dll` —— 它们是 **MinGW 工具链的运行时、Windows 并不自带**，而发布包（tar.gz 里只有 exe）不附带这些 DLL，在没装 MinGW 的机器上会直接报"缺少 libwinpthread-1.dll"启动失败；386 目标因历史原因一直是静态链接，本次 amd64 与控制台版一并加上 `-extldflags -static`。现在两个 Windows 产物的导入表只剩 `ole32` / `quartz` 这类**系统组件**（DirectShow 用），单文件可直接分发。
+
 ### 新增
 
 - **音频预处理：回声消除 / 降噪 / 自动增益**（REQ-MEDIA-007，webrtc-audio-processing 1.3）：外放时的自激回声、风扇/键盘底噪、说话远近导致的音量忽大忽小，现在由 WebRTC 的音频处理模块（AEC3 + NS + AGC）在本地处理。**默认开回声消除与降噪，自动增益默认关**（它会与通话面板的手动麦克风增益较劲）；设置页「音频设备」卡片里新增「音频预处理」小节三个勾选框，**改动立即保存、从下一通电话生效**（音频流在每通电话开始时重建）。

@@ -14,7 +14,8 @@
 - **是什么**：Go 写的跨平台桌面 **SIP 软电话**（Windows / Linux；amd64 / 386 / arm64），常驻系统托盘，
   支持注册、呼出/呼入、保持、DTMF、语音与视频通话；对外提供**本地 WebSocket 控制接口**（网页拨号/接听/挂断、事件推送、视频订阅）与 **JS SDK**；支持 `sip://` 协议拉起与开机自启。
 - **形态**：**单进程**——GUI、SIP 信令、媒体收发、本地 WS 服务都在同一个进程里；WS 只监听 `127.0.0.1`。
-- **构建产物**（`build.bat` / `build.sh`，输出到 `dist/`）：`sip-phone-windows-amd64.exe`（托盘版，无控制台）、
+- **构建产物**（`build.bat` / `build.sh`，输出到 `dist/`；Windows 的三个都**静态链接** mingw 运行时，
+  是不依赖任何第三方 DLL 的单文件，Linux 产物依赖系统图形/音频库）：`sip-phone-windows-amd64.exe`（托盘版，无控制台）、
   `sip-phone-console.exe`（控制台版，`-headless` 无界面模式）、`sip-phone-windows-386.exe`（32 位托盘版）、
   `sip-phone-windows-arm64.exe`（Windows on ARM64 托盘版，需 llvm-mingw，无视频/Opus/AEC 的基础版）、
   `sip-phone-linux-<arch>`（Linux 托盘版）。
@@ -24,7 +25,7 @@
 
 | 领域 | 选型 | 说明 / 为什么 |
 | --- | --- | --- |
-| 语言 | Go 1.23+ | 单二进制分发、跨平台交叉编译、并发模型适合"信令 + 媒体 + 界面"三线并行 |
+| 语言 | Go 1.24+ | 单二进制分发、跨平台交叉编译、并发模型适合"信令 + 媒体 + 界面"三线并行 |
 | SIP 信令 | `github.com/emiago/sipgo` | 事务层/对话层/Digest 认证开箱可用；`DialogClientSession`/`DialogServerSession` 管 INVITE 对话 |
 | RTP/RTCP/SDP | `pion/rtp`、`pion/rtcp`、`pion/sdp/v3`、`pion/stun` | 纯 Go、可读可改；RTCP 用 v1.2.x 新 API（CompoundPacket/Goodbye） |
 | 语音编解码 | `zaf/g711`（PCMA/PCMU）+ **libopus**（cgo） | G.711 是必选；Opus 走官方库（FFmpeg 自带的标记 experimental，官方不认可用） |
