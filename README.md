@@ -33,15 +33,19 @@ build.bat
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频）
 #   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
 #   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标）
+#   dist/sip-phone-windows-arm64.exe          ARM64 托盘版（需 llvm-mingw，缺失则跳过；
+#                                             视频/Opus/AEC 静态库暂无 arm64 版 → 基础版）
 
 # Linux：一键构建（本机 GUI 版 + 交叉 Windows GUI / 对侧 Linux 架构版，均 CGO+音频，输出 dist/）
 # 交叉 Windows 需 mingw-w64：apt install gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
+# 交叉 Windows arm64 需 llvm-mingw（GCC 系没有 aarch64 目标，解压即用，缺则跳过并打印步骤）
 # 交叉对侧 Linux 架构（amd64⇄arm64）需对应交叉 gcc + 图形栈开发包（缺啥脚本会打印准备步骤）
 ./build.sh
 #   dist/sip-phone-linux-<本机arch>           本机 Linux 托盘版
 #   dist/sip-phone-linux-<对侧arch>           交叉 Linux 托盘版
 #   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉）
 #   dist/sip-phone-windows-386.exe            Windows 386 托盘版（交叉，静态）
+#   dist/sip-phone-windows-arm64.exe          Windows ARM64 托盘版（交叉，基础版）
 
 # 手动构建（Windows 需将 MinGW 的 gcc 加入 PATH，或用 CC 指定）
 go build -ldflags "-s -w -H=windowsgui" -o dist/sip-phone.exe ./cmd/sip-phone  # 无控制台

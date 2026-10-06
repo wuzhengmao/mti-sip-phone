@@ -746,14 +746,16 @@ fi
 ART_SRC=(
     "dist/sip-phone-windows-amd64.exe"
     "dist/sip-phone-windows-386.exe"
+    "dist/sip-phone-windows-arm64.exe"
     "dist/sip-phone-linux-amd64"
     "dist/sip-phone-linux-arm64"
 )
-ART_OS=(windows windows linux linux)
-ART_ARCH=(x64 x86 x64 arm64)
+ART_OS=(windows windows windows linux linux)
+ART_ARCH=(x64 x86 arm64 x64 arm64)
 ART_TITLE=(
     "Windows 64 位（免安装）"
     "Windows 32 位（免安装）"
+    "Windows ARM64（免安装，无视频/Opus/AEC）"
     "Linux 64 位"
     "Linux ARM64"
 )

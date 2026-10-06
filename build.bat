@@ -5,6 +5,11 @@ rem NOTE: keep this file ASCII-only, cmd.exe parses bat as GBK on zh-CN Windows
 rem windows/386 GUI build needs 32-bit MinGW: MSYS2 (pacman -S mingw-w64-i686-gcc)
 rem or WinLibs i686 at %USERPROFILE%\tools\winlibs-i686; without it the 386
 rem target is skipped, there is no headless fallback anymore.
+rem windows/arm64 GUI build needs llvm-mingw at
+rem %USERPROFILE%\tools\llvm-mingw (or LLVM_MINGW=<dir>); GCC-based mingw-w64
+rem has no aarch64-w64-mingw32 target. Skipped when absent. The video / Opus /
+rem AEC static libraries are not built for arm64, so that target is always the
+rem base build (G.711/G.722 only).
 rem Linux GUI and Windows GUI cross builds from Linux are done by ./build.sh
 rem Version: read from internal\core\buildinfo.go (never written here); dev builds
 rem get "-rc", official builds are built by scripts\release.bat (SIP_PHONE_RELEASE=1)
@@ -54,13 +59,13 @@ echo Version: %APP_VERSION% - release build
 
 rem 1) Windows amd64 GUI: no console, tray app, CGO+audio
 call :codec_setup windows-amd64
-echo [1/3] Building dist\sip-phone-windows-amd64.exe (%FEATURES%)...
+echo [1/4] Building dist\sip-phone-windows-amd64.exe (%FEATURES%)...
 go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui" -o dist\sip-phone-windows-amd64.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 
 rem 2) Windows console build (-headless server mode / command line debug)
 call :codec_setup windows-amd64
-echo [2/3] Building dist\sip-phone-console.exe (%FEATURES%, console/headless)...
+echo [2/4] Building dist\sip-phone-console.exe (%FEATURES%, console/headless)...
 go build %TAGS_ARG% -ldflags "%LDFLAGS%" -o dist\sip-phone-console.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
 
@@ -81,22 +86,63 @@ set "CXX=%GCC32:gcc.exe=g++.exe%"
 set GOOS=windows
 set GOARCH=386
 call :codec_setup windows-386
-echo [3/3] Building dist\sip-phone-windows-386.exe (%FEATURES%, static)...
+echo [3/4] Building dist\sip-phone-windows-386.exe (%FEATURES%, static)...
 go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui -extldflags -static" -o dist\sip-phone-windows-386.exe .\cmd\sip-phone
 if errorlevel 1 goto :err
-goto :summary
+goto :arm64
 
 :skip386
-echo [3/3] i686 gcc not found, skipping dist\sip-phone-windows-386.exe
+echo [3/4] i686 gcc not found, skipping dist\sip-phone-windows-386.exe
 echo       install MSYS2 mingw-w64-i686-gcc or WinLibs i686 to enable it
+
+:arm64
+rem 4) Windows arm64 GUI. Needs llvm-mingw (LLVM/Clang based): GCC-based
+rem mingw-w64 has no aarch64-w64-mingw32 target, so the usual MinGW toolchain
+rem cannot produce this one. Skipped when not installed.
+set "LLVM_BIN="
+set "LLVM_HINT="
+if defined LLVM_MINGW set "LLVM_BIN=%LLVM_MINGW%\bin"
+if defined LLVM_MINGW set "LLVM_HINT=LLVM_MINGW=%LLVM_MINGW%"
+if not defined LLVM_BIN if exist "%USERPROFILE%\tools\llvm-mingw\bin\aarch64-w64-mingw32-clang.exe" set "LLVM_BIN=%USERPROFILE%\tools\llvm-mingw\bin"
+if not defined LLVM_BIN goto :skiparm64
+if not exist "%LLVM_BIN%\aarch64-w64-mingw32-clang.exe" goto :skiparm64
+set CGO_ENABLED=1
+set "CC=%LLVM_BIN%\aarch64-w64-mingw32-clang.exe"
+set "CXX=%LLVM_BIN%\aarch64-w64-mingw32-clang++.exe"
+set "PATH=%LLVM_BIN%;%PATH%"
+set GOOS=windows
+set GOARCH=arm64
+rem No codec probing here on purpose: the video / Opus / AEC static libraries
+rem are not built for windows-arm64 (and build-video-libs.bat cannot produce
+rem them), so the hints printed for the x86 targets would be misleading.
+rem This target is always the base build: CGO + audio devices + G.711/G.722.
+set "TAGS_ARG="
+set "CGO_CFLAGS="
+set "CGO_CXXFLAGS="
+set "CGO_LDFLAGS="
+echo [4/4] Building dist\sip-phone-windows-arm64.exe (CGO, audio, no video/opus/AEC)...
+echo       note: base build only - no arm64 static libraries for video/Opus/AEC
+go build -ldflags "%LDFLAGS% -H=windowsgui" -o dist\sip-phone-windows-arm64.exe .\cmd\sip-phone
+if errorlevel 1 goto :err
+set "ARM64_ON=1"
+goto :summary
+
+:skiparm64
+echo [4/4] llvm-mingw not found, skipping dist\sip-phone-windows-arm64.exe
+echo       install: download llvm-mingw-^<version^>-ucrt-x86_64.zip from
+echo         https://github.com/mstorsjo/llvm-mingw/releases
+echo       unpack it to %%USERPROFILE%%\tools\llvm-mingw so that
+echo         %%USERPROFILE%%\tools\llvm-mingw\bin\aarch64-w64-mingw32-clang.exe exists
+echo       or set LLVM_MINGW to an existing llvm-mingw directory
+echo       note: GCC-based mingw-w64 has no aarch64 target, llvm-mingw is required
 
 :summary
 echo Build OK: version %APP_VERSION%
 echo   dist\sip-phone-windows-amd64.exe          - tray GUI, no console
 echo   dist\sip-phone-console.exe                - console, headless/debug
-if not defined GCC32 goto :done
-echo   dist\sip-phone-windows-386.exe            - tray GUI, static
-:done
+if defined GCC32 echo   dist\sip-phone-windows-386.exe            - tray GUI, static
+if defined ARM64_ON echo   dist\sip-phone-windows-arm64.exe          - tray GUI, base build
+if not defined ARM64_ON if defined LLVM_HINT echo   dist\sip-phone-windows-arm64.exe: %LLVM_HINT% has no aarch64-w64-mingw32-clang.exe
 echo Linux GUI and Windows GUI cross builds: run ./build.sh on Linux
 exit /b 0
 

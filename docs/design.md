@@ -16,6 +16,7 @@
 - **形态**：**单进程**——GUI、SIP 信令、媒体收发、本地 WS 服务都在同一个进程里；WS 只监听 `127.0.0.1`。
 - **构建产物**（`build.bat` / `build.sh`，输出到 `dist/`）：`sip-phone-windows-amd64.exe`（托盘版，无控制台）、
   `sip-phone-console.exe`（控制台版，`-headless` 无界面模式）、`sip-phone-windows-386.exe`（32 位托盘版）、
+  `sip-phone-windows-arm64.exe`（Windows on ARM64 托盘版，需 llvm-mingw，无视频/Opus/AEC 的基础版）、
   `sip-phone-linux-<arch>`（Linux 托盘版）。
 - **发布**：到独立的「软件更新中心」站点，用 `scripts/release.sh` 一键发布（见 auto-update.md）。
 

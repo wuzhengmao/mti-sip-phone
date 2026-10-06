@@ -197,17 +197,22 @@ fi
 # 下载地址跨版本不变，用户与脚本收藏的链接不会失效；版本靠版本目录区分，
 # 站点文档也允许这种命名——文件名里有平台/架构词即可，何况 release.json 还显式声明了）。
 # 只列托盘 GUI 产物：sip-phone-console.exe 是同平台第二个候选，不发布。
+# windows-arm64 是**基础版**（无视频/Opus/音频预处理：这三套静态库还没有 arm64 版本，
+# 见 build.bat / build.sh 的说明），标题里写明，免得 ARM64 用户以为是完整功能版；
+# 该产物需要 llvm-mingw 工具链，没装时构建脚本会跳过它，这里按"缺失"处理（不影响其余）。
 ART_SRC=(
     "dist/sip-phone-windows-amd64.exe"
     "dist/sip-phone-windows-386.exe"
+    "dist/sip-phone-windows-arm64.exe"
     "dist/sip-phone-linux-amd64"
     "dist/sip-phone-linux-arm64"
 )
-ART_OS=(windows windows linux linux)
-ART_ARCH=(x64 x86 x64 arm64)
+ART_OS=(windows windows windows linux linux)
+ART_ARCH=(x64 x86 arm64 x64 arm64)
 ART_TITLE=(
     "Windows 64 位（免安装）"
     "Windows 32 位（免安装）"
+    "Windows ARM64（免安装，无视频/Opus/AEC）"
     "Linux 64 位"
     "Linux ARM64"
 )
@@ -257,6 +262,11 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
     echo "以下产物未包含（缺失或未重新生成）："
     for m in "${MISSING[@]}"; do echo "  $m"; done
     echo "提示：Windows 只能产出 Windows 产物；Linux 产物需在 Linux 机器上跑 build.sh 后再发布。"
+    if printf '%s\n' "${MISSING[@]}" | grep -q "windows-arm64"; then
+        echo "      Windows ARM64 需要 llvm-mingw 工具链（缺了就跳过该目标）："
+        echo "        Windows 解压到 %USERPROFILE%\\tools\\llvm-mingw，"
+        echo "        Linux 用 LLVM_MINGW=<解压目录> 指定，详见 build.bat / build.sh 的提示。"
+    fi
 fi
 
 # ---------- 版本元数据 ----------

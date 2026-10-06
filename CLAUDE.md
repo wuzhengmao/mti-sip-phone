@@ -34,6 +34,8 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows / Linux，x86_64 + arm64）
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO）
 #   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试）
 #   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标）
+#   dist/sip-phone-windows-arm64.exe          ARM64 托盘版（需 llvm-mingw，缺失则跳过该目标；
+#                                             无视频/Opus/AEC 静态库 → 基础版，见「交叉编译说明」）
 build.bat
 
 # Linux 一键构建（本机 GUI 版 + 交叉 Windows GUI / 对侧 Linux 架构版，均 CGO，输出 dist/）：
@@ -42,6 +44,7 @@ build.bat
 #                                             架构的交叉 gcc + 图形栈开发包，缺失则跳过并打印准备步骤）
 #   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉，需 x86_64-w64-mingw32-gcc）
 #   dist/sip-phone-windows-386.exe            Windows 386 托盘版（交叉，静态，需 i686-w64-mingw32-gcc）
+#   dist/sip-phone-windows-arm64.exe          Windows ARM64 托盘版（交叉，需 llvm-mingw，缺失则跳过）
 ./build.sh
 
 # 测试（推荐）：固定路径运行器——把测试二进制构建到仓库内 .testbin/ 再执行。
@@ -131,6 +134,22 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 - Windows 386 GUI 需 32 位 MinGW，build.bat 依次探测 `C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe`
   （MSYS2 `mingw-w64-i686-gcc`）与 `%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe`
   （WinLibs i686 posix-dwarf-ucrt 解压即用）；两者都缺则跳过 386 目标。
+- **Windows arm64 GUI 只能用 llvm-mingw**（`https://github.com/mstorsjo/llvm-mingw`，
+  解压即用、无需 Docker/虚拟机）：**GCC 系的 mingw-w64 没有 aarch64-w64-mingw32 目标**，
+  `gcc-mingw-w64-*`、WinLibs、MSYS2 的 mingw64/mingw32 都出不了它（MSYS2 的 clangarm64 是
+  **ARM64 机器上的本机环境**，不是 x64 上的交叉）。包按宿主分：Windows 取
+  `llvm-mingw-<版本>-ucrt-x86_64.zip`，Linux 取 `...-ucrt-ubuntu-22.04-{x86_64,aarch64}.tar.xz`，
+  内含一份 clang + lld + mingw-w64 sysroot，靠 `--target=aarch64-w64-mingw32` 出目标码
+  （工具名 `aarch64-w64-mingw32-clang{,++}`，posix 线程模型）。两个构建脚本的探测顺序都是
+  PATH → `LLVM_MINGW=<解压目录>` → 默认位置（build.bat 是 `%USERPROFILE%\tools\llvm-mingw`，
+  build.sh 另试 `$HOME/tools/llvm-mingw`、`/opt/llvm-mingw`、`/usr/local/llvm-mingw`），
+  **探测不到就跳过该目标并打印上述安装步骤**（不会让整个构建失败）。
+  该产物的 glfw/miniaudio 都是架构无关的 C，直接编过；导入表只有系统 DLL（UCRT），
+  无 libwinpthread/libgcc 依赖。**视频/Opus/AEC 的静态库都没有 arm64 版本**（要另为
+  aarch64-w64-mingw32 编库，且 OpenH264/abseil 是 C++、llvm-mingw 带的是 libc++ 而非
+  libstdc++，脚本里的 `-lstdc++` 得跟着改），所以该目标**固定为基础版**（G.711/G.722 +
+  音频设备 + 界面 + 信令 + WS）：build.bat/build.sh 都刻意**不对它做库探测**，免得打印
+  「跑 build-video-libs 生成」这种对该目标无效的提示。
 
 > 注意：`internal/protocol` 的 Windows 注册表实现按构建标签拆分在
 > `register_windows.go`（导入 x/sys/windows/registry 会破坏 Linux

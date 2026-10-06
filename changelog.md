@@ -41,6 +41,9 @@
   - **stderr 没有去处时**（GUI 子系统从资源管理器/快捷方式启动，那正是托盘版的常见启动方式）把 `os.Stderr` 接到日志目录的 `stderr.log`，收下 Fyne/GLFW 这类直接往标准错误写的信息；**有控制台、或被显式重定向**（`> 日志 2>&1`）时一律不动，免得把用户自己要的输出抢走。
   - 需求文档同步：REQ-LOG-009。
   - **SIP 信令记录不受日志等级影响**（澄清，无行为变更）：勾选「记录 SIP 信令」后，信令走的是**独立的输出目标**（`logx.traceOut`，直接写日志文件），根本不经过 slog 的等级过滤——把日志级别调到 warn/error 也照样逐条落盘。原先那条开启提示写着"（DEBUG 级）"，容易被误读成受级别控制，文案已改为「不受日志级别影响」，并补了一条回归测试（等级=error 时信令仍必须落盘）钉住该行为。
+- **新增 Windows on ARM64 构建目标**（`dist/sip-phone-windows-arm64.exe`，Win/Linux 两个构建脚本都支持）：arm64 版 Windows 电脑（Surface Pro X、骁龙本）此前**没有产物**——GCC 系的 mingw-w64 根本没有 `aarch64-w64-mingw32` 目标（`gcc-mingw-w64-*`、WinLibs、MSYS2 的 mingw64/mingw32 都出不了它，MSYS2 的 clangarm64 是"ARM64 机器上的本机环境"，不是 x64 上的交叉），必须换成 **llvm-mingw**（clang + lld + mingw-w64 sysroot，解压即用，官方提供 Windows 与 Linux 宿主的包）。两个脚本的探测顺序是 PATH → `LLVM_MINGW=<解压目录>` → 默认位置，**探测不到就跳过该目标并打印安装步骤**（不影响其余产物）。产物导入表只有系统 DLL（UCRT，无 libwinpthread/libgcc），单文件可直接分发。
+  - **该目标目前是基础版**：视频、Opus、音频预处理（AEC/NS/AGC）三套静态库都还没有 arm64 版本，需要另为 `aarch64-w64-mingw32` 编库（OpenH264 与 abseil 是 C++，而 llvm-mingw 带的是 libc++ 而非 libstdc++，构建脚本的 `-lstdc++` 得跟着改），因此脚本刻意**不对该目标做库探测**，固定构建为 G.711/G.722 + 音频设备 + 界面 + 信令 + WS 的基础版。
+  - 已知限制：**尚未在真机（Windows on ARM64 设备）上运行验证**，目前只完成编译验证与 PE 头检查（ARM64 / GUI 子系统）；x64 Windows 跑不了 ARM64 程序，验收需要对应设备。
 
 ## [1.0.13] - 2026-10-06
 
