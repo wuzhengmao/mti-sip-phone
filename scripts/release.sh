@@ -12,7 +12,7 @@ fi
 #   ./scripts/release.sh --pre            # 预发布/开发版：版本 1.0.5-rc（站点标记为预发布）
 #   ./scripts/release.sh --pre --dry-run  # 只编译打包，不上传（产物留在 dist/release/）
 #   ./scripts/release.sh --no-build       # 用 dist/ 里已有的产物打包（跳过新鲜度校验）
-#   ./scripts/release.sh --no-ui --pre    # 「仅托盘无 UI 版」：独立应用 ID，见 release-no-ui.conf
+#   ./scripts/release.sh --only no-ui     # 只发「仅托盘无 UI 版」（默认两个应用都发）
 #   ./scripts/release.sh --title "体验优化版" --mandatory
 #
 # 配置：release/release.conf（站点地址 / 应用 ID / 上传令牌 / 可选站点证书），
@@ -48,10 +48,12 @@ usage() {
   ./scripts/release.sh --pre            # 预发布/开发版：版本 1.0.5-rc（站点标记为预发布）
   ./scripts/release.sh --pre --dry-run  # 只编译打包，不上传（产物留在 dist/release/）
   ./scripts/release.sh --no-build       # 用 dist/ 里已有的产物打包（跳过新鲜度校验）
-  ./scripts/release.sh --no-ui          # 发布「仅托盘无 UI 版」（独立应用，配置见 release-no-ui.conf）
+  ./scripts/release.sh --only no-ui     # 只发「仅托盘无 UI 版」（默认：完整版 + 无 UI 版一起发）
   ./scripts/release.sh --title "体验优化版" --mandatory
-选项：--pre / --dry-run / --no-build / --no-ui / -v <版本> / --title <标题> / --channel <通道> / --mandatory
-配置：release/release.conf（--no-ui 时读 release/release-no-ui.conf）：
+选项：--pre / --dry-run / --no-build / --only <full|no-ui> / -v <版本> / --title <标题> / --channel <通道> / --mandatory
+配置：**两个应用各一份**——release/release.conf（完整版 mti-sip-phone）与
+      release/release-no-ui.conf（无 UI 版 mti-sip-phone-no-ui），各自一份上传令牌；
+      两份都读同名的环境变量覆盖：
       UPDATE_SITE / APP_ID / UPLOAD_TOKEN / CA_CERT / INSECURE_TLS，
       同名环境变量可覆盖，例如对着本地站点试跑：
       UPDATE_SITE=https://localhost:8443 CA_CERT=certs/server.crt ./scripts/release.sh ...）
@@ -67,14 +69,15 @@ VERSION=""
 TITLE=""
 CHANNEL=""
 MANDATORY=0
-NOUI=0
+ONLY="" # 只发某个应用（full / no-ui）；留空 = 两个都发
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --pre) PRE=1 ;;
         --dry-run) DRY=1 ;;
         --no-build) DO_BUILD=0 ;;
-        --no-ui) NOUI=1 ;;
+        --only) ONLY="${2:-}"; shift ;;
+        --no-ui) ONLY="no-ui" ;; # 等价于 --only no-ui（向后兼容）
         -v|--version) VERSION="${2:-}"; shift ;;
         --title) TITLE="${2:-}"; shift ;;
         --channel) CHANNEL="${2:-}"; shift ;;
@@ -86,13 +89,6 @@ while [ $# -gt 0 ]; do
 done
 
 # ---------- 配置 ----------
-
-# --no-ui：换配置与元数据文件（应用 ID、令牌、产物清单都不同）
-APP_JSON="$ROOT/release/app.json"
-if [ "$NOUI" = "1" ]; then
-    CONF="$ROOT/release/release-no-ui.conf"
-    APP_JSON="$ROOT/release/app-no-ui.json"
-fi
 
 # conf_get 读配置项：release/release.conf 里的 KEY=VALUE，同名环境变量优先。
 conf_get() {
@@ -112,31 +108,53 @@ conf_get() {
     fi
 }
 
-UPDATE_SITE="$(conf_get UPDATE_SITE)"
-APP_ID="$(conf_get APP_ID)"
-UPLOAD_TOKEN="$(conf_get UPLOAD_TOKEN)"
-CA_CERT="$(conf_get CA_CERT)"
-INSECURE_TLS="$(conf_get INSECURE_TLS)"
-UPDATE_SITE="${UPDATE_SITE%/}" # 去结尾斜杠
+# load_app_conf 按应用切换配置与元数据：两个应用在站点上是**两个 app**
+#（各自的 APP_ID / 上传令牌 / 归档目录），所以每一项都要按变体重读一遍。
+load_app_conf() {
+    case "$1" in
+    no-ui)
+        APP_NAME="仅托盘无 UI 版"
+        CONF="$ROOT/release/release-no-ui.conf"
+        APP_JSON="$ROOT/release/app-no-ui.json"
+        ;;
+    *)
+        APP_NAME="完整版"
+        CONF="$ROOT/release/release.conf"
+        APP_JSON="$ROOT/release/app.json"
+        ;;
+    esac
 
-if [ -z "$UPDATE_SITE" ] || [ -z "$APP_ID" ] || [ -z "$UPLOAD_TOKEN" ]; then
-    echo "配置不完整：请检查 $CONF 里的 UPDATE_SITE / APP_ID / UPLOAD_TOKEN" >&2
-    exit 1
-fi
+    UPDATE_SITE="$(conf_get UPDATE_SITE)"
+    APP_ID="$(conf_get APP_ID)"
+    UPLOAD_TOKEN="$(conf_get UPLOAD_TOKEN)"
+    CA_CERT="$(conf_get CA_CERT)"
+    INSECURE_TLS="$(conf_get INSECURE_TLS)"
+    UPDATE_SITE="${UPDATE_SITE%/}" # 去结尾斜杠
 
-# 站点证书：优先用 CA_CERT 校验（自签名证书以自身为 CA，--cacert 即可），
-# 没配就交给 curl 的默认信任链；INSECURE_TLS=1 才跳过校验（调试用）。
-CURL_TLS=()
-if [ "$INSECURE_TLS" = "1" ]; then
-    CURL_TLS+=(-k)
-elif [ -n "$CA_CERT" ]; then
-    if [ -f "$CA_CERT" ]; then
-        CURL_TLS+=(--cacert "$(cygpath -m "$CA_CERT" 2>/dev/null || echo "$CA_CERT")")
-    else
-        echo "配置的 CA_CERT 不存在（$CA_CERT），本次不校验证书" >&2
-        CURL_TLS+=(-k)
+    if [ -z "$UPDATE_SITE" ] || [ -z "$APP_ID" ] || [ -z "$UPLOAD_TOKEN" ]; then
+        echo "配置不完整：请检查 $CONF 里的 UPDATE_SITE / APP_ID / UPLOAD_TOKEN" >&2
+        exit 1
     fi
-fi
+
+    # 站点证书：优先用 CA_CERT 校验（自签名证书以自身为 CA，--cacert 即可），
+    # 没配就交给 curl 的默认信任链；INSECURE_TLS=1 才跳过校验（调试用）。
+    CURL_TLS=()
+    if [ "$INSECURE_TLS" = "1" ]; then
+        CURL_TLS+=(-k)
+    elif [ -n "$CA_CERT" ]; then
+        if [ -f "$CA_CERT" ]; then
+            CURL_TLS+=(--cacert "$(cygpath -m "$CA_CERT" 2>/dev/null || echo "$CA_CERT")")
+        else
+            echo "配置的 CA_CERT 不存在（$CA_CERT），本次不校验证书" >&2
+            CURL_TLS+=(-k)
+        fi
+    fi
+}
+
+case "$ONLY" in
+    ""|full|no-ui) ;;
+    *) echo "未知的 --only 取值：$ONLY（应为 full 或 no-ui）" >&2; exit 2 ;;
+esac
 
 # ---------- 版本 ----------
 
@@ -163,9 +181,8 @@ case "$VERSION" in
     *-*|*_*) PRERELEASE=true ;;   # 版本号含 - 或 _ → 站点判定为预发布
     *) PRERELEASE=false ;;
 esac
-[ -n "$TITLE" ] || TITLE="${APP_ID} ${VERSION}"
-
-echo "发布配置：站点 $UPDATE_SITE，应用 $APP_ID，版本 $VERSION（pre=$PRE dry-run=$DRY）"
+TITLE_GIVEN="$TITLE" # 命令行给了 --title 就两个应用共用，否则各自 <APP_ID> <版本>
+TITLE=""
 
 # ---------- 编译 ----------
 
@@ -206,6 +223,16 @@ else
     echo "跳过编译（--no-build）：直接使用 dist/ 里已有的产物"
 fi
 
+# publish_app 发布**一个**应用（完整版或仅托盘无 UI 版）：
+# 读自己的配置 → 收集自己的产物 → 打包 → 上传 → 核对。
+publish_app() {
+VARIANT="$1"
+load_app_conf "$VARIANT"
+TITLE="${TITLE_GIVEN:-${APP_ID} ${VERSION}}"
+echo
+echo "======== 发布 $APP_NAME（应用 $APP_ID）========"
+echo "配置：$CONF"
+
 # ---------- 收集产物 ----------
 # 源文件 → 发布文件名 <APP_ID>-<平台>-<架构>[.exe]（固定不含版本号：同一平台的
 # 下载地址跨版本不变，用户与脚本收藏的链接不会失效；版本靠版本目录区分，
@@ -214,8 +241,8 @@ fi
 # windows-arm64 是**基础版**（无视频/Opus/音频预处理：这三套静态库还没有 arm64 版本，
 # 见 build.bat / build.sh 的说明），标题里写明，免得 ARM64 用户以为是完整功能版；
 # 该产物需要 llvm-mingw 工具链，没装时构建脚本会跳过它，这里按"缺失"处理（不影响其余）。
-# 变体：完整版 = dist/sip-phone-*；仅托盘无 UI 版 = dist/sip-phone-no-ui-*（--no-ui）。
-if [ "$NOUI" = "1" ]; then
+# 变体：完整版 = dist/sip-phone-*；仅托盘无 UI 版 = dist/sip-phone-no-ui-*（--only no-ui）。
+if [ "$VARIANT" = "no-ui" ]; then
     ART_SRC=(
         "dist/sip-phone-no-ui-windows-amd64.exe"
         "dist/sip-phone-no-ui-windows-386.exe"
@@ -249,7 +276,7 @@ fi
 ART_OS=(windows windows windows linux linux)
 ART_ARCH=(x64 x86 arm64 x64 arm64)
 
-STAGE="$ROOT/dist/release/$VERSION"
+STAGE="$ROOT/dist/release/$APP_ID/$VERSION"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
@@ -384,7 +411,7 @@ echo "上传包：${TARBALL#"$ROOT/"}（$(stat -c %s "$TARBALL") 字节，$(tar 
 if [ "$DRY" = 1 ]; then
     echo "dry-run：不上传（应用信息 / 图标 / 发布包都不写站点）。"
     echo "         产物在 dist/release/，确认无误后去掉 --dry-run 重跑。"
-    exit 0
+    return 0
 fi
 
 # api_put_file 把文件 PUT 到站点接口：2xx 成功，其余打印服务端错误后返回 1。
@@ -484,8 +511,36 @@ if CHECK="$(curl -sS --max-time 30 "${CURL_TLS[@]}" "$PROBE" 2>/dev/null)"; then
 fi
 
 echo
-echo "发布完成：$VERSION"
+echo "发布完成：$APP_NAME $VERSION"
 echo "  Windows 下载页：$UPDATE_SITE/a/$APP_ID/$VERSION"
 echo "  API：          $UPDATE_SITE/api/v1/apps/$APP_ID/releases/$VERSION"
 echo "  最新版查询：    $UPDATE_SITE/api/v1/apps/$APP_ID/check?version=$VERSION_BASE&os=windows&arch=amd64&prerelease=true"
+}
+
+# ---------- 按变体逐个发布 ----------
+# 默认两个应用一起发（完整版在前）；--only / --no-ui 时只发一个。
+VARIANTS=()
+if [ -z "$ONLY" ] || [ "$ONLY" = "full" ]; then
+    VARIANTS+=(full)
+fi
+if [ -z "$ONLY" ] || [ "$ONLY" = "no-ui" ]; then
+    VARIANTS+=(no-ui)
+fi
+
+FAILED=""
+for v in "${VARIANTS[@]}"; do
+    if ! publish_app "$v"; then
+        # 一个应用失败不阻断另一个，最后统一报错退出
+        FAILED="$FAILED $v"
+    fi
+done
+
+if [ -n "$FAILED" ]; then
+    echo >&2
+    echo "以下应用发布失败：$FAILED" >&2
+    exit 1
+fi
+
+echo
+echo "全部完成：$VERSION（${VARIANTS[*]}）"
 exit 0

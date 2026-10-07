@@ -198,7 +198,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 | `internal/protocol` | `sip://` 解析与系统协议注册 | Windows 注册表实现单独文件（导入 x/sys/windows 会破坏交叉编译） |
 | `internal/single` | 单实例锁 + 第二实例参数转发（随机 token） | Windows 互斥体 / Linux flock |
 | `internal/autostart` | 开机自启（HKCU Run / XDG autostart） | 每次启动按配置同步 |
-| `web/` | 测试页（内嵌进二进制）+ JS SDK（无构建步骤） | 测试页是"网页接入"的活文档 |
+| `web/` | 网页控制台 + JS SDK（都内嵌进二进制，无构建步骤） | 控制台是"网页接入"的活文档；改完必须重建二进制才生效 |
 | `release/` + `scripts/release.sh` | 发布配置与一键发布 | 见 auto-update.md |
 
 ## 五、关键设计决策（为什么这么做）
@@ -254,11 +254,11 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 | 音频设备 / 提示音 / 按键音 | `internal/audio/manager.go`、`backend_malgo.go`、`tone.go` |
 | WS 方法 / 事件 | `internal/wsapi/{protocol,handler,server}.go`（协议文档同步 `docs/ws-protocol.md`） |
 | 网页视频订阅 | `internal/wsapi/video.go` + `web/sdk/sip-phone-sdk.js` |
-| 网页控制台（四个页面） | `web/index.html`（外壳）+ `web/css/app.css` + `web/js/{common,icons,store,callbar,app}.js` + `web/js/views/{call,history,contacts,settings}.js`（改完**重建二进制 + 重启**才生效——都是内嵌资源） |
+| 网页控制台（五个页面） | `web/index.html`（外壳，单页 + hash 路由）+ `web/css/app.css` + `web/js/{common,icons,store,callbar,app}.js` + `web/js/views/{call,history,contacts,settings,diag}.js`（改完**重建二进制 + 重启**才生效——都是内嵌资源；新增文件要同步 `internal/wsapi/server.go` 的白名单） |
 | JS SDK | `web/sdk/sip-phone-sdk.{js,d.ts}`（同样内嵌，改完要重建） |
 | 仅托盘无 UI 版（托盘行为/图标） | `cmd/sip-phone/gui_noui.go` + `internal/tray/*` + `internal/variant/*`（构建标签 `noui`） |
 | 构建脚本 / 交叉编译 | `build.bat`、`build.sh`（两者都按 full / noui 两个变体各跑一遍目标）、`scripts/build-*-lib.*`（先读 CLAUDE.md 构建章节） |
-| 一键发布到更新站点 | `scripts/release.sh` + `release/release.conf`（完整版）/ `release/release-no-ui.conf`（`--no-ui`，见 auto-update.md） |
+| 一键发布到更新站点 | `scripts/release.sh`（**默认两个应用一起发**）+ `release/release.conf`（完整版）/ `release/release-no-ui.conf`（无 UI 版），`--only no-ui` 只发一个（见 auto-update.md） |
 | 版本号 | `internal/core/buildinfo.go`（唯一真相源，人工修改） |
 
 ## 八、上手第一小时
@@ -289,7 +289,7 @@ go test ./internal/media/ ./internal/wsapi/ ./internal/sip/ ./internal/ui/ ./int
 | --- | --- | --- |
 | 新音频编解码（G.722 已交付，见 `internal/media/g722`） | `internal/media/codec_*.go` + `sdp.go` 的编解码表；**纯 Go 实现直接注册进 `supportedCodecs`**，需要 C 库的才走 `third_party/audio` + `-tags audio` | `SampleRate()`（PCM 管线采样率）、`FrameSize()`（每帧样本数 = SampleRate/50）与 `TimestampStep()`（RTP 时间戳增量 = ClockRate/50）是三件事，G.722（320/160）与 Opus（160/960）是最容易踩的两个反例；有状态就把 `Reset()` 实现成 `resetter` |
 | 新 WS 方法 / 事件 | `wsapi/protocol.go` 常量 + `handler.go`（**外层列表 + 内层分支**）+ 协议文档 | 错误码映射 `codeOf`；事件要加进 ws-protocol 的事件表 |
-| 新 SDK 能力 | `web/sdk/sip-phone-sdk.js` + `.d.ts` + 测试页演示 | SDK 无构建步骤，改完重建二进制才生效（内嵌） |
+| 新 SDK 能力 | `web/sdk/sip-phone-sdk.js` + `.d.ts` + 控制台演示 | SDK 无构建步骤，改完重建二进制才生效（内嵌） |
 | 多路通话 | `core.App` 的 `calls` 已按 map 组织，但**有全局假设**：媒体层 Opus 编解码器是包级共享实例、UI 只显示一个通话面板、按键/DTMF 只作用于 `activeCallID` | 需要一次系统性梳理，别只改半边 |
 | 新平台（如 macOS） | 平台文件都按构建标签拆分（`topmost_other.go`、`camera_other.go`…），先补空实现再逐个替换 | 交叉编译仍受 CGO 约束 |
 | 更强的安全（WS token 鉴权；媒体的 DTLS-SRTP） | wsapi 接入鉴权；媒体层（DTLS 握手 + `a=fingerprint`/`a=setup`） | SDES-SRTP 已交付（REQ-MEDIA-009）；WS 目前**无鉴权、仅回环**；DTLS-SRTP 见 requirements 的待开发条目 |

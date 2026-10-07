@@ -1,7 +1,7 @@
 # 自动更新与「更新站点」接入技术文档
 
 > **面向读者**：要把自己的应用接入「软件更新中心」（下称"站点"）的开发同学，以及需要理解这条链路的 AI。
-> **参考实现**：mti-sip-phone 1.0.5（Go + Fyne 桌面软电话，Windows/Linux）。读完本文、照着**第七节 接入清单**
+> **参考实现**：mti-sip-phone 1.0.15（Go + Fyne 桌面软电话，Windows/Linux）。读完本文、照着**第七节 接入清单**
 > 走一遍，就能让另一个应用具备"发布 → 检测 → 提示 → 下载 → 替换重启"的完整链路；文末**附录**附了核心代码，
 > 无需访问本项目仓库即可照搬实现。
 >
@@ -22,7 +22,7 @@
 | 角色 | 职责 | 本项目的对应物 |
 | --- | --- | --- |
 | **站点**（软件更新中心） | 存归档、索引、版本比较、分发；提供 REST API | 独立仓库部署，生产地址 `https://update.wuzm219.cn` |
-| **发布方** | 编译 → 按规范打包 → 上传 | [`scripts/release.sh`](../scripts/release.sh)（+ `release/release.conf`） |
+| **发布方** | 编译 → 按规范打包 → 上传 | [`scripts/release.sh`](../scripts/release.sh)（+ `release/release.conf`；默认连 `release/release-no-ui.conf` 那个应用**一起发**，`--only no-ui` 只发无 UI 版） |
 | **客户端** | **自己**查版本 → 提示用户 → 下载校验 → 替换自身 → 重启 | Go：`internal/updater`（查询 `checker.go` + 状态机）+ `internal/wsapi`；网页：只负责写配置与强制推送 |
 
 ### 1.2 两条链路
@@ -226,7 +226,7 @@
 
 #### `GET /api/v1/apps/{app}/latest`
 
-按平台取"最新版本"，用来做"手动检查更新"列表（本项目测试页用它列出**最新版本**与**最新稳定版**）：
+按平台取"最新版本"，用来做"手动检查更新"列表（本项目的诊断页用它列出**最新版本**与**最新稳定版**）：
 
 ```
 GET /api/v1/apps/mti-sip-phone/latest?os=windows&arch=amd64&prerelease=true    # 最新版本（含预发布）
@@ -367,7 +367,7 @@ var r struct {
 ## 五、本项目的参考实现（1.0.10）
 
 > 代码位置：`internal/updater`（下载/替换/状态机）、`internal/wsapi`（WS 接口）、`internal/core/update.go`（类型）、
-> `web/sdk/sip-phone-sdk.js`（网页 SDK）、`web/index.html` + `web/js/*`（网页控制台）、`scripts/release.sh`（发布）、`release/release.conf`（完整版配置）/ `release/release-no-ui.conf`（仅托盘无 UI 版，`release.sh --no-ui`）。
+> `web/sdk/sip-phone-sdk.js`（网页 SDK）、`web/index.html` + `web/js/*`（网页控制台）、`scripts/release.sh`（发布，默认两个应用一起发）、`release/release.conf`（完整版配置）/ `release/release-no-ui.conf`（仅托盘无 UI 版，`release.sh --only no-ui` 只发这一个）。
 
 ### 5.1 版本号约定
 
@@ -383,23 +383,30 @@ var r struct {
 ### 5.2 发布脚本（`scripts/release.sh`）
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 只编译打包（1.0.6-rc），不上传
+./scripts/release.sh --pre --dry-run   # 只编译打包（1.0.15-rc），不上传
 ./scripts/release.sh --pre             # 预发布：上传并标记为预发布
 ./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译并上传
+./scripts/release.sh --only no-ui      # 只发「仅托盘无 UI 版」（默认两个应用一起发）
 # Windows 用 scripts/release.bat（同样的参数，内部走 git-bash）
 # 其他选项：-v <版本> / --title / --channel / --mandatory / --no-build
 ```
 
-流程（每一步都有失败即中止的检查）：
+**默认一次发两个应用**（本仓库的完整版与仅托盘无 UI 版）：编译只跑一遍（构建脚本本来就两个
+变体一起出），然后按变体逐个走下面 1–9 步——完整版用 `release/release.conf` + `release/app.json`，
+无 UI 版用 `release/release-no-ui.conf` + `release/app-no-ui.json`（独立 APP_ID 与令牌）；
+**一个应用失败不阻断另一个**，最后统一报错退出。暂存目录按应用分开
+（`dist/release/<APP_ID>/<版本>/`），两个 tar 包名也不同。
 
-1. **读配置**（`release/release.conf`：`UPDATE_SITE` / `APP_ID` / `UPLOAD_TOKEN`，可选 `CA_CERT` / `INSECURE_TLS`；同名环境变量可覆盖）。
+流程（单个应用；每一步都有失败即中止的检查）：
+
+1. **读配置**（该应用的 conf：`UPDATE_SITE` / `APP_ID` / `UPLOAD_TOKEN`，可选 `CA_CERT` / `INSECURE_TLS`；同名环境变量可覆盖）。
 2. **定版本**：`--pre` → `<基础版本>-rc`，否则基础版本；校验版本号格式（防路径穿越）。
 3. **编译**：Windows 走 `cmd /c build.bat`（Linux 走 `build.sh`），正式版设 `SIP_PHONE_RELEASE=1`；
    记录构建开始时间供下一步用。
 4. **收集产物**：只收托盘 GUI 产物（排除 console 版，避免同平台两个候选）；
    **mtime 早于本次构建开始的产物一律跳过并告警**（防止把上次的旧二进制当新版本发出去）；
    缺平台（如 Windows 上产不出 Linux 产物）显式列出。
-5. **打包**：产物重命名为 `<APP_ID>-<平台>-<架构>[.exe]`；生成 `release.json`（显式声明 os/arch/kind/sha256/size）、
+5. **打包**：产物重命名为 `<APP_ID>-<平台>-<架构>[.exe]`（无 UI 版的 APP_ID 自带 `-no-ui`，所以下载名形如 `mti-sip-phone-no-ui-windows-x64.exe`）；生成 `release.json`（显式声明 os/arch/kind/sha256/size）、
    `SHA256SUMS`；从根 `changelog.md` 抽取 `## [<版本>]` 段写 `CHANGELOG.md`（预发布版回落到基础版本段）。
 6. **打成 tar.gz**（git-bash 没有 zip；站点按文件头识别格式）。
 7. **写应用级元数据**：`release/app.json` → `PUT …/metadata`；`release/icon.svg` → `PUT …/icon`。
@@ -418,8 +425,10 @@ UPLOAD_TOKEN=<令牌>   # 找站点管理员执行 updatesite token <应用ID> �
 #INSECURE_TLS=
 ```
 
-**给新应用复用时**改三处：`APP_ID`（新应用 ID，同时决定归档目录名）、`UPLOAD_TOKEN`（找管理员算）、
-脚本里第 4/5 步的产物列表与命名（各应用产物名不同），其余逻辑通用。
+**再加一个应用时**（本仓库已经有两个：完整版 + 无 UI 版）：
+`release/release-<变体>.conf`（`APP_ID` 决定归档目录名与下载文件名、`UPLOAD_TOKEN` 找管理员算）、
+`release/app-<变体>.json`（应用级元数据），再在 `scripts/release.sh` 的 `load_app_conf`（配置与元数据）
+与产物清单（`ART_SRC`/`ART_TITLE`）里加一个分支，其余逻辑通用。
 
 ### 5.3 运行时链路（软电话侧）
 
@@ -445,7 +454,7 @@ UPLOAD_TOKEN=<令牌>   # 找站点管理员执行 updatesite token <应用ID> �
 - **状态机**：`idle / available / downloading / ready / failed`，全部经 `system.update` 事件广播给 UI 与网页。
 - **参数校验**：`version`/`url` 必填、仅 http/https、`os`/`arch` 提供时必须与本机一致。
 - **版本高低**：`version` 不高于当前 → `update_not_newer`（前端视为正常结果）；
-  新增可选 **`force: true`** 跳过这条检查（**强制推送**，供测试页「推送」按钮与回滚场景用；
+  新增可选 **`force: true`** 跳过这条检查（**强制推送**，供控制台/联调页的「推送」按钮与回滚场景用；
   自动更新的定时查询**不带**它）。
 - **重复告知**幂等；下载中/已就绪时同版本重复告知直接忽略。
 - **下载**：上限 256 MB、sha256 比对（提供时）、PE/ELF 魔数校验、可取消。
@@ -484,7 +493,7 @@ WS 接口（详见 `docs/ws-protocol.md`）：
 | 编号 | 内容 |
 | --- | --- |
 | `REQ-UPD-001`~`009` | 版本上报、`system.notifyUpdate`、提示窗、下载校验、替换重启、残留清理、`system.update` 事件、SDK 方法、更新源安全（下载必须用户点） |
-| `REQ-UPD-010`~`016` | 定时查询站点（现由软电话自己做）、容错、预览版策略、测试页改造、**强制推送**、更新提示窗不占任务栏 |
+| `REQ-UPD-010`~`016` | 定时查询站点（现由软电话自己做）、容错、预览版策略、控制台改造、**强制推送**、更新提示窗不占任务栏 |
 | `REQ-UPD-017`~`019` | 软电话自检（配置页四项）、网页写入配置（`system.setUpdateConfig`）、SDK 只保留强制推送 |
 | `REQ-REL-001`~`006` | 版本号约定（-rc）、预发布比较、一键发布脚本、发布物内容、元数据走接口、产物新鲜度校验 |
 
@@ -538,7 +547,7 @@ WS 接口（详见 `docs/ws-protocol.md`）：
 ## 附录：核心代码（可直接照搬）
 
 > 以下代码从 mti-sip-phone 1.0.10 摘出（改代码后请顺手同步这里）：**一键发布脚本**、**Go 侧更新客户端**、**WS 接口**、
-> **网页 SDK 的更新部分**与**测试页**。它们引用本项目的 `internal/logx`、`internal/core` 等包，
+> **网页 SDK 的更新部分**与**控制台**。它们引用本项目的 `internal/logx`、`internal/core` 等包，
 > **不能原样编译**，但逻辑、边界条件与注释都可以直接照搬/改写。路径是原仓库位置，仅作对照。
 
 ### 附录 A：一键发布脚本 `scripts/release.sh`（完整）
