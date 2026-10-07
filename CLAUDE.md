@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x64 / arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前开发版本 **1.0.15**（1.0.14 已定版，含 Windows 386 摄像头采集、Windows 产物静态链接、Linux 交叉 CXX 修复）。1.0.15 进行中：**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）** 与 **网页控制台四个页面（REQ-WEB-001~004 + REQ-WS-016~019 + REQ-UPD-020/021）**。
+当前版本 **1.0.15**（2026-10-07 定版并合并 master）：新增**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）**与**网页控制台（五个页面，取代原测试页，REQ-WEB-001~004）**，补齐 26 个 WS 方法（通话记录 / 通信录增删改查 / 配置读写 / 设备枚举 / 网页触发更新，REQ-WS-016~019 + REQ-UPD-020/021），拨号框边打边查通信录；另新增「允许远程连接」开关与沙箱端口 `8765+10×槽位`。下一个开发版本号未定（未开始）。
 
 <details>
 <summary>1.0.14 已完成内容（点击展开）</summary>
@@ -101,11 +101,18 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 `/docs/upload`、`/docs/api`）。本仓库侧的发布入口：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.11-rc），不上传
+./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.15-rc），不上传
 ./scripts/release.sh --pre             # 预发布：真实上传（站点标记为预发布）
-./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.11
+./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.15
+./scripts/release.sh --only no-ui      # 只发无 UI 版（默认：完整版 + 无 UI 版**一起发**）
 # Windows 用 scripts/release.bat（同样的参数，内部走 git-bash）
 ```
+
+**一次发布两个应用**（默认行为）：脚本编译一遍（`build.bat`/`build.sh` 本来就两个变体一起出），
+然后按变体逐个"读自己的配置 → 收集自己的产物 → 打包 → 上传 → 核对"——完整版用
+`release/release.conf` + `release/app.json`（APP_ID `mti-sip-phone`），无 UI 版用
+`release/release-no-ui.conf` + `release/app-no-ui.json`（APP_ID `mti-sip-phone-no-ui`，独立令牌）。
+一个应用失败不影响另一个，最后统一报错退出；`--only full|no-ui`（或旧的 `--no-ui`）只发一个。
 
 - 配置在 `release/release.conf`：`UPDATE_SITE`（当前 `https://update.wuzm219.cn`）/ `APP_ID`
   （mti-sip-phone）/ `UPLOAD_TOKEN`（由站点 `UPLOAD_SECRET` 按应用 ID 推导）/ 可选的
@@ -230,7 +237,8 @@ web/          网页控制台（**内嵌进二进制**，改完必须重新构�
   sdk/        JS SDK（sip-phone-sdk.js + .d.ts，无 token；更新既有强制推送
               notifyUpdate，也能触发下载/安装（update.*），查询在软电话侧）
 release/      发布到更新站点的配置与元数据：release.conf + app.json（完整版）、
-              release-no-ui.conf + app-no-ui.json（仅托盘无 UI 版，release.sh --no-ui）、
+              release-no-ui.conf + app-no-ui.json（仅托盘无 UI 版；发布脚本默认两个应用一起发，
+              --only no-ui / --no-ui 只发这一个）、
               icon.svg（两个应用各写一次）；app.json 经站点 metadata 接口整份替换
 scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）、固定路径测试运行器
               （test.sh，防火墙只弹一次）与一键发布（release.sh/.bat）
@@ -293,7 +301,8 @@ main（组装）
   每帧白做一次 YUV→RGBA（≈30MB/s）却没人看。网页订阅本地画面走 `LocalVideoWanted`，
   不受影响。
 - **发布是站点上的独立应用**：`release/release-no-ui.conf`（APP_ID `mti-sip-phone-no-ui`
-  + 独立令牌）+ `release/app-no-ui.json`；`scripts/release.sh --no-ui` 切换配置与产物清单。
+  + 独立令牌）+ `release/app-no-ui.json`；`scripts/release.sh` **默认两个应用一起发**
+  （按变体各自读配置/收产物/上传），`--only no-ui` 只发这一个。
 
 ## 视频呼叫
 

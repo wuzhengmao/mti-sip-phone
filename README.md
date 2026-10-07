@@ -1,6 +1,8 @@
 # mti-sip-phone
 
-跨平台 SIP 软电话（Go 实现）：常驻系统托盘，支持注册、呼叫、振铃、接听、挂断；通过本地 WebSocket 接口供网页控制，附带 JS SDK 与测试页面。
+跨平台 SIP 软电话（Go 实现）：常驻系统托盘，支持注册、呼叫、振铃、接听、挂断；通过本地 WebSocket 接口供**网页控制台**（通话 / 通话记录 / 通信录 / 配置 / 诊断五个页面）与 JS SDK 控制。
+
+两个构建变体：**完整版**（Fyne 桌面界面 + 托盘）与**仅托盘无 UI 版**（`mti-sip-phone-no-ui`：只有托盘、不创建任何窗口，全部操作走浏览器里的控制台）。
 
 - 架构设计：[docs/design.md](docs/design.md)（新同学先看这份）
 - 用户使用手册：[docs/user-manual.md](docs/user-manual.md)（面向最终用户：安装、配置、使用、故障排查）
@@ -36,22 +38,27 @@ Linux 上用 mingw-w64 交叉构建（glfw 的 C 源码与 mingw 专用头随 go
 
 # Windows：一键构建（自动探测 WinLibs gcc），产物输出到 dist/：
 build.bat
+#   每个 GUI 目标都出两份：完整版 sip-phone-<os>-<arch> 与仅托盘无 UI 版 sip-phone-no-ui-<os>-<arch>
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO+音频，静态）
+#   dist/sip-phone-no-ui-windows-amd64.exe    仅托盘无 UI 版（同上，只是没有窗口，静态）
 #   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试，静态）
 #   dist/sip-phone-windows-386.exe            32 位托盘版（需 i686 工具链，缺失则跳过该目标；静态）
+#   dist/sip-phone-no-ui-windows-386.exe      32 位仅托盘无 UI 版
 #   dist/sip-phone-windows-arm64.exe          ARM64 托盘版（需 llvm-mingw，缺失则跳过；
 #                                             视频/Opus/AEC 静态库暂无 arm64 版 → 基础版）
+#   dist/sip-phone-no-ui-windows-arm64.exe    ARM64 仅托盘无 UI 版
 
 # Linux：一键构建（本机 GUI 版 + 交叉 Windows GUI / 对侧 Linux 架构版，均 CGO+音频，输出 dist/）
 # 交叉 Windows 需 mingw-w64：apt install gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
 # 交叉 Windows arm64 需 llvm-mingw（GCC 系没有 aarch64 目标，解压即用，缺则跳过并打印步骤）
 # 交叉对侧 Linux 架构（amd64⇄arm64）需对应交叉 gcc + 图形栈开发包（缺啥脚本会打印准备步骤）
 ./build.sh
-#   dist/sip-phone-linux-<本机arch>           本机 Linux 托盘版
-#   dist/sip-phone-linux-<对侧arch>           交叉 Linux 托盘版
-#   dist/sip-phone-windows-amd64.exe          Windows amd64 托盘版（交叉，静态）
-#   dist/sip-phone-windows-386.exe            Windows 386 托盘版（交叉，静态）
-#   dist/sip-phone-windows-arm64.exe          Windows ARM64 托盘版（交叉，基础版）
+#   dist/sip-phone-linux-<本机arch>[/-no-ui-]       本机 Linux 托盘版 / 仅托盘无 UI 版
+#   dist/sip-phone-linux-<对侧arch>[/-no-ui-]       交叉 Linux 托盘版 / 仅托盘无 UI 版
+#   dist/sip-phone-windows-amd64.exe                  Windows amd64 托盘版（交叉，静态）
+#   dist/sip-phone-no-ui-windows-amd64.exe            Windows amd64 仅托盘无 UI 版
+#   （386/arm64 同理，各出两份）
+#   注：仅托盘无 UI 版不链接 fyne/GLFW，所以 Linux 交叉**不需要图形栈开发包**
 
 # 手动构建（Windows 需将 MinGW 的 gcc 加入 PATH，或用 CC 指定）
 go build -ldflags "-s -w -H=windowsgui" -o dist/sip-phone.exe ./cmd/sip-phone  # 无控制台
@@ -63,8 +70,9 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 
 启动后：
 
-- 系统托盘常驻：单击托盘图标唤出主界面（拨号 / 配置），关闭窗口=最小化到托盘
-- 测试页面：http://127.0.0.1:8765/ （WS 端口可配置，被占用自动 +1；无 token 鉴权）
+- 系统托盘常驻：单击托盘图标唤出主界面（拨号 / 配置），关闭窗口=最小化到托盘；
+  **仅托盘无 UI 版**则左键点托盘 → 用系统默认浏览器打开控制台
+- 网页控制台：http://127.0.0.1:8765/ （WS 端口可配置，被占用自动 +1；无 token 鉴权）
 - 配置文件：`%APPDATA%/mti-sip-phone/config.json`（Windows）/ `~/.config/mti-sip-phone/config.json`（Linux）
 - 日志文件：配置目录下 `logs/sip-phone.log`（按大小滚动，含 SIP 信令）
 - sip:// 协议：网页链接 `sip://账号:密码@服务器:5060` 拉起软电话并写入注册信息
@@ -105,7 +113,7 @@ Windows 上一键只出 Windows 产物；Linux 产物需在 Linux 机器上 `./b
 | 配置（含密码加密存储） | ✅ 已完成 |
 | 日志（分级、滚动、脱敏、SIP 信令跟踪） | ✅ 已完成 |
 | 本地 WS 控制服务 + 事件推送 | ✅ 已完成 |
-| JS SDK + 测试页面 | ✅ 已完成 |
+| JS SDK + 网页控制台 | ✅ 已完成 |
 | SIP 注册（UDP/TCP/TLS + Digest + 续注册 + 退避重试 + 休眠/切网恢复 + 服务端心跳） | ✅ 已完成（UDP/TCP 与真实服务端联调通过；TLS 与本机 TLS 对端联调通过） |
 | SIP 呼叫（呼出/呼入/接听/拒接/挂断/保持/DTMF） | ✅ 已完成（与真实服务端联调通过） |
 | 媒体引擎（PCMA/PCMU/Opus/G.722 + RTP + 抖动缓冲 + 音量/增益） | ✅ 已完成 |
@@ -169,7 +177,7 @@ internal/
   protocol/       sip:// 协议解析与系统协议注册
   single/         单实例 + 参数转发
   autostart/      开机自启
-web/            网页控制台（单页四视图，内嵌进二进制）+ JS SDK
+web/            网页控制台（单页五视图：通话/记录/通信录/配置/诊断，内嵌进二进制）+ JS SDK
 release/          更新站点发布配置与元数据
 scripts/          第三方库构建与一键发布脚本
 docs/             需求、架构设计、WS 协议、自动更新、变更记录
