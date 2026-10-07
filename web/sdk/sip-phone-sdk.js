@@ -603,6 +603,279 @@
       return this._request('system.setUpdateConfig', params);
     }
 
+    // ==========================================================
+    // 通话记录（REQ-WS-017）
+    // ==========================================================
+
+    /**
+     * 分页查询通话记录（新的在前）。
+     * 时间戳是**毫秒整数**，0 表示未发生（未接通 / 进行中）。
+     * @param {{remote?: string, limit?: number, offset?: number}} [filter]
+     *        remote = 按号码子串筛选；limit 默认 50、上限 200
+     * @returns {Promise<{records: Array<Object>, total: number, hasMore: boolean}>}
+     */
+    queryCallLog(filter) {
+      filter = filter || {};
+      const params = {};
+      if (filter.remote !== undefined) { params.remote = String(filter.remote); }
+      if (filter.limit !== undefined && filter.limit !== null) { params.limit = Math.round(filter.limit); }
+      if (filter.offset !== undefined && filter.offset !== null) { params.offset = Math.round(filter.offset); }
+      return this._request('calllog.query', params);
+    }
+
+    /**
+     * 删除若干条通话记录。
+     * @param {string[]} callIds
+     * @returns {Promise<{deleted: number}>}
+     */
+    deleteCallLog(callIds) {
+      return this._request('calllog.delete', { callIds: callIds || [] });
+    }
+
+    /**
+     * 清空全部通话记录（不可撤销）。
+     * @returns {Promise<{deleted: number}>}
+     */
+    clearCallLog() {
+      return this._request('calllog.clear', {});
+    }
+
+    // ==========================================================
+    // 通信录增删改查（REQ-WS-018；CSV/JSON 的批量导入导出见上面几个方法）
+    // ==========================================================
+
+    /**
+     * 列出联系人（core 侧本来是内存快照，一次取回即可）。
+     *
+     * 给了 query 就**在软电话侧过滤**：支持**音头拼音 / 全拼 / 汉字混合**
+     * （"zs"/"zhangsan"/"张三"/"张san" 都能命中「张三」）、号码子串、备注子串，
+     * 以及号码的纯数字写法（"+86 138-0000-0000" 能被 "138" 命中）——与桌面
+     * 通信录页是同一份实现。结果按拼音排序（空名称最前）。
+     * @param {{query?: string, starred?: boolean}} [filter]
+     * @returns {Promise<{count: number, total: number, contacts: Array<{number: string,
+     *          name: string, note: string, starred: boolean}>}>}
+     */
+    listContacts(filter) {
+      filter = filter || {};
+      const params = {};
+      if (filter.query) { params.query = String(filter.query); }
+      return this._request('contact.list', params);
+    }
+
+    /**
+     * 新增或修改联系人。号码重复、号码为空会以 invalid_params 拒绝。
+     * @param {{number: string, name?: string, note?: string, starred?: boolean}} contact
+     * @param {string} [prevNumber] 修改时传改号前的号码（不改号可省略）
+     * @returns {Promise<{contact: Object, count: number}>} contact 是规范化后的生效值
+     */
+    saveContact(contact, prevNumber) {
+      contact = contact || {};
+      if (!contact.number) {
+        return Promise.reject(new Error('saveContact 需要 number'));
+      }
+      const params = {
+        number: contact.number,
+        name: contact.name || '',
+        note: contact.note || ''
+      };
+      if (prevNumber) { params.prevNumber = prevNumber; }
+      if (contact.starred !== undefined) { params.starred = !!contact.starred; }
+      return this._request('contact.save', params);
+    }
+
+    /**
+     * 按号码（任意写法）删除联系人。
+     * @param {string[]} numbers
+     * @returns {Promise<{deleted: number, count: number}>}
+     */
+    deleteContacts(numbers) {
+      return this._request('contact.delete', { numbers: numbers || [] });
+    }
+
+    /**
+     * 批量设置/取消常用（★）。
+     * @param {string[]} numbers
+     * @param {boolean} starred
+     * @returns {Promise<{updated: number, count: number}>}
+     */
+    setContactsStarred(numbers, starred) {
+      return this._request('contact.setStarred', { numbers: numbers || [], starred: !!starred });
+    }
+
+    /**
+     * 清空通信录（不可撤销）。
+     * @returns {Promise<{deleted: number, count: number}>}
+     */
+    clearContacts() {
+      return this._request('contact.clear', {});
+    }
+
+    // ==========================================================
+    // 配置读写（REQ-WS-019）
+    // ==========================================================
+
+    /**
+     * 读取配置快照：账户（**不含密码**，只有 passwordSet 布尔）、音频、视频、
+     * 日志、WS 端口、自动更新、开机自启。
+     * @returns {Promise<Object>}
+     */
+    getConfig() {
+      return this._request('system.getConfig', {});
+    }
+
+    /**
+     * 修改 SIP 账户（只改传入的字段）。**密码只写不读**：
+     * 传 password 改密码、传 clearPassword:true 清空，都不传则保持原密码。
+     * 保存后会立即按新配置重新注册。
+     * @param {Object} patch 账户字段的子集 + 可选的 password / clearPassword
+     * @returns {Promise<Object>} 生效后的账户快照（不含密码）
+     */
+    setAccount(patch) {
+      return this._request('system.setAccount', patch || {});
+    }
+
+    /**
+     * 枚举音频设备。
+     * ⚠️ 软电话侧是**异步枚举**（音频服务不可达时要等超时），返回的
+     * `ready:false` 表示"还在枚举/不可用"，此时列表为空——页面应提示稍后重试，
+     * 而不是把空列表当成"没有设备"。
+     * @returns {Promise<{mics: Array<Object>, speakers: Array<Object>, ready: boolean,
+     *          preprocessSupported: boolean}>}
+     */
+    listAudioDevices() {
+      return this._request('audio.devices', {});
+    }
+
+    /**
+     * 修改音频配置（只改传入的字段）。设备切换立即生效；AEC/NS/AGC
+     * 三项从**下一通电话**生效（音频流在通话开始时重建）。
+     * @param {{micId?: string, speakerId?: string, ringSpeakerId?: string,
+     *          aec?: boolean, ns?: boolean, agc?: boolean}} patch
+     * @returns {Promise<Object>} 生效后的音频配置
+     */
+    setAudioConfig(patch) {
+      return this._request('system.setAudioConfig', patch || {});
+    }
+
+    /**
+     * 枚举摄像头。
+     * @returns {Promise<{cameras: Array<Object>, supported: boolean,
+     *          cameraSupported: boolean}>}
+     */
+    listVideoDevices() {
+      return this._request('video.devices', {});
+    }
+
+    /**
+     * 修改视频配置（只改传入的字段）。`enabled` 是总开关（立即生效）；
+     * 摄像头与采集参数（宽高/帧率/码率）从**下一通电话**生效。
+     * @param {{enabled?: boolean, cameraId?: string, cameraName?: string,
+     *          width?: number, height?: number, fps?: number, bitrateKbps?: number}} patch
+     * @returns {Promise<Object>} 生效后的视频配置
+     */
+    setVideoConfig(patch) {
+      return this._request('system.setVideoConfig', patch || {});
+    }
+
+    /**
+     * 修改日志配置（只改传入的字段）。级别与 SIP 信令记录立即生效；
+     * 写文件 / 输出控制台**重启后生效**。
+     * @param {{level?: string, dir?: string, file?: boolean, console?: boolean,
+     *          sipTrace?: boolean}} patch
+     * @returns {Promise<Object>} 生效后的日志配置
+     */
+    setLogConfig(patch) {
+      return this._request('system.setLogConfig', patch || {});
+    }
+
+    /**
+     * 修改"网页接入"配置（**重启后生效**）：监听端口 与 是否允许远程连接。
+     * 两项都可选——只传一个就只改那一个。
+     *
+     * `allowRemote: true` 时软电话监听 0.0.0.0 且不再拒绝非回环来源。
+     * ⚠️ **网页接口没有鉴权**：放开后同网段任何设备都能拨号、读通信录/通话记录、
+     * 改配置甚至重启软电话。默认 false（仅本机回环）。
+     * @param {number} [port] 1–65535
+     * @param {boolean} [allowRemote]
+     * @returns {Promise<{port: number, allowRemote: boolean, actualPort: number,
+     *          restartRequired: boolean}>} actualPort = 当前进程实际在监听的端口
+     */
+    setWSPort(port, allowRemote) {
+      const params = {};
+      if (port !== undefined && port !== null) { params.port = Math.round(port); }
+      if (allowRemote !== undefined) { params.allowRemote = !!allowRemote; }
+      return this._request('system.setWSPort', params);
+    }
+
+    /**
+     * 开/关开机自启动（立即注册/移除系统项）。
+     * 无 UI 版与桌面版共用同一套系统项；沙箱实例（-instance N）不支持，会返回
+     * config_unavailable。
+     * @param {boolean} enabled
+     * @returns {Promise<{enabled: boolean}>}
+     */
+    setAutoStart(enabled) {
+      return this._request('system.setAutoStart', { enabled: !!enabled });
+    }
+
+    /**
+     * 重启软电话程序。
+     * ⚠️ 先回响应再重启：拿到 resolve 后进程随时会退出、WS 会断开（页面应提示用户）。
+     * @returns {Promise<{restarting: boolean}>}
+     */
+    restartApp() {
+      return this._request('system.restart', {});
+    }
+
+    // ==========================================================
+    // 自动更新（REQ-UPD-020：网页也能触发下载/安装。
+    // 仍然必须由用户在页面上点击，软电话不做静默安装）
+    // ==========================================================
+
+    /**
+     * 更新状态快照（一般直接用 `system.update` 事件，这里供页面初始化时查询）。
+     * @returns {Promise<{phase: string, info: Object, progress?: number,
+     *          downloaded?: number, total?: number, error?: string}>}
+     */
+    updateStatus() {
+      return this._request('update.status', {});
+    }
+
+    /**
+     * 开始下载已告知的新版本（进度走 `system.update` 事件）。
+     * @returns {Promise<Object>} 更新状态
+     */
+    startUpdate() {
+      return this._request('update.start', {});
+    }
+
+    /**
+     * 取消下载。
+     * @returns {Promise<Object>} 更新状态
+     */
+    cancelUpdate() {
+      return this._request('update.cancel', {});
+    }
+
+    /**
+     * 安装已下载好的更新并重启（要求当前 phase === 'ready'，否则返回
+     * invalid_params）。
+     * ⚠️ 先回响应再安装：resolve 之后进程会替换自身并重启。
+     * @returns {Promise<{phase: string, applying: boolean}>}
+     */
+    applyUpdate() {
+      return this._request('update.apply', {});
+    }
+
+    /**
+     * 立即检查一次更新站点（不等下一个周期）。
+     * @returns {Promise<{skipped: boolean, upToDate: boolean, latestVersion: string,
+     *          notified: boolean, reason: string, text: string, currentVersion: string}>}
+     */
+    checkUpdateNow() {
+      return this._request('system.checkUpdateNow', {});
+    }
+
     /** _applyUpdateConfigOnConnect 连上后把构造参数里的更新配置写入软电话。 */
     _applyUpdateConfigOnConnect() {
       if (!this._updateConfigWanted) { return; }

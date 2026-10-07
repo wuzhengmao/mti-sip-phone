@@ -135,6 +135,21 @@ func (p *Phone) localWantedFunc() func() bool {
 	return prov.LocalVideoWanted
 }
 
+// desktopVideoSinkPresent 是否注册了桌面视频出口（界面层）。
+//
+// 回显（previewOn）是"在桌面的视频窗口里显示本地画面"，没有界面时这个窗口
+// 根本不存在：媒体引擎默认开着回显就意味着采集循环每帧白做一次 YUV→RGBA
+// 分配（640×480×25fps ≈ 30MB/s），结果却被静默丢弃。仅托盘无 UI 版与
+// headless 都走这条路；网页订阅本地画面另走 LocalVideoWanted，不受影响。
+// 取不到判定（p.sink 不是 core.App）时按"有桌面"处理，保持历史行为。
+func (p *Phone) desktopVideoSinkPresent() bool {
+	prov, ok := p.sink.(interface{ HasDesktopVideoSink() bool })
+	if !ok {
+		return true
+	}
+	return prov.HasDesktopVideoSink()
+}
+
 // notifyVideoState 上报视频状态（低频，走事件总线没问题）。
 //
 // 引擎已回收（对端没有视频 / answer 拒绝视频）时上报**全零状态**：视频呼叫
@@ -348,6 +363,9 @@ func (p *Phone) startVideo(cs *callSession, sendLocal bool) {
 	}
 	v.SetFrameSink(sink)
 	v.SetLocalWantedFunc(p.localWantedFunc())
+	// 无桌面界面（仅托盘无 UI 版 / headless）时回显默认关：没有窗口可显示，
+	// 开着只会每帧白做一次 YUV→RGBA 转换（见 desktopVideoSinkPresent）
+	v.SetVideoPreview(p.desktopVideoSinkPresent())
 	if send {
 		vc := p.videoConfig()
 		v.StartCamera(vc.CameraID, vc.CameraName, vc.Width, vc.Height, vc.FPS, vc.BitrateKbps*1000)

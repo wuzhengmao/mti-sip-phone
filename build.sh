@@ -339,24 +339,89 @@ tags_args() {
 
 # ---------- 构建 ----------
 
-codec_setup "linux-${NATIVE_ARCH}"
-echo "[1/5] 构建本机 GUI 版 sip-phone-linux-${NATIVE_ARCH}（${FEATURES}）..."
-printf '%s' "$CODEC_NOTES"
-go build $(tags_args) -ldflags "$LDFLAGS" -o "dist/sip-phone-linux-${NATIVE_ARCH}" ./cmd/sip-phone
+# 构建变体（见 internal/variant 与 cmd/sip-phone/gui_noui.go）：
+#   full = 完整版（Fyne 桌面界面 + 系统托盘）
+#   noui = 仅托盘无 UI 版（-tags noui：只起系统托盘，不创建任何窗口，所有操作
+#          走网页控制台）。它**不链接 fyne/GLFW**，所以 Linux 侧也不需要
+#          X11/Wayland/GL 的 .pc 与开发包（systray 的 Linux 实现是纯 Go DBus）。
+# 每个目标按变体各出一份产物：
+#   dist/sip-phone-<os>-<arch>[.exe]          （full，名字与历史一致）
+#   dist/sip-phone-no-ui-<os>-<arch>[.exe]    （noui）
+variant_setup() {
+    case "$1" in
+    noui)
+        VAR_INFIX="no-ui-"
+        VAR_TAGS_EXTRA="noui"
+        VAR_LABEL="no-ui"
+        VAR_FEAT="，仅托盘无 UI"
+        ;;
+    *)
+        VAR_INFIX=""
+        VAR_TAGS_EXTRA=""
+        VAR_LABEL="full"
+        VAR_FEAT=""
+        ;;
+    esac
+}
 
-if [ -z "$CROSS_ARCH" ]; then
-    echo "[2/5] 跳过 Linux 交叉：本机架构 ${NATIVE_ARCH} 不在支持列表（amd64/arm64）"
-elif [ -z "$CROSS_CC" ]; then
-    echo "[2/5] 跳过 linux/${CROSS_ARCH}：未找到 ${CROSS_TRIPLE}-gcc"
-    cross_env_hint
-elif [ -n "$CROSS_PC_MISSING" ]; then
-    echo "[2/5] 跳过 linux/${CROSS_ARCH}：${CROSS_ARCH} 图形栈开发包不全，缺${CROSS_PC_MISSING}"
-    echo "      pkg-config 查找目录：${CROSS_PC_LIBDIR}"
-    cross_env_hint
-else
+# apply_variant 把变体标签追加到 codec_setup 探测出的标签后面，并把变体写进
+# 特性摘要（必须在对应目标的 codec_setup 之后调用）。
+apply_variant() {
+    if [ -z "$VAR_TAGS_EXTRA" ]; then
+        return 0
+    fi
+    if [ -n "$BUILD_TAGS" ]; then
+        BUILD_TAGS="$BUILD_TAGS,$VAR_TAGS_EXTRA"
+    else
+        BUILD_TAGS="$VAR_TAGS_EXTRA"
+    fi
+    FEATURES="${FEATURES}${VAR_FEAT}"
+}
+
+# out_name 目标产物名：dist/sip-phone-<变体前缀><os>-<arch><后缀>
+out_name() {
+    printf 'dist/sip-phone-%s%s-%s%s' "$VAR_INFIX" "$1" "$2" "$3"
+}
+
+# step_label 统一的进度行（共 10 步：5 个目标 × 2 个变体，跳过也算一步）。
+STEP=0
+step_label() {
+    STEP=$((STEP + 1))
+    echo "[$STEP/10] $*"
+}
+
+# ---- 各目标（每个函数按当前变体出一份产物）----
+
+build_linux_native() {
+    codec_setup "linux-${NATIVE_ARCH}"
+    apply_variant
+    step_label "构建 $VAR_LABEL 本机版 $(out_name linux "${NATIVE_ARCH}" "")（${FEATURES}）..."
+    printf '%s' "$CODEC_NOTES"
+    go build $(tags_args) -ldflags "$LDFLAGS" -o "$(out_name linux "${NATIVE_ARCH}" "")" ./cmd/sip-phone
+}
+
+build_linux_cross() {
+    if [ -z "$CROSS_ARCH" ]; then
+        step_label "跳过 $VAR_LABEL Linux 交叉：本机架构 ${NATIVE_ARCH} 不在支持列表（amd64/arm64）"
+        return 0
+    fi
+    if [ -z "$CROSS_CC" ]; then
+        step_label "跳过 $VAR_LABEL linux/${CROSS_ARCH}：未找到 ${CROSS_TRIPLE}-gcc"
+        cross_env_hint
+        return 0
+    fi
+    # 图形栈开发包只对完整版是必需的：仅托盘无 UI 版不链接 fyne，也就没有
+    # X11/Wayland/GL 的 pkg-config 依赖（交叉 gcc/CXX 仍然要——音频是 CGO）。
+    if [ -z "$VAR_TAGS_EXTRA" ] && [ -n "$CROSS_PC_MISSING" ]; then
+        step_label "跳过 $VAR_LABEL linux/${CROSS_ARCH}：${CROSS_ARCH} 图形栈开发包不全，缺${CROSS_PC_MISSING}"
+        echo "      pkg-config 查找目录：${CROSS_PC_LIBDIR}"
+        cross_env_hint
+        return 0
+    fi
     codec_setup "linux-${CROSS_ARCH}"
+    apply_variant
     if [ -z "$CROSS_CXX" ] && { [ -n "$VIDEO_ON" ] || [ -n "$APM_ON" ]; }; then
-        echo "[2/5] 跳过 linux/${CROSS_ARCH}：带视频或音频预处理需要 ${CROSS_TRIPLE}-g++"
+        step_label "跳过 $VAR_LABEL linux/${CROSS_ARCH}：带视频或音频预处理需要 ${CROSS_TRIPLE}-g++"
         printf '%s' "$CODEC_NOTES"
         echo "      安装：apt install ${CROSS_GXX_PKG}（或 dnf/其他发行版的对应交叉 g++）"
         echo "      原因：包里有 C++ 源（internal/audio/apm_bridge.cc）时 Go 用 CXX 当"
@@ -366,87 +431,114 @@ else
         echo "      若不需要视频/预处理：删掉 third_party/video/linux-${CROSS_ARCH} 与"
         echo "            third_party/audio/linux-${CROSS_ARCH} 即可出基础版"
         echo "      自建工具链：用 CROSS_CC / CROSS_CXX 显式指定"
-    else
-        echo "[2/5] 交叉构建 dist/sip-phone-linux-${CROSS_ARCH}（${FEATURES}，CC=${CROSS_CC} CXX=${CROSS_CXX}）..."
-        printf '%s' "$CODEC_NOTES"
-        CGO_ENABLED=1 GOOS=linux GOARCH="$CROSS_ARCH" CC="$CROSS_CC" CXX="$CROSS_CXX" \
-            PKG_CONFIG_LIBDIR="$CROSS_PC_LIBDIR" PKG_CONFIG_PATH= \
-            go build $(tags_args) -ldflags "$LDFLAGS" -o "dist/sip-phone-linux-${CROSS_ARCH}" ./cmd/sip-phone
+        return 0
     fi
-fi
+    step_label "交叉构建 $VAR_LABEL $(out_name linux "${CROSS_ARCH}" "")（${FEATURES}，CC=${CROSS_CC} CXX=${CROSS_CXX}）..."
+    printf '%s' "$CODEC_NOTES"
+    CGO_ENABLED=1 GOOS=linux GOARCH="$CROSS_ARCH" CC="$CROSS_CC" CXX="$CROSS_CXX" \
+        PKG_CONFIG_LIBDIR="$CROSS_PC_LIBDIR" PKG_CONFIG_PATH= \
+        go build $(tags_args) -ldflags "$LDFLAGS" -o "$(out_name linux "${CROSS_ARCH}" "")" ./cmd/sip-phone
+}
 
 # Windows amd64 托盘版（参数与 build.bat 的同名目标一致：GUI 子系统无控制台）
 # -extldflags -static：把 mingw 运行时（libwinpthread/libstdc++/libgcc）链进
 # exe。不带这个参数时产物依赖这几个 DLL，而它们**不是 Windows 自带的**，
 # 拷到没装 MinGW 的机器上会起不来（"libwinpthread-1.dll not found"）。
 # Windows 386 目标一直是这么做的（见下）。
-if [ -n "$MINGW64_CC" ]; then
+build_windows_amd64() {
+    if [ -z "$MINGW64_CC" ]; then
+        step_label "跳过 $VAR_LABEL Windows amd64：未找到 x86_64-w64-mingw32-gcc"
+        echo "      安装：apt install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 / dnf install mingw64-gcc mingw64-gcc-c++"
+        echo "            （g++ 用于 -tags video：摄像头是 C++ 源，链接也需它提供 libstdc++）"
+        return 0
+    fi
     codec_setup "windows-amd64"
+    apply_variant
     if [ -n "$VIDEO_ON" ] && [ ! -x "$MINGW64_CXX" ]; then
-        echo "[3/5] 跳过 Windows amd64：带视频需要 ${MINGW64_CXX}（g++ 与 gcc 是两个包）"
+        step_label "跳过 $VAR_LABEL Windows amd64：带视频需要 ${MINGW64_CXX}（g++ 与 gcc 是两个包）"
         echo "      安装：apt install g++-mingw-w64-x86-64 / dnf install mingw64-gcc-c++"
         echo "      若不需要视频：删掉 third_party/video/windows-amd64 即可出无视频版本"
-    else
-        echo "[3/5] 交叉构建 dist/sip-phone-windows-amd64.exe（${FEATURES}，静态，CC=${MINGW64_CC} CXX=${MINGW64_CXX}）..."
-        printf '%s' "$CODEC_NOTES"
-        CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC="$MINGW64_CC" CXX="$MINGW64_CXX" \
-            go build $(tags_args) -ldflags "$LDFLAGS -H=windowsgui -extldflags -static" \
-            -o dist/sip-phone-windows-amd64.exe ./cmd/sip-phone
+        return 0
     fi
-else
-    echo "[3/5] 跳过 Windows amd64：未找到 x86_64-w64-mingw32-gcc"
-    echo "      安装：apt install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 / dnf install mingw64-gcc mingw64-gcc-c++"
-    echo "            （g++ 用于 -tags video：摄像头是 C++ 源，链接也需它提供 libstdc++）"
-fi
+    step_label "交叉构建 $VAR_LABEL $(out_name windows amd64 .exe)（${FEATURES}，静态，CC=${MINGW64_CC} CXX=${MINGW64_CXX}）..."
+    printf '%s' "$CODEC_NOTES"
+    CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC="$MINGW64_CC" CXX="$MINGW64_CXX" \
+        go build $(tags_args) -ldflags "$LDFLAGS -H=windowsgui -extldflags -static" \
+        -o "$(out_name windows amd64 .exe)" ./cmd/sip-phone
+}
 
 # Windows 386 托盘版（-extldflags -static：免 mingw 运行时 DLL，同 build.bat）
-if [ -n "$MINGW32_CC" ]; then
+build_windows_386() {
+    if [ -z "$MINGW32_CC" ]; then
+        step_label "跳过 $VAR_LABEL Windows 386：未找到 i686-w64-mingw32-gcc"
+        echo "      安装：apt install gcc-mingw-w64-i686 g++-mingw-w64-i686 / dnf install mingw32-gcc mingw32-gcc-c++"
+        echo "            （386 带视频时链接仍需 g++ 提供的 libstdc++；摄像头 C++ 源也要 g++）"
+        return 0
+    fi
     codec_setup "windows-386"
+    apply_variant
     if [ -n "$VIDEO_ON" ] && [ ! -x "$MINGW32_CXX" ]; then
-        echo "[4/5] 跳过 Windows 386：带视频需要 ${MINGW32_CXX}（链接 -lstdc++ 由 g++ 包提供）"
+        step_label "跳过 $VAR_LABEL Windows 386：带视频需要 ${MINGW32_CXX}（链接 -lstdc++ 由 g++ 包提供）"
         echo "      安装：apt install g++-mingw-w64-i686 / dnf install mingw32-gcc-c++"
         echo "      若不需要视频：删掉 third_party/video/windows-386 即可出无视频版本"
-    else
-        echo "[4/5] 交叉构建 dist/sip-phone-windows-386.exe（${FEATURES}，静态，CC=${MINGW32_CC}）..."
-        printf '%s' "$CODEC_NOTES"
-        CGO_ENABLED=1 GOOS=windows GOARCH=386 CC="$MINGW32_CC" CXX="$MINGW32_CXX" \
-            go build $(tags_args) -ldflags "$LDFLAGS -H=windowsgui -extldflags -static" \
-            -o dist/sip-phone-windows-386.exe ./cmd/sip-phone
+        return 0
     fi
-else
-    echo "[4/5] 跳过 Windows 386：未找到 i686-w64-mingw32-gcc"
-    echo "      安装：apt install gcc-mingw-w64-i686 g++-mingw-w64-i686 / dnf install mingw32-gcc mingw32-gcc-c++"
-    echo "            （386 带视频时链接仍需 g++ 提供的 libstdc++；摄像头 C++ 源也要 g++）"
-fi
+    step_label "交叉构建 $VAR_LABEL $(out_name windows 386 .exe)（${FEATURES}，静态，CC=${MINGW32_CC}）..."
+    printf '%s' "$CODEC_NOTES"
+    CGO_ENABLED=1 GOOS=windows GOARCH=386 CC="$MINGW32_CC" CXX="$MINGW32_CXX" \
+        go build $(tags_args) -ldflags "$LDFLAGS -H=windowsgui -extldflags -static" \
+        -o "$(out_name windows 386 .exe)" ./cmd/sip-phone
+}
 
 # Windows arm64 托盘版。工具链是 llvm-mingw（clang），**不是** GCC 系：
 # mingw-w64 没有 aarch64-w64-mingw32 目标（见文件头的依赖说明）。
 # 这里刻意不走 codec_setup：视频/Opus/AEC 的静态库还没有 windows-arm64 版本，
 # 探测只会打印对该目标无效的提示（"跑 build-video-libs.sh 生成"），所以固定
 # 基础版；CGO 路径必须清空，避免沿用上一个目标注入的 -I/-L。
-if [ -n "$ARM64_CC" ]; then
+build_windows_arm64() {
+    if [ -z "$ARM64_CC" ]; then
+        step_label "跳过 $VAR_LABEL Windows arm64：未找到 llvm-mingw 的 aarch64-w64-mingw32-clang"
+        echo "      安装（x86_64 宿主，解压即用、约 80 MB）：从"
+        echo "        https://github.com/mstorsjo/llvm-mingw/releases 取"
+        echo "        llvm-mingw-<版本>-ucrt-ubuntu-22.04-x86_64.tar.xz，然后："
+        echo "          sudo tar -xf llvm-mingw-<版本>-ucrt-ubuntu-22.04-x86_64.tar.xz -C /opt"
+        echo "          export PATH=/opt/llvm-mingw-<版本>-ucrt-ubuntu-22.04-x86_64/bin:\$PATH"
+        echo "        （arm64 宿主把 ubuntu-22.04-x86_64 换成 ubuntu-22.04-aarch64）"
+        echo "        或用 LLVM_MINGW=<解压目录> 指定（目录下应有 bin/aarch64-w64-mingw32-clang）"
+        echo "      说明：GCC 系 mingw-w64 没有 aarch64-w64-mingw32 目标，必须用 llvm-mingw；"
+        echo "            该产物为基础版（G.711/G.722，无视频/Opus/AEC，静态库暂无 arm64 版）"
+        return 0
+    fi
     BUILD_TAGS=""
+    if [ -n "$VAR_TAGS_EXTRA" ]; then
+        BUILD_TAGS="$VAR_TAGS_EXTRA"
+    fi
     export CGO_CFLAGS=""
     export CGO_CXXFLAGS=""
     export CGO_LDFLAGS=""
-    echo "[5/5] 交叉构建 dist/sip-phone-windows-arm64.exe（CGO+音频，无视频/无Opus/无AEC）..."
+    step_label "交叉构建 $VAR_LABEL $(out_name windows arm64 .exe)（CGO+音频，无视频/无Opus/无AEC）..."
     echo "      工具链：llvm-mingw，CC=${ARM64_CC}"
     echo "      说明：尚无 arm64 版的视频/Opus/AEC 静态库，此处为基础版（G.711/G.722）"
     CGO_ENABLED=1 GOOS=windows GOARCH=arm64 CC="$ARM64_CC" CXX="$ARM64_CXX" \
-        go build -ldflags "$LDFLAGS -H=windowsgui" \
-        -o dist/sip-phone-windows-arm64.exe ./cmd/sip-phone
-else
-    echo "[5/5] 跳过 Windows arm64：未找到 llvm-mingw 的 aarch64-w64-mingw32-clang"
-    echo "      安装（x86_64 宿主，解压即用、约 80 MB）：从"
-    echo "        https://github.com/mstorsjo/llvm-mingw/releases 取"
-    echo "        llvm-mingw-<版本>-ucrt-ubuntu-22.04-x86_64.tar.xz，然后："
-    echo "          sudo tar -xf llvm-mingw-<版本>-ucrt-ubuntu-22.04-x86_64.tar.xz -C /opt"
-    echo "          export PATH=/opt/llvm-mingw-<版本>-ucrt-ubuntu-22.04-x86_64/bin:\$PATH"
-    echo "        （arm64 宿主把 ubuntu-22.04-x86_64 换成 ubuntu-22.04-aarch64）"
-    echo "        或用 LLVM_MINGW=<解压目录> 指定（目录下应有 bin/aarch64-w64-mingw32-clang）"
-    echo "      说明：GCC 系 mingw-w64 没有 aarch64-w64-mingw32 目标，必须用 llvm-mingw；"
-    echo "            该产物为基础版（G.711/G.722，无视频/Opus/AEC，静态库暂无 arm64 版）"
-fi
+        go build $(tags_args) -ldflags "$LDFLAGS -H=windowsgui" \
+        -o "$(out_name windows arm64 .exe)" ./cmd/sip-phone
+}
+
+# ---- 按变体跑一遍全部目标 ----
+
+variant_setup full
+build_linux_native
+build_linux_cross
+build_windows_amd64
+build_windows_386
+build_windows_arm64
+
+variant_setup noui
+build_linux_native
+build_linux_cross
+build_windows_amd64
+build_windows_386
+build_windows_arm64
 
 echo "构建完成：dist/（版本 ${APP_VERSION}）"
 ls -la dist/

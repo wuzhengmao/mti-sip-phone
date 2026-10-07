@@ -12,6 +12,7 @@ fi
 #   ./scripts/release.sh --pre            # 预发布/开发版：版本 1.0.5-rc（站点标记为预发布）
 #   ./scripts/release.sh --pre --dry-run  # 只编译打包，不上传（产物留在 dist/release/）
 #   ./scripts/release.sh --no-build       # 用 dist/ 里已有的产物打包（跳过新鲜度校验）
+#   ./scripts/release.sh --no-ui --pre    # 「仅托盘无 UI 版」：独立应用 ID，见 release-no-ui.conf
 #   ./scripts/release.sh --title "体验优化版" --mandatory
 #
 # 配置：release/release.conf（站点地址 / 应用 ID / 上传令牌 / 可选站点证书），
@@ -36,6 +37,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
+# 配置文件：默认完整版；--no-ui 时（参数解析后）切到 release-no-ui.conf。
+# 两个变体在更新站点上是**两个独立应用**（各自的归档目录与上传令牌）。
 CONF="$ROOT/release/release.conf"
 
 usage() {
@@ -45,9 +48,11 @@ usage() {
   ./scripts/release.sh --pre            # 预发布/开发版：版本 1.0.5-rc（站点标记为预发布）
   ./scripts/release.sh --pre --dry-run  # 只编译打包，不上传（产物留在 dist/release/）
   ./scripts/release.sh --no-build       # 用 dist/ 里已有的产物打包（跳过新鲜度校验）
+  ./scripts/release.sh --no-ui          # 发布「仅托盘无 UI 版」（独立应用，配置见 release-no-ui.conf）
   ./scripts/release.sh --title "体验优化版" --mandatory
-选项：--pre / --dry-run / --no-build / -v <版本> / --title <标题> / --channel <通道> / --mandatory
-配置：release/release.conf（UPDATE_SITE / APP_ID / UPLOAD_TOKEN / CA_CERT / INSECURE_TLS，
+选项：--pre / --dry-run / --no-build / --no-ui / -v <版本> / --title <标题> / --channel <通道> / --mandatory
+配置：release/release.conf（--no-ui 时读 release/release-no-ui.conf）：
+      UPDATE_SITE / APP_ID / UPLOAD_TOKEN / CA_CERT / INSECURE_TLS，
       同名环境变量可覆盖，例如对着本地站点试跑：
       UPDATE_SITE=https://localhost:8443 CA_CERT=certs/server.crt ./scripts/release.sh ...）
 EOF
@@ -62,12 +67,14 @@ VERSION=""
 TITLE=""
 CHANNEL=""
 MANDATORY=0
+NOUI=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --pre) PRE=1 ;;
         --dry-run) DRY=1 ;;
         --no-build) DO_BUILD=0 ;;
+        --no-ui) NOUI=1 ;;
         -v|--version) VERSION="${2:-}"; shift ;;
         --title) TITLE="${2:-}"; shift ;;
         --channel) CHANNEL="${2:-}"; shift ;;
@@ -79,6 +86,13 @@ while [ $# -gt 0 ]; do
 done
 
 # ---------- 配置 ----------
+
+# --no-ui：换配置与元数据文件（应用 ID、令牌、产物清单都不同）
+APP_JSON="$ROOT/release/app.json"
+if [ "$NOUI" = "1" ]; then
+    CONF="$ROOT/release/release-no-ui.conf"
+    APP_JSON="$ROOT/release/app-no-ui.json"
+fi
 
 # conf_get 读配置项：release/release.conf 里的 KEY=VALUE，同名环境变量优先。
 conf_get() {
@@ -149,7 +163,7 @@ case "$VERSION" in
     *-*|*_*) PRERELEASE=true ;;   # 版本号含 - 或 _ → 站点判定为预发布
     *) PRERELEASE=false ;;
 esac
-[ -n "$TITLE" ] || TITLE="mti-sip-phone ${VERSION}"
+[ -n "$TITLE" ] || TITLE="${APP_ID} ${VERSION}"
 
 echo "发布配置：站点 $UPDATE_SITE，应用 $APP_ID，版本 $VERSION（pre=$PRE dry-run=$DRY）"
 
@@ -200,22 +214,40 @@ fi
 # windows-arm64 是**基础版**（无视频/Opus/音频预处理：这三套静态库还没有 arm64 版本，
 # 见 build.bat / build.sh 的说明），标题里写明，免得 ARM64 用户以为是完整功能版；
 # 该产物需要 llvm-mingw 工具链，没装时构建脚本会跳过它，这里按"缺失"处理（不影响其余）。
-ART_SRC=(
-    "dist/sip-phone-windows-amd64.exe"
-    "dist/sip-phone-windows-386.exe"
-    "dist/sip-phone-windows-arm64.exe"
-    "dist/sip-phone-linux-amd64"
-    "dist/sip-phone-linux-arm64"
-)
+# 变体：完整版 = dist/sip-phone-*；仅托盘无 UI 版 = dist/sip-phone-no-ui-*（--no-ui）。
+if [ "$NOUI" = "1" ]; then
+    ART_SRC=(
+        "dist/sip-phone-no-ui-windows-amd64.exe"
+        "dist/sip-phone-no-ui-windows-386.exe"
+        "dist/sip-phone-no-ui-windows-arm64.exe"
+        "dist/sip-phone-no-ui-linux-amd64"
+        "dist/sip-phone-no-ui-linux-arm64"
+    )
+    ART_TITLE=(
+        "Windows 64 位（免安装，仅托盘）"
+        "Windows 32 位（免安装，仅托盘）"
+        "Windows ARM64（免安装，仅托盘，无视频/Opus/AEC）"
+        "Linux 64 位（仅托盘）"
+        "Linux ARM64（仅托盘）"
+    )
+else
+    ART_SRC=(
+        "dist/sip-phone-windows-amd64.exe"
+        "dist/sip-phone-windows-386.exe"
+        "dist/sip-phone-windows-arm64.exe"
+        "dist/sip-phone-linux-amd64"
+        "dist/sip-phone-linux-arm64"
+    )
+    ART_TITLE=(
+        "Windows 64 位（免安装）"
+        "Windows 32 位（免安装）"
+        "Windows ARM64（免安装，无视频/Opus/AEC）"
+        "Linux 64 位"
+        "Linux ARM64"
+    )
+fi
 ART_OS=(windows windows windows linux linux)
 ART_ARCH=(x64 x86 arm64 x64 arm64)
-ART_TITLE=(
-    "Windows 64 位（免安装）"
-    "Windows 32 位（免安装）"
-    "Windows ARM64（免安装，无视频/Opus/AEC）"
-    "Linux 64 位"
-    "Linux ARM64"
-)
 
 STAGE="$ROOT/dist/release/$VERSION"
 rm -rf "$STAGE"
@@ -395,7 +427,7 @@ api_put_file() {
 # 写全；图标单独走 /icon（类型按文件内容判定，文件名由站点决定，别在 app.json
 # 里手工写 icon 字段——站点保存图标时会自己把它指过去）。
 echo "写入应用级元数据（站点接口）..."
-api_put_file "应用信息 app.json" "$ROOT/release/app.json" \
+api_put_file "应用信息 app.json" "$APP_JSON" \
     "$UPDATE_SITE/api/v1/apps/$APP_ID/metadata" "application/json" ||
     { echo "应用信息写入失败，发布中止（发布包未上传）" >&2; exit 1; }
 api_put_file "应用图标 icon.svg" "$ROOT/release/icon.svg" \

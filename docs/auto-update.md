@@ -367,7 +367,7 @@ var r struct {
 ## 五、本项目的参考实现（1.0.10）
 
 > 代码位置：`internal/updater`（下载/替换/状态机）、`internal/wsapi`（WS 接口）、`internal/core/update.go`（类型）、
-> `web/sdk/sip-phone-sdk.js`（网页 SDK）、`web/test.html`（测试页）、`scripts/release.sh`（发布）、`release/release.conf`（配置）。
+> `web/sdk/sip-phone-sdk.js`（网页 SDK）、`web/index.html` + `web/js/*`（网页控制台）、`scripts/release.sh`（发布）、`release/release.conf`（完整版配置）/ `release/release-no-ui.conf`（仅托盘无 UI 版，`release.sh --no-ui`）。
 
 ### 5.1 版本号约定
 
@@ -472,9 +472,9 @@ WS 接口（详见 `docs/ws-protocol.md`）：
 - `notifyUpdate({version, url, sha256?, notes?})` → WS `system.notifyUpdate`，**恒为强制推送**
   （不受版本高低与预览版约束），供页面手动推送/联调。
 
-### 5.5 测试页（`web/test.html`，随二进制内嵌）
+### 5.5 网页控制台（`web/index.html` + `web/js/*`，随二进制内嵌）
 
-「自动更新」卡片保留联调能力，但**查询改由页面自己 `fetch` 站点接口**（`/latest` 两次，
+「配置 → 自动更新」卡片保留联调能力，但**查询改由页面自己 `fetch` 站点接口**（`/latest` 两次，
 分别显式带 `prerelease=true` / `prerelease=false`），列出「最新版本」与「最新稳定版」，
 每行一个黄色「推送」按钮（走 `sdk.notifyUpdate`）；另有「写入软电话配置」按钮把卡片里的
 站点/应用 ID/周期/预览版写进软电话，之后由软电话自己定时检查。
@@ -2432,9 +2432,11 @@ func (r CheckResult) Text() string {
     }
 ```
 
-### 附录 I：测试页的更新卡片 `web/test.html`（节选）
+### 附录 I：旧测试页的更新卡片（历史节选）
 
-> 查询由**页面自己 fetch** 站点接口（不再经 SDK），另加「写入软电话配置」。
+> ⚠️ 1.0.15 起原测试页 `web/test.html` 已并入**网页控制台**（`web/index.html` + `web/js/views/settings.js`
+> 的「自动更新」卡片 + `web/js/views/call.js` 的更新提示条）。下面这份节选保留的是**实现思路**
+> （页面自己 fetch 站点版本接口、写入软电话配置、强制推送），代码位置已迁移。
 
 HTML：
 

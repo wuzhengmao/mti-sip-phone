@@ -544,12 +544,12 @@ func TestHangupUnknownCall(t *testing.T) {
 	}
 }
 
-// TestIndexPage 测试页面正常返回且不含 token 占位符。
+// TestIndexPage 网页控制台正常返回且不含 token 占位符。
 func TestIndexPage(t *testing.T) {
 	ts, _ := newTestServer(t)
 	resp, err := http.Get(ts.URL + "/")
 	if err != nil {
-		t.Fatalf("请求测试页面失败: %v", err)
+		t.Fatalf("请求控制台页面失败: %v", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -557,6 +557,58 @@ func TestIndexPage(t *testing.T) {
 		t.Fatalf("状态码应为 200，收到 %d", resp.StatusCode)
 	}
 	if strings.Contains(string(body), "__SDK_TOKEN__") {
-		t.Fatal("测试页面残留 token 占位符")
+		t.Fatal("页面残留 token 占位符")
+	}
+	// 控制台外壳的四个视图与常驻通话条（REQ-WEB-001/002）
+	for _, id := range []string{`id="view-call"`, `id="view-history"`, `id="view-contacts"`,
+		`id="view-settings"`, `id="callBar"`} {
+		if !strings.Contains(string(body), id) {
+			t.Fatalf("控制台页面缺少 %s", id)
+		}
+	}
+}
+
+// TestWebRoutes 网页资源的白名单路由（REQ-WEB-003）：页面别名、静态资源与 404。
+func TestWebRoutes(t *testing.T) {
+	ts, _ := newTestServer(t)
+	cases := []struct {
+		path string
+		code int
+		ct   string
+	}{
+		{"/", 200, "text/html"},
+		{"/index.html", 200, "text/html"},
+		{"/history", 200, "text/html"},   // hash 路由别名
+		{"/test.html", 200, "text/html"}, // 旧测试页的兼容入口
+		{"/css/app.css", 200, "text/css"},
+		{"/js/app.js", 200, "application/javascript"},
+		{"/js/views/settings.js", 200, "application/javascript"},
+		{"/js/views/diag.js", 200, "application/javascript"},
+		{"/sdk/sip-phone-sdk.js", 200, "application/javascript"},
+		{"/nope", 404, ""},
+		// 目录穿越：net/http 的 mux 先做 path.Clean，归一化后落到白名单外 → 404
+		//（`/js/../sdk/...` 会被归一化成 `/sdk/...`，那是个合法路径，不算穿越）
+		{"/js/../../etc/passwd", 404, ""},
+	}
+	for _, c := range cases {
+		resp, err := http.Get(ts.URL + c.path)
+		if err != nil {
+			t.Fatalf("请求 %s 失败: %v", c.path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != c.code {
+			t.Fatalf("%s 状态码应为 %d，收到 %d", c.path, c.code, resp.StatusCode)
+		}
+		// 内嵌资源必须带 no-cache：升级软电话后浏览器拿旧页面是最容易踩的坑
+		if c.code == 200 && c.path != "/nope" {
+			if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
+				t.Fatalf("%s 的 Cache-Control 应为 no-cache，实际 %q", c.path, cc)
+			}
+		}
+		if c.ct != "" {
+			if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, c.ct) {
+				t.Fatalf("%s 的 Content-Type 应为 %s*，实际 %q", c.path, c.ct, ct)
+			}
+		}
 	}
 }

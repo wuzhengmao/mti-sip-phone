@@ -25,3 +25,6 @@ third_party/audio/
 
 # 固定路径的测试二进制（scripts/test.sh 生成，见该脚本头部的说明）
 .testbin/
+
+# Confluence 导入凭据（含 token，勿提交）
+.confluence.env

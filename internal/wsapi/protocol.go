@@ -39,51 +39,100 @@ const (
 	// CodeVideoUnsupported 视频功能不可用（本构建没有视频 / 用户关闭了
 	// 「启用视频通话」总开关，REQ-VIDEO-014）。
 	CodeVideoUnsupported = "video_unsupported"
+	// CodeCallLogUnavailable 通话记录不可用（数据库未接入/打开失败，REQ-WS-017）。
+	CodeCallLogUnavailable = "calllog_unavailable"
+	// CodeAudioUnavailable 音频设备能力不可用（本构建无音频后端，REQ-WS-016）。
+	CodeAudioUnavailable = "audio_unavailable"
+	// CodeConfigUnavailable 该配置项依赖的外部能力未接入（重启/自启/信令开关）。
+	CodeConfigUnavailable = "config_unavailable"
+	// CodeUpdateUnavailable 更新能力未接入（未配置更新器）。
+	CodeUpdateUnavailable = "update_unavailable"
 )
 
 // 请求方法名。
 const (
-	MethodDial              = "call.dial"            // 拨号
-	MethodAnswer            = "call.answer"          // 接听
-	MethodHangup            = "call.hangup"          // 挂断
-	MethodReject            = "call.reject"          // 拒接
-	MethodMute              = "call.mute"            // 保持（静音）
-	MethodMuteMic           = "call.muteMic"         // 麦克风开关（纯本地，REQ-UI-023）
-	MethodMuteSpeaker       = "call.muteSpeaker"     // 扬声器开关（纯本地，REQ-UI-023）
-	MethodSetMicGain       = "call.setMicGain"       // 麦克风增益百分比（0–200，0 = 禁用；REQ-MEDIA-006）
-	MethodSetSpeakerVolume = "call.setSpeakerVolume" // 扬声器音量百分比（0–100，0 = 禁用；REQ-MEDIA-006）
-	MethodSetVideo          = "call.setVideo"        // 视频总开关（纯本地，REQ-VIDEO-008）
-	MethodDTMF              = "call.dtmf"            // 发送 DTMF（RFC 4733，REQ-CALL-006）
-	MethodGetState          = "system.getState"          // 查询状态
-	MethodSetAutoAnswer     = "system.setAutoAnswer"     // 自动接听开关（桌面按钮与网页共用一份）
-	MethodSetUpdateConfig   = "system.setUpdateConfig"   // 自动更新配置（站点/应用 ID/周期/预览版，REQ-UPD-018）
-	MethodNotifyUpdate      = "system.notifyUpdate"      // 前端强制推送新版本
-	MethodVideoSubscribe    = "video.subscribe"      // 订阅视频画面（REQ-VIDEO-009）
-	MethodVideoUnsubscribe  = "video.unsubscribe"    // 退订视频画面
-	MethodVideoSetTransform = "video.setTransform"   // 画面旋转/水平镜像（REQ-VIDEO-012）
-	MethodContactExport     = "contact.export"       // 导出通信录 CSV（REQ-WS-015）
-	MethodContactImport     = "contact.import"       // 导入通信录 CSV（REQ-WS-015）
+	MethodDial              = "call.dial"              // 拨号
+	MethodAnswer            = "call.answer"            // 接听
+	MethodHangup            = "call.hangup"            // 挂断
+	MethodReject            = "call.reject"            // 拒接
+	MethodMute              = "call.mute"              // 保持（静音）
+	MethodMuteMic           = "call.muteMic"           // 麦克风开关（纯本地，REQ-UI-023）
+	MethodMuteSpeaker       = "call.muteSpeaker"       // 扬声器开关（纯本地，REQ-UI-023）
+	MethodSetMicGain        = "call.setMicGain"        // 麦克风增益百分比（0–200，0 = 禁用；REQ-MEDIA-006）
+	MethodSetSpeakerVolume  = "call.setSpeakerVolume"  // 扬声器音量百分比（0–100，0 = 禁用；REQ-MEDIA-006）
+	MethodSetVideo          = "call.setVideo"          // 视频总开关（纯本地，REQ-VIDEO-008）
+	MethodDTMF              = "call.dtmf"              // 发送 DTMF（RFC 4733，REQ-CALL-006）
+	MethodGetState          = "system.getState"        // 查询状态
+	MethodSetAutoAnswer     = "system.setAutoAnswer"   // 自动接听开关（桌面按钮与网页共用一份）
+	MethodSetUpdateConfig   = "system.setUpdateConfig" // 自动更新配置（站点/应用 ID/周期/预览版，REQ-UPD-018）
+	MethodNotifyUpdate      = "system.notifyUpdate"    // 前端强制推送新版本
+	MethodVideoSubscribe    = "video.subscribe"        // 订阅视频画面（REQ-VIDEO-009）
+	MethodVideoUnsubscribe  = "video.unsubscribe"      // 退订视频画面
+	MethodVideoSetTransform = "video.setTransform"     // 画面旋转/水平镜像（REQ-VIDEO-012）
+	MethodContactExport     = "contact.export"         // 导出通信录 CSV（REQ-WS-015）
+	MethodContactImport     = "contact.import"         // 导入通信录 CSV（REQ-WS-015）
+
+	// —— 网页控制台（REQ-WEB-001 起；仅托盘无 UI 版只有网页这一个界面）——
+	MethodSetVideoPreview = "call.setVideoPreview" // 本地视频回显开关（纯本地）
+
+	MethodCallLogQuery  = "calllog.query"  // 通话记录查询（REQ-WS-017）
+	MethodCallLogDelete = "calllog.delete" // 删除若干条通话记录
+	MethodCallLogClear  = "calllog.clear"  // 清空通话记录
+
+	MethodContactList        = "contact.list"       // 列出全部联系人（REQ-WS-018）
+	MethodContactSave        = "contact.save"       // 新增/修改联系人
+	MethodContactDelete      = "contact.delete"     // 删除联系人
+	MethodContactSetStarred  = "contact.setStarred" // 批量设置/取消常用
+	MethodContactClear       = "contact.clear"      // 清空通信录
+	MethodContactChangedPush = "contact.changed"    // 事件：通信录变更（所有写入路径）
+
+	MethodGetConfig      = "system.getConfig"      // 配置快照（脱敏，REQ-WS-019）
+	MethodSetAccount     = "system.setAccount"     // 修改 SIP 账户
+	MethodAudioDevices   = "audio.devices"         // 枚举音频设备
+	MethodSetAudioConfig = "system.setAudioConfig" // 修改音频配置（设备 + 预处理）
+	MethodVideoDevices   = "video.devices"         // 枚举摄像头
+	MethodSetVideoConfig = "system.setVideoConfig" // 修改视频配置
+	MethodSetLogConfig   = "system.setLogConfig"   // 修改日志配置
+	MethodSetWSPort      = "system.setWSPort"      // 修改本地 WS 端口（重启生效）
+	MethodSetAutoStart   = "system.setAutoStart"   // 开机自启开关
+	MethodRestart        = "system.restart"        // 重启程序（网页确认后）
+	MethodCheckUpdateNow = "system.checkUpdateNow" // 立即检查更新（REQ-UPD-020）
+	MethodUpdateStart    = "update.start"          // 开始下载更新
+	MethodUpdateCancel   = "update.cancel"         // 取消下载
+	MethodUpdateApply    = "update.apply"          // 安装并重启
+	MethodUpdateStatus   = "update.status"         // 更新状态快照
 )
 
 // 事件名。
 const (
-	EvSystemReady     = "system.ready"      // 服务就绪（全局总线事件）
-	EvSystemState     = "system.state"      // 状态快照（连接建立时推送给该连接）
-	EvCallIncoming    = "call.incoming"     // 来电（振铃）
-	EvCallRinging     = "call.ringing"      // 呼出振铃
-	EvCallEstablished = "call.established"  // 通话建立
-	EvCallTerminated  = "call.terminated"   // 通话结束
-	EvCallFailed      = "call.failed"       // 呼叫失败
-	EvCallMuted       = "call.muted"        // 保持（静音）状态变化
-	EvCallAudio       = "call.audio"        // 麦克风/扬声器开关变化（纯本地，REQ-UI-023）
-	EvCallDialing     = "call.dialing"      // 呼出已发起（本地与 WS 拨号共用）
-	EvCallVideo       = "call.video"        // 视频状态变化（协商/开关/对端分辨率，REQ-VIDEO-001）
-	EvVideoWeb        = "video.web"         // 网页视频订阅状态变化（订阅后软电话隐藏视频窗口）
-	EvVideoTransform  = "video.transform"   // 画面旋转/镜像变化（桌面与网页共用一份状态）
-	EvRegisterState   = "register.state"    // 注册状态变化
+	EvSystemReady     = "system.ready"        // 服务就绪（全局总线事件）
+	EvSystemState     = "system.state"        // 状态快照（连接建立时推送给该连接）
+	EvCallIncoming    = "call.incoming"       // 来电（振铃）
+	EvCallRinging     = "call.ringing"        // 呼出振铃
+	EvCallEstablished = "call.established"    // 通话建立
+	EvCallTerminated  = "call.terminated"     // 通话结束
+	EvCallFailed      = "call.failed"         // 呼叫失败
+	EvCallMuted       = "call.muted"          // 保持（静音）状态变化
+	EvCallAudio       = "call.audio"          // 麦克风/扬声器开关变化（纯本地，REQ-UI-023）
+	EvCallDialing     = "call.dialing"        // 呼出已发起（本地与 WS 拨号共用）
+	EvCallVideo       = "call.video"          // 视频状态变化（协商/开关/对端分辨率，REQ-VIDEO-001）
+	EvVideoWeb        = "video.web"           // 网页视频订阅状态变化（订阅后软电话隐藏视频窗口）
+	EvVideoTransform  = "video.transform"     // 画面旋转/镜像变化（桌面与网页共用一份状态）
+	EvRegisterState   = "register.state"      // 注册状态变化
 	EvSystemUpdate    = "system.update"       // 自动更新状态变化（phase/进度/失败原因）
 	EvAutoAnswer      = "system.autoAnswer"   // 自动接听开关变化（桌面与网页共用一份状态）
 	EvUpdateConfig    = "system.updateConfig" // 自动更新配置变化（REQ-UPD-018，桌面与网页共用一份）
+	// EvContactChanged 通信录变更（新增/修改/删除/清空/导入，REQ-WS-018）：
+	// 所有写入路径（桌面界面、网页、CSV/JSON 导入）都会广播，多标签与桌面列表据此刷新。
+	EvContactChanged = "contact.changed"
+	// EvCallLogChanged 通话记录被删除/清空（REQ-WS-017）：新增记录由
+	// call.terminated / call.failed 驱动刷新，这里只覆盖删除类变更。
+	EvCallLogChanged = "calllog.changed"
+	// EvSystemConfig 配置被改写（REQ-WS-019）：section 指明哪一段
+	//（account/audio/video/log/ws/autoStart），values 是生效后的值。
+	EvSystemConfig = "system.config"
+	// EvAudioReady 音频后端就绪（REQ-WS-016）：后台初始化完成，设备列表可枚举。
+	EvAudioReady = "audio.ready"
 )
 
 // newError 构造错误信息。

@@ -145,6 +145,10 @@ declare class SipPhoneSDK {
     os: string;
     arch: string;
     autoAnswer: boolean;
+    /** 仅托盘无 UI 版（REQ-UI-041）：页面据此自动订阅视频、隐藏窗口相关项 */
+    noUI?: boolean;
+    /** 实例槽位（0 = 主实例，≥1 = 沙箱实例） */
+    instance?: number;
     register: { state: string; account: string; reason: string };
     calls: Array<{
       id: string;
@@ -205,6 +209,116 @@ declare class SipPhoneSDK {
 
   /** 取消本连接的视频订阅（软电话恢复显示视频窗口），画面清成黑底；返回两条通道都已退订 */
   unsubscribeVideo(): Promise<{ remote: boolean; local: boolean }>;
+
+  // ---- 通话记录（REQ-WS-017）----
+
+  /** 分页查询通话记录（新的在前）。remote = 按号码子串筛选；limit 默认 50、上限 200 */
+  queryCallLog(filter?: { remote?: string; limit?: number; offset?: number }):
+    Promise<{ records: SipCallRecord[]; total: number; hasMore: boolean }>;
+
+  /** 删除若干条通话记录 */
+  deleteCallLog(callIds: string[]): Promise<{ deleted: number }>;
+
+  /** 清空全部通话记录（不可撤销） */
+  clearCallLog(): Promise<{ deleted: number }>;
+
+  // ---- 通信录增删改查（REQ-WS-018）----
+
+  /**
+   * 列出联系人。给了 query 就在软电话侧过滤：支持**音头拼音 / 全拼 / 汉字混合**
+   * （"zs"/"zhangsan"/"张三" 都能命中「张三」）、号码与备注子串、号码纯数字写法，
+   * 与桌面通信录页同一份实现；结果按拼音排序（空名称最前）。
+   */
+  listContacts(filter?: { query?: string }):
+    Promise<{ count: number; total: number; contacts: SipContactJSON[] }>;
+
+  /** 新增或修改联系人（prevNumber = 改号前的号码）；号码重复以 invalid_params 拒绝 */
+  saveContact(contact: SipContactInput, prevNumber?: string):
+    Promise<{ contact: SipContactJSON; count: number }>;
+
+  /** 按号码（任意写法）删除联系人 */
+  deleteContacts(numbers: string[]): Promise<{ deleted: number; count: number }>;
+
+  /** 批量设置/取消常用 */
+  setContactsStarred(numbers: string[], starred: boolean):
+    Promise<{ updated: number; count: number }>;
+
+  /** 清空通信录（不可撤销） */
+  clearContacts(): Promise<{ deleted: number; count: number }>;
+
+  // ---- 配置读写（REQ-WS-019）----
+
+  /** 配置快照：账户（**不含密码**，只有 passwordSet）、音频、视频、日志、WS、更新、自启 */
+  getConfig(): Promise<SipAppConfig>;
+
+  /** 修改 SIP 账户（只改传入字段）。密码只写不读：password 改密码 / clearPassword 清空 */
+  setAccount(patch: SipAccountPatch): Promise<SipAccountSnapshot>;
+
+  /** 枚举音频设备。ready=false 表示"还在枚举/不可用"，此时列表为空（不要当成没有设备） */
+  listAudioDevices(): Promise<{
+    mics: SipAudioDevice[];
+    speakers: SipAudioDevice[];
+    ready: boolean;
+    preprocessSupported: boolean;
+  }>;
+
+  /** 修改音频配置（只改传入字段）：设备立即生效，AEC/NS/AGC 从下一通电话生效 */
+  setAudioConfig(patch: {
+    micId?: string; speakerId?: string; ringSpeakerId?: string;
+    aec?: boolean; ns?: boolean; agc?: boolean;
+  }): Promise<SipAudioConfig>;
+
+  /** 枚举摄像头 */
+  listVideoDevices(): Promise<{
+    cameras: SipVideoDevice[];
+    supported: boolean;
+    cameraSupported: boolean;
+  }>;
+
+  /** 修改视频配置（只改传入字段）：enabled 立即生效，摄像头与采集参数下一通生效 */
+  setVideoConfig(patch: {
+    enabled?: boolean; cameraId?: string; cameraName?: string;
+    width?: number; height?: number; fps?: number; bitrateKbps?: number;
+  }): Promise<SipVideoConfig>;
+
+  /** 修改日志配置：级别与 sipTrace 立即生效，file/console 重启后生效 */
+  setLogConfig(patch: {
+    level?: 'debug' | 'info' | 'warn' | 'error'; dir?: string;
+    file?: boolean; console?: boolean; sipTrace?: boolean;
+  }): Promise<SipLogConfig>;
+
+  /**
+   * 修改「网页接入」配置（重启后生效）：监听端口 / 是否允许远程连接（可选，只改传入的）。
+   * ⚠️ 允许远程 = 监听 0.0.0.0 且不做来源限制，而网页接口**没有鉴权**。
+   */
+  setWSPort(port?: number, allowRemote?: boolean):
+    Promise<{ port: number; allowRemote: boolean; actualPort: number; restartRequired: boolean }>;
+
+  /** 开/关开机自启（沙箱实例不支持，返回 config_unavailable） */
+  setAutoStart(enabled: boolean): Promise<{ enabled: boolean }>;
+
+  /** 重启软电话（先回响应再重启，resolve 后连接随时会断开） */
+  restartApp(): Promise<{ restarting: boolean }>;
+
+  // ---- 自动更新（REQ-UPD-020：网页可触发下载/安装，仍须用户点击）----
+
+  /** 更新状态快照（一般用 system.update 事件，这里供初始化查询） */
+  updateStatus(): Promise<SipUpdateStatus>;
+
+  /** 开始下载已告知的新版本（进度走 system.update 事件） */
+  startUpdate(): Promise<SipUpdateStatus>;
+
+  /** 取消下载 */
+  cancelUpdate(): Promise<SipUpdateStatus>;
+
+  /** 安装已下载好的更新并重启（要求 phase === 'ready'） */
+  applyUpdate(): Promise<{ phase: string; applying: boolean }>;
+
+  /** 立即检查一次更新站点 */
+  checkUpdateNow(): Promise<{
+    skipped: boolean; upToDate: boolean; latestVersion: string;
+    notified: boolean; reason: string; text: string; currentVersion: string;
+  }>;
 
   /** 清空已订阅的画面（黑底）；关闭视频/挂断/退订时 SDK 会自动调用 */
   clearVideo(): void;
@@ -431,6 +545,140 @@ interface SipUpdateStatus {
   waitingCall?: boolean;
   /** 失败原因（中文，面向用户） */
   error?: string;
+}
+
+/** 一条通话记录（REQ-WS-017）。时间戳为毫秒整数，0 = 未发生（未接通/进行中）。 */
+interface SipCallRecord {
+  callId: string;
+  direction: 'incoming' | 'outgoing';
+  remote: string;
+  remoteName: string;
+  startedAt: number;
+  /** 0 = 未接通 */
+  answeredAt: number;
+  /** 0 = 进行中 */
+  endedAt: number;
+  hasVideo: boolean;
+  /** 呼入且未接通（本端拒接/挂断不算未接） */
+  missed: boolean;
+  reason: string;
+  /** 号码命中通信录时的条目（软电话侧按号码规范化解析，口径同桌面通话记录页） */
+  contact?: SipContactInfo;
+}
+
+/** 通信录条目（与 GET /api/contacts 的字段一致） */
+export interface SipContactJSON {
+  number: string;
+  name: string;
+  note: string;
+  starred: boolean;
+}
+
+/** 新增/修改联系人的入参 */
+interface SipContactInput {
+  number: string;
+  name?: string;
+  note?: string;
+  starred?: boolean;
+}
+
+/** 音频设备（麦克风/扬声器） */
+interface SipAudioDevice {
+  id: string;
+  name: string;
+}
+
+/** 摄像头（id 在 Windows 侧每次启动可能变，name 是稳定的兜底标识） */
+interface SipVideoDevice {
+  id: string;
+  name: string;
+}
+
+/** 音频配置（含后端状态） */
+interface SipAudioConfig {
+  micId: string;
+  speakerId: string;
+  ringSpeakerId: string;
+  aec: boolean;
+  ns: boolean;
+  agc: boolean;
+  ready: boolean;
+  preprocessSupported: boolean;
+}
+
+/** 视频配置（含构建/设备能力） */
+interface SipVideoConfig {
+  enabled: boolean;
+  disabled: boolean;
+  cameraId: string;
+  cameraName: string;
+  width: number;
+  height: number;
+  fps: number;
+  bitrateKbps: number;
+  supported: boolean;
+  cameraSupported: boolean;
+  /** 表示"禁用摄像头"的取值（下拉框的「禁用」项用它） */
+  cameraDisabled: string;
+}
+
+/** 日志配置 */
+interface SipLogConfig {
+  level: string;
+  dir: string;
+  file: boolean;
+  console: boolean;
+  sipTrace: boolean;
+}
+
+/** SIP 账户快照（**不含密码**，只有 passwordSet） */
+interface SipAccountSnapshot {
+  enabled: boolean;
+  server: string;
+  port: number;
+  expires: number;
+  rport: boolean;
+  optchk: boolean;
+  stunEnabled: boolean;
+  stunServer: string;
+  proxy: string;
+  transport: 'udp' | 'tcp' | 'tls';
+  tlsVerify: boolean;
+  /** 媒体加密四档：off / supported / preferred / required */
+  srtp: string;
+  domain: string;
+  publicIP: string;
+  account: string;
+  authUser: string;
+  displayName: string;
+  passwordSet: boolean;
+}
+
+/** 账户补丁：只改传入的字段；password 改密码、clearPassword 清空（都不传 = 不改） */
+interface SipAccountPatch extends Partial<Omit<SipAccountSnapshot, 'passwordSet'>> {
+  password?: string;
+  clearPassword?: boolean;
+}
+
+/** 配置快照（system.getConfig） */
+interface SipAppConfig {
+  version: string;
+  os: string;
+  arch: string;
+  account: SipAccountSnapshot;
+  audio: SipAudioConfig;
+  video: SipVideoConfig;
+  log: SipLogConfig;
+  ws: {
+    /** 配置里的期望端口 */
+    port: number;
+    /** 当前进程实际监听的端口 */
+    actualPort: number;
+    /** 是否允许远程连接（监听 0.0.0.0、不拒绝非回环来源）；默认 false */
+    allowRemote: boolean;
+  };
+  update: SipUpdateConfig;
+  autoStart: boolean;
 }
 
 export = SipPhoneSDK;

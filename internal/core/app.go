@@ -11,6 +11,7 @@ import (
 
 	"mti-sip-phone/internal/config"
 	"mti-sip-phone/internal/logx"
+	"mti-sip-phone/internal/variant"
 )
 
 // RegisterState 注册状态。
@@ -82,6 +83,14 @@ type State struct {
 	// UpdateConfig 自动更新配置（站点/应用 ID/周期/预览版，REQ-UPD-017）：
 	// 网页连上就能拿到当前值，也可用 system.setUpdateConfig 改写
 	UpdateConfig config.UpdateConfig `json:"updateConfig"`
+	// RecentDial 最近呼叫号码（最多 5 个，最新的在前）：网页控制台的拨号下拉用
+	RecentDial []string `json:"recentDial"`
+	// NoUI 当前进程是「仅托盘无 UI 版」（REQ-UI-041）：网页控制台据此调整——
+	// 没有桌面视频窗口，所以自动订阅视频、隐藏「保留软电话窗口」、不允许取消订阅。
+	NoUI bool `json:"noUI,omitempty"`
+	// Instance 本进程的实例槽位（0 = 主实例，≥1 = 沙箱实例，REQ-NFR-007）：
+	// 网页控制台在诊断页拼 sip:// 拉起链接时要带上它，否则拉起来的是主实例。
+	Instance int `json:"instance"`
 }
 
 // 常见错误，供接口层映射为错误码。
@@ -123,8 +132,19 @@ type App struct {
 	// 变更后广播 system.autoAnswer，见 SetAutoAnswer）
 	autoAnswer bool
 
+	// instance 实例槽位（0 = 主实例），见 SetInstanceSlot
+	instance int
+
 	// audioPub 音量/增益事件的合并发布（REQ-MEDIA-006，见 audio.go）
 	audioPub audioPublisher
+
+	// 配置类能力的外部实现（见 settings.go；都是 nil = 未接入）：
+	// audioCtl 音频设备枚举与选择；sipTraceCtl SIP 信令记录开关；
+	// autoStartCtl 开机自启项注册/移除；restartFn 重启程序（标记 + 取消 ctx）。
+	audioCtl     AudioControl
+	sipTraceCtl  func(bool)
+	autoStartCtl func(bool) error
+	restartFn    func() error
 }
 
 // AutoAnswerState 自动接听开关状态（system.autoAnswer 事件负载）。
@@ -187,6 +207,11 @@ func (a *App) UpdateAccount(acc config.Account) error {
 	return nil
 }
 
+// SetInstanceSlot 记录实例槽位（0 = 主实例，≥1 = 沙箱实例，REQ-NFR-007）。
+// 仅供对外展示（State.Instance）：网页控制台在诊断页拼 sip:// 拉起链接时
+// 要带上它，否则拉起来的是主实例而不是当前这个沙箱实例。
+func (a *App) SetInstanceSlot(slot int) { a.instance = slot }
+
 // SetConfigPath 设置配置保存路径（供 UpdateAccount 落盘）。
 func (a *App) SetConfigPath(path string) { a.cfgPath = path }
 
@@ -222,15 +247,19 @@ func (a *App) State() State {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	st := State{
-		Version:    Version,
-		OS:         runtime.GOOS,
-		Arch:       runtime.GOARCH,
-		Register:   a.reg,
-		Calls:      make([]Call, 0, len(a.callOrder)),
-		Update:     upd,
+		Version:      Version,
+		OS:           runtime.GOOS,
+		Arch:         runtime.GOARCH,
+		Register:     a.reg,
+		Calls:        make([]Call, 0, len(a.callOrder)),
+		Update:       upd,
 		Video:        a.videoTx,
 		AutoAnswer:   a.autoAnswer,
 		UpdateConfig: a.cfg.Update,
+		// 最近呼叫号码（网页控制台的拨号下拉用；桌面端读 RecentDials）
+		RecentDial: append([]string(nil), a.cfg.RecentDial...),
+		NoUI:       variant.NoUI,
+		Instance:   a.instance,
 	}
 	for _, id := range a.callOrder {
 		c := *a.calls[id]

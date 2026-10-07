@@ -35,6 +35,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"mti-sip-phone/internal/contactsearch"
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
 )
@@ -105,7 +106,7 @@ type contactsState struct {
 // contactEntry 一行数据：联系人与它的拼音索引（索引只建一次，搜索与排序共用）。
 type contactEntry struct {
 	c   core.Contact
-	idx nameIndex
+	idx contactsearch.Index
 }
 
 // contactKey 行的唯一键（规范化号码）。
@@ -174,7 +175,8 @@ func (a *App) showContacts() {
 		a.showInfo("提示", "通话中无法查看通信录")
 		return
 	}
-	a.hideTip() // 切页时收起备注提示
+	a.hideTip()         // 切页时收起备注提示
+	a.hideDialSuggest() // 拨号建议下拉同理
 	a.mainContent.Objects[0] = a.contactsPage
 	a.mainContent.Refresh()
 	a.contacts.reload()
@@ -230,12 +232,12 @@ func (st *contactsState) reload() {
 	list := st.a.core.Contacts()
 	all := make([]contactEntry, 0, len(list))
 	for _, c := range list {
-		all = append(all, contactEntry{c: c, idx: newNameIndex(c.Name)})
+		all = append(all, contactEntry{c: c, idx: contactsearch.NewIndex(c.Name)})
 	}
 	// 排序：名称按拼音（空名称排最前，用户刚建好还没起名的条目一眼能看到），
 	// 同音/同名再按规范化号码，结果稳定
 	sort.SliceStable(all, func(i, j int) bool {
-		ki, kj := all[i].idx.sortKey(), all[j].idx.sortKey()
+		ki, kj := all[i].idx.SortKey(), all[j].idx.SortKey()
 		if ki != kj {
 			return ki < kj
 		}
@@ -274,27 +276,10 @@ func (st *contactsState) applyFilter() {
 	}
 }
 
-// match 行是否命中搜索词（空搜索词 = 全部命中）。
+// match 行是否命中搜索词：规则在 internal/contactsearch（**与网页控制台共用一份**，
+// 含音头/全拼/汉字/号码/备注/纯数字，改那边两边同时生效）。
 func (st *contactsState) match(e contactEntry) bool {
-	q := strings.TrimSpace(st.query)
-	if q == "" {
-		return true
-	}
-	lq := strings.ToLower(q)
-	if matchName(e.idx, lq) {
-		return true
-	}
-	if strings.Contains(strings.ToLower(e.c.Number), lq) {
-		return true
-	}
-	if strings.Contains(strings.ToLower(e.c.Note), lq) {
-		return true
-	}
-	// 号码的纯数字写法也匹配：输入 138 命中 +86 138-0000-0000
-	if d := digitsOnly(lq); d != "" && strings.Contains(digitsOnly(e.c.Number), d) {
-		return true
-	}
-	return false
+	return contactsearch.Match(e.idx, e.c.Number, e.c.Note, st.query)
 }
 
 // scheduleSearch 搜索输入防抖：停止输入后统一重过滤一次。

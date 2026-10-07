@@ -123,7 +123,7 @@ func (a *App) ImportContactsJSON(data []byte) (ContactImportResult, error) {
 		return ContactImportResult{}, err
 	}
 	res := ContactImportResult{Skipped: skipped}
-	if err := a.mutateContacts(func() error {
+	if err := a.mutateContacts("import", func() error {
 		added, updated, err := a.contacts.Merge(list)
 		res.Added, res.Updated = added, updated
 		return err
