@@ -1,0 +1,292 @@
+/* mti-sip-phone 网页控制端样式。
+   基础部分沿用原测试页（web/test.html）的观感：浅色卡片、圆角、紧凑控件；
+   1.0.15 起新增应用外壳（顶栏导航 / 常驻通话条 / 多视图 / 表格 / 弹窗 / toast）。
+   所有请求响应内嵌在二进制里，改完必须重新构建 + 重启软电话才生效。 */
+  :root {
+    --bg: #f5f6f8; --card: #fff; --border: #e2e5ea; --text: #1f2329;
+    --primary: #2563eb; --primary-hover: #1d4ed8;
+    --green: #16a34a; --red: #dc2626; --gray: #6b7280; --warn: #d97706;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: var(--gray); font-size: 13px; margin-bottom: 20px; }
+  /* 三栏：左=控制，中=视频，右=事件日志。minmax(0,1fr) 允许列收缩，
+     防止日志长行把列的最小宽度撑大、挤压其他列 */
+  .grid {
+    display: grid; gap: 16px; max-width: 1420px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr);
+  }
+  @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  }
+  .card h2 { font-size: 15px; margin-bottom: 12px; }
+  .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 12px; background: #eef0f3; color: var(--gray);
+  }
+  .badge.ok { background: #dcfce7; color: var(--green); }
+  .badge.err { background: #fee2e2; color: var(--red); }
+  .badge.warn { background: #fef3c7; color: var(--warn); }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  label { font-size: 13px; color: var(--gray); min-width: 70px; }
+  /* 勾选行：开关 + 说明文字（label 的最小宽度在这里不需要） */
+  .check {
+    display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+    font-size: 13px; color: var(--text); cursor: pointer;
+  }
+  .check input { width: 16px; height: 16px; cursor: pointer; margin: 0; }
+  input[type=text], input[type=number] {
+    flex: 1; min-width: 120px; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: 6px; font-size: 14px; outline: none;
+  }
+  input:focus { border-color: var(--primary); }
+  button {
+    padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 14px; background: var(--primary); color: #fff; transition: background .15s;
+  }
+  button:hover { background: var(--primary-hover); }
+  button:disabled { background: #cbd5e1; cursor: not-allowed; }
+  button.green { background: var(--green); }
+  button.red { background: var(--red); }
+  button.gray { background: #6b7280; }
+  button.yellow { background: var(--warn); }
+  button.ghost { background: #fff; color: var(--text); border: 1px solid var(--border); }
+  /* 图标按钮：与软电话通话面板一致的观感——开=蓝底白图标，关=浅灰底红图标 */
+  .icon-btn {
+    width: 38px; height: 38px; padding: 0; border-radius: 8px; border: none;
+    display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+    background: var(--primary); color: #fff;
+  }
+  .icon-btn.off { background: #e5e7eb; }
+  .icon-btn:hover { filter: brightness(0.95); }
+  .icon-btn svg { display: block; }
+  /* 旋转/镜像：未订阅时置灰不可点（订阅后才可操作） */
+  .icon-btn:disabled { background: #3a3f46; opacity: .45; cursor: not-allowed; }
+  #callArea {
+    background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px;
+    padding: 14px; margin-bottom: 12px;
+  }
+  #callArea .caller { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  #callArea .hint { font-size: 12px; color: var(--gray); margin-bottom: 10px; }
+  #timer { font-variant-numeric: tabular-nums; color: var(--gray); font-size: 13px; }
+  /* 扬声器 / 麦克风各一行（REQ-MEDIA-006）：左边开关按钮，右边滑块 + 百分比 */
+  .media-line { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .media-line input[type=range] { flex: 1; min-width: 70px; accent-color: var(--primary); cursor: pointer; }
+  .media-line .vol-val {
+    font-size: 12px; color: var(--gray); width: 44px; text-align: right;
+    font-variant-numeric: tabular-nums; flex: none;
+  }
+  #log {
+    height: 360px; overflow-y: auto; background: #0f172a; color: #cbd5e1;
+    border-radius: 8px; padding: 10px; font-family: Consolas, Monaco, monospace;
+    font-size: 12px; line-height: 1.7;
+    /* 长行（如状态快照 JSON）强制换行，防止撑破 grid 列宽 */
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  #log .t { color: #64748b; }
+  #log .ev { color: #93c5fd; }
+  #log .ok { color: #86efac; }
+  #log .err { color: #fca5a5; }
+  #log .info { color: #cbd5e1; }
+  .state-line { font-size: 13px; color: var(--gray); margin-top: 6px; word-break: break-all; }
+  /* DTMF 拨号盘：3×4 紧凑按键，通话接通后在通话控制卡片里出现 */
+  /* 通信录卡片：四个按钮两行两列对齐（每列等宽、按钮撑满格子） */
+  .contacts-actions {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+  }
+  .contacts-actions button { width: 100%; }
+  .dtmf-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 10px; max-width: 210px; }
+  .dtmf-pad button { padding: 6px 0; font-size: 14px; }
+  /* 站点版本列表（自动更新卡片）：小一号字、紧凑列表，右侧是黄色的「推送」按钮。
+     文字用正文色（不用灰色，否则和旁边的提示文字混在一起），版本号加粗。 */
+  .upd-list { list-style: none; margin: 6px 0 0; padding: 0; }
+  .upd-list li {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--text); padding: 3px 0;
+  }
+  .upd-list li .txt { flex: 1; word-break: break-all; }
+  .upd-list li .txt b { font-weight: 600; }
+  .upd-list li button { padding: 3px 10px; font-size: 12px; }
+  select {
+    padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 13px; background: #fff; outline: none;
+  }
+  label.chk {
+    min-width: auto; display: inline-flex; align-items: center; gap: 4px;
+    color: var(--text); font-size: 13px; cursor: pointer;
+  }
+  .vlabel {
+    font-size: 12px; color: var(--gray); margin-bottom: 4px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .vlabel .badge { padding: 1px 8px; font-variant-numeric: tabular-nums; }
+  /* 远端/本地竖排：单列铺满列宽，画面尽量大 */
+  /* 远端 / 本地两路**并排**（两列）并压矮：原来竖排单列时右列特别高，通话页会顶出
+     一条竖向滚动条（用户要求并排、别再滚动）。窄屏（≤1100px）仍回落竖排，免得画面太小。 */
+  .video-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+  @media (max-width: 1100px) { .video-grid { grid-template-columns: 1fr; } }
+  /* 订阅参数：四格一行，标签在上、控件在下，窄列也不折行 */
+  .filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .filters label { min-width: 0; font-size: 12px; }
+  .filters select { width: 100%; margin-top: 4px; padding: 6px 6px; }
+  .video-grid video {
+    width: 100%; display: block; background: #000; border-radius: 8px;
+    aspect-ratio: 4 / 3; object-fit: contain;
+    /* 并排后单路高度约 200px：看得清，又不把页面顶出滚动条 */
+    max-height: 200px;
+  }
+
+/* ⚠️ hidden 属性只是 UA 样式（display:none），**任何作者样式里的 display 都会盖掉它**：
+   "用 display 布局 + 用 hidden 显隐"的元素会一直显示（踩过两次——常驻通话条在没通话时
+   显示成一条黄色空条、no-ui 下两个勾选项该藏没藏）。这里统一兜底：带 hidden 就看不见。 */
+[hidden] { display: none !important; }
+
+/* ============ 应用外壳（1.0.15 起，网页控制端） ============ */
+
+/* 页面整体：顶栏固定、下方视图区；比测试页更紧凑（内边距小、无 H1） */
+body.app { padding: 0; }
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 10px 20px; background: #fff; border-bottom: 1px solid var(--border);
+}
+.topbar .brand { font-size: 15px; font-weight: 600; }
+.topbar .brand small { color: var(--gray); font-weight: 400; margin-left: 6px; }
+.tabs { display: flex; gap: 4px; flex: 1; }
+.tabs a {
+  padding: 6px 14px; border-radius: 6px; text-decoration: none;
+  color: var(--text); font-size: 14px;
+}
+.tabs a:hover { background: #eef2f7; }
+.tabs a.active { background: var(--primary); color: #fff; }
+.topstatus { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--gray); }
+.topstatus .acct { font-variant-numeric: tabular-nums; }
+/* 顶栏的全局更新徽章：可点（跳到通话页看详情），所以要手型与悬停反馈 */
+.topstatus a.badge { text-decoration: none; cursor: pointer; }
+.topstatus a.badge:hover { filter: brightness(0.95); }
+
+/* 常驻通话条：有通话（含振铃）时显示，任何视图下都能接听/挂断 */
+.call-bar {
+  position: sticky; top: 49px; z-index: 19;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 20px; background: #fff7ed; border-bottom: 1px solid #fed7aa;
+}
+.call-bar .who { font-weight: 600; }
+.call-bar .st { color: var(--gray); font-size: 13px; }
+.call-bar .spacer { flex: 1; }
+.call-bar.ringing { background: #ecfdf5; border-color: #a7f3d0; }
+
+main { padding: 20px; }
+.view { display: block; }
+.view[hidden] { display: none; }
+.view > .grid {
+  display: grid; gap: 16px; max-width: 1420px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+}
+@media (max-width: 1100px) { .view > .grid { grid-template-columns: 1fr; } }
+
+/* 字段堆叠：标签在上、控件在下（与桌面配置页同款） */
+.field { margin-bottom: 10px; }
+.field > label { display: block; font-size: 12px; color: var(--gray); margin-bottom: 4px; min-width: 0; }
+.field > input, .field > select { width: 100%; }
+.field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.field-row-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.hint-text { font-size: 12px; color: var(--gray); margin-top: 6px; line-height: 1.6; }
+
+/* 列表/表格：紧凑行，行内按钮靠右 */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th, .tbl td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.tbl th { color: var(--gray); font-weight: 500; font-size: 12px; }
+.tbl tr:hover td { background: #f8fafc; }
+.tbl td.num { font-variant-numeric: tabular-nums; }
+.tbl td.acts { text-align: right; white-space: nowrap; }
+.tbl td.acts button { padding: 4px 10px; font-size: 12px; margin-left: 4px; }
+.tbl .missed { color: var(--red); }
+.tbl .star { cursor: pointer; font-size: 15px; color: #cbd5e1; user-select: none; }
+.tbl .star.on { color: #f59e0b; }
+.list-foot { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.list-foot .total { color: var(--gray); font-size: 13px; }
+
+/* 弹窗（表单用）：遮罩 + 居中卡片 */
+.modal-mask {
+  position: fixed; inset: 0; background: rgba(15,23,42,.45);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.modal-mask[hidden] { display: none; }
+.modal {
+  background: #fff; border-radius: 10px; padding: 18px 20px; width: min(460px, 92vw);
+  box-shadow: 0 10px 40px rgba(0,0,0,.2);
+}
+.modal h3 { font-size: 15px; margin-bottom: 12px; }
+/* 弹窗里的勾选框：别被 .field > input{width:100%} 撑成一条横贯整行的框
+   （通信录编辑窗里"设为常用"就是这么跑中间的） */
+.modal .field > input[type=checkbox] { width: auto; margin-top: 2px; }
+.modal .modal-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* toast：右下角短提示 */
+#toast {
+  position: fixed; right: 20px; bottom: 20px; z-index: 60;
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+}
+#toast .item {
+  background: #1f2937; color: #fff; padding: 8px 14px; border-radius: 8px;
+  font-size: 13px; max-width: 380px; box-shadow: 0 4px 14px rgba(0,0,0,.2);
+}
+#toast .item.err { background: var(--red); }
+#toast .item.ok { background: var(--green); }
+
+/* 配置页分组 */
+.settings-grid { display: grid; gap: 16px; max-width: 1100px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 1000px) { .settings-grid { grid-template-columns: 1fr; } }
+.card .save-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.card .save-row .hint-text { margin: 0; flex: 1; }
+details.diag { border: 1px solid var(--border); border-radius: 10px; padding: 10px 16px; background: #fff; }
+details.diag > summary { cursor: pointer; font-size: 14px; font-weight: 500; }
+details.diag .body { margin-top: 10px; }
+
+/* 通话记录行里的 ★ 是只读标记（不是切换按钮）：去掉手型光标 */
+.tbl .star.ro { cursor: default; }
+
+/* 通话记录的方向列：箭头 / 摄像头图标并排，垂直居中对齐 */
+.tbl td.dir { white-space: nowrap; }
+.tbl .dir-icon { display: inline-flex; vertical-align: middle; margin-right: 4px; }
+.tbl .dir-icon svg { display: block; }
+
+/* 只读的金色 ★（对端展示用，通话条/通话卡片/通话记录三处共用）：
+   通信录页里的 ★ 是可点的切换按钮（.tbl .star），这里只是标记，不响应点击 */
+.star-mark { color: #f59e0b; margin-left: 2px; }
+.star-mark.ro { cursor: default; }
+
+/* 每路画面自己的表头：左名称 + 统计角标，右两个变换按钮（与该路画面同一列对齐） */
+.video-grid .vhead {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 6px; margin-bottom: 4px;
+}
+.video-grid .vhead .vlabel { margin-bottom: 0; }
+.video-grid .vacts { display: flex; gap: 4px; flex: none; }
+.video-grid .vacts .icon-btn { width: 30px; height: 30px; border-radius: 6px; }
+
+/* 拨号输入框的下拉建议（最近呼叫 + 通信录匹配）：
+   输入框外面套一层 position:relative 的 span，下拉绝对定位贴在它下面，
+   不挤压下面的拨号盘（用 Stack 布局的窗口里，撑高会把按键挤下去）。 */
+.suggest-wrap { position: relative; flex: 1; min-width: 120px; display: block; }
+.suggest-wrap > input { width: 100%; }
+.suggest {
+  position: absolute; left: 0; right: 0; top: calc(100% + 2px); z-index: 30;
+  background: #fff; border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.12); max-height: 280px; overflow-y: auto;
+}
+.suggest .grp { font-size: 11px; color: var(--gray); padding: 6px 10px 2px; }
+.suggest .item {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 6px 10px; font-size: 13px; cursor: pointer;
+}
+.suggest .item:hover, .suggest .item.active { background: #eef2f7; }
+.suggest .item .num { font-variant-numeric: tabular-nums; color: var(--text); }
+.suggest .item .name { color: var(--gray); }

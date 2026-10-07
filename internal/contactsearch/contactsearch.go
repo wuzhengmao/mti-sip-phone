@@ -1,15 +1,15 @@
-package ui
-
-// 通信录的拼音索引、搜索匹配与排序（REQ-UI-035）。
+// Package contactsearch 通信录的拼音索引、搜索匹配与排序（REQ-UI-035）。
 //
-// 放在 ui 层的理由：只有通信录页面用得到拼音，核心层与 WS 层都不需要
-// （网页端不做增删改查，只导入导出）。go-pinyin 依赖因此只进 UI 包。
+// **桌面通信录页与网页控制台共用这一份实现**（原来只在 internal/ui 里，
+// 网页的搜索因此只有号码/名称的字面子串匹配——拼音搜索是"没了"）。放到独立包
+// 是因为两个消费者在对侧：ui 是 Fyne 界面，wsapi 是 WS 层，谁也 import 不了谁。
 //
 // 搜索要支持**音头（首字母）、全拼、汉字**的任意组合，例如「张三」用
 // zs / zhangsan / zhangs / 张三 / 张san 都能命中。做法是逐字符建候选音节，
-// 再用"逐字符推进"的匹配（见 matchName）：每个字符允许三种消耗方式——
+// 再用"逐字符推进"的匹配（见 Match）：每个字符允许三种消耗方式——
 // 吃掉一整个音节、把查询串的剩余部分当成该音节的前缀（首字母就在此列）、
 // 或直接匹配字符本身。
+package contactsearch
 
 import (
 	"strings"
@@ -29,7 +29,7 @@ var pinyinArgs = func() pinyin.Args {
 }()
 
 // pinyinCache 单字符 → 候选音节（小写）。联系人列表里同一个字反复出现，
-// 逐字符查字典一次即可；界面线程与后台加载都可能在用，加锁保护。
+// 逐字符查字典一次即可；多个 goroutine（界面线程、WS 连接）都可能在用，加锁保护。
 var (
 	pinyinCacheMu sync.Mutex
 	pinyinCache   = map[rune][]string{}
@@ -61,18 +61,18 @@ func syllablesOf(r rune) []string {
 	return cands
 }
 
-// nameIndex 一个名称的搜索索引。
-type nameIndex struct {
+// Index 一个名称的搜索索引。
+type Index struct {
 	raw       []rune     // 原名称（逐字符，用于汉字/字母直接匹配）
 	syllables [][]string // 逐字符候选音节（小写），与 raw 一一对应
 	full      string     // 逐字符首选音节拼接（排序键：张三 → zhangsan）
 }
 
-// newNameIndex 构建名称索引。空名称得到空索引（排序时排最前、匹配时只可能
+// NewIndex 构建名称索引。空名称得到空索引（排序时排最前、匹配时只可能
 // 命中空查询）。
-func newNameIndex(name string) nameIndex {
+func NewIndex(name string) Index {
 	raw := []rune(name)
-	idx := nameIndex{raw: raw, syllables: make([][]string, 0, len(raw))}
+	idx := Index{raw: raw, syllables: make([][]string, 0, len(raw))}
 	var full strings.Builder
 	for _, r := range raw {
 		cands := syllablesOf(r)
@@ -83,11 +83,11 @@ func newNameIndex(name string) nameIndex {
 	return idx
 }
 
-// sortKey 排序键（全拼；空名称得到空串 → 排在最前）。
-func (idx nameIndex) sortKey() string { return idx.full }
+// SortKey 排序键（全拼；空名称得到空串 → 排在最前）。
+func (idx Index) SortKey() string { return idx.full }
 
-// matchName 名称是否匹配查询串（音头/全拼/汉字混合）。空查询视为命中。
-func matchName(idx nameIndex, query string) bool {
+// Match 名称是否匹配查询串（音头/全拼/汉字混合）。空查询视为命中。
+func (idx Index) Match(query string) bool {
 	q := []rune(strings.ToLower(strings.TrimSpace(query)))
 	if len(q) == 0 {
 		return true
@@ -122,7 +122,7 @@ func matchName(idx nameIndex, query string) bool {
 //
 // 要求名称的匹配是**连续一段**（中间不能跳过字符），这是搜索质量的关键：
 // 宽松的子序列匹配在长名称上会命中一堆无关记录。
-func matchFrom(idx nameIndex, i int, q []rune, j int, memo []uint8) bool {
+func matchFrom(idx Index, i int, q []rune, j int, memo []uint8) bool {
 	if j == len(q) {
 		return true // 查询串已全部消耗（名称剩余字符不再要求）
 	}
@@ -183,8 +183,8 @@ func hasRunePrefix(s, prefix []rune) bool {
 	return true
 }
 
-// digitsOnly 只保留数字与开头的 +（用于"输入 138 命中 +86 138-0000-0000"）。
-func digitsOnly(s string) string {
+// DigitsOnly 只保留数字与开头的 +（用于"输入 138 命中 +86 138-0000-0000"）。
+func DigitsOnly(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {
@@ -199,4 +199,30 @@ func digitsOnly(s string) string {
 		return ""
 	}
 	return out
+}
+
+// Match 一条联系人是否命中搜索词（空搜索词 = 全部命中）。
+//
+// 命中规则（桌面通信录页与网页控制台完全一致，改一处即两边同时生效）：
+// 名称的拼音/音头/汉字匹配，或号码子串、备注子串、号码的纯数字写法。
+// idx 必须是 NewIndex(name) 的结果——同一条联系人的索引要复用（别每次重建）。
+func Match(idx Index, number, note, query string) bool {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return true
+	}
+	lq := strings.ToLower(q)
+	if idx.Match(lq) {
+		return true
+	}
+	if strings.Contains(strings.ToLower(number), lq) {
+		return true
+	}
+	if strings.Contains(strings.ToLower(note), lq) {
+		return true
+	}
+	if d := DigitsOnly(lq); d != "" && strings.Contains(DigitsOnly(number), d) {
+		return true
+	}
+	return false
 }

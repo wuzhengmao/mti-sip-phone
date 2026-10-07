@@ -145,8 +145,18 @@ await sdk.connect();
 
 ### 5.4 通信录
 
-网页侧**不做增删改查**，只提供导入/导出（合并语义：按号码去重、只覆盖号码/名称/备注、
-**常用标志只增不减**）：
+> 1.0.15 起**增删改查已开放**（原来只有导入导出）——无 UI 版没有桌面界面，通信录只能从
+> 网页维护。
+
+| 方法 | 说明 |
+| --- | --- |
+| `listContacts(filter?)` | 列表 `{count, total, contacts:[{number,name,note,starred}]}`；`filter.query` 交给软电话过滤——支持**音头拼音 / 全拼 / 汉字混合**（`zs`/`zhangsan`/`张三`/`张san` 命中「张三」）、号码与备注子串、号码纯数字写法，结果按拼音排序（与桌面通信录页同一份实现） |
+| `saveContact(contact, prevNumber?)` | 新增或修改（`prevNumber` = 改号前的号码）；号码重复/为空以 `invalid_params` 拒绝 |
+| `deleteContacts(numbers)` | 按号码（任意写法，自动规范化）删除 |
+| `setContactsStarred(numbers, starred)` | 批量设置/取消常用（★） |
+| `clearContacts()` | 清空（不可撤销） |
+
+导入/导出（合并语义：按号码去重、只覆盖号码/名称/备注、**常用标志只增不减**）：
 
 | 方法 | 说明 |
 | --- | --- |
@@ -162,13 +172,64 @@ await sdk.connect();
 
 | 方法 | 说明 |
 | --- | --- |
-| `getState()` | 状态快照：版本/平台、注册状态、通话列表（含音频/视频/通信录字段）、更新状态、自动接听开关 |
+| `getState()` | 状态快照：版本/平台、注册状态、通话列表（含音频/视频/通信录字段）、更新状态、自动接听开关、`noUI`（是否仅托盘无 UI 版）、`instance`（实例槽位） |
 | `setAutoAnswer(enabled)` | 自动接听开关（与软电话界面按钮**共用一份状态**，变更广播 `system.autoAnswer`） |
 | `setUpdateConfig(cfg)` | 写入软电话的**自动更新配置**（站点 URL / 应用 ID / 周期 / 预览版）。**软电话据此自己定时查询**更新站点 |
 | `notifyUpdate(info)` | **强制推送**某个版本（联调用）：软电话弹提示，**由用户在软电话界面上确认后**才下载重启 |
 
-> `notifyUpdate` 不触发任何自动下载——这是产品约束（REQ-UPD-009）：**WS 只能"告知"，
-> 下载与重启必须由用户点击**。
+> `notifyUpdate` 只是"告知"（联调/回滚时的强制推送通道）。**下载与安装是另一组方法**
+> （见 5.8），且必须由用户在页面上点击——软电话不做静默安装。
+
+### 5.6 通话记录
+
+| 方法 | 说明 |
+| --- | --- |
+| `queryCallLog({remote?, limit?, offset?})` | 分页查询（新的在前）：`remote` 按号码子串筛选，`limit` 默认 50、上限 200；返回 `{records, total, hasMore}` |
+| `deleteCallLog(callIds)` | 删除若干条 |
+| `clearCallLog()` | 清空（不可撤销） |
+
+记录字段：`callId/direction/remote/remoteName/startedAt/answeredAt/endedAt/hasVideo/missed/reason`，
+命中通信录时另有 `contact: {name, note, starred}`（软电话侧按号码规范化解析，与桌面通话记录页同一口径）。
+**时间戳是毫秒整数，`0` 表示未发生**（`answeredAt: 0` = 未接通，`endedAt: 0` = 进行中）。
+
+展示口径（与桌面一致）：已接通显示通话时长（`answeredAt→endedAt`），未接通来电显示振铃时长
+（`startedAt→endedAt`）、呼出显示拨号时长；`missed: true` 标红。
+
+### 5.7 配置读写
+
+| 方法 | 说明 |
+| --- | --- |
+| `getConfig()` | 配置快照：账户（**不含密码**，只有 `passwordSet`）、音频（含 `ready`）/ 视频（含 `supported`/`cameraSupported`）、日志、`ws{port, actualPort}`、更新、开机自启 |
+| `setAccount(patch)` | 改 SIP 账户：**只改传入的字段**；密码只写不读——`password: "..."` 改密码、`clearPassword: true` 清空，都不传 = 不改。保存后立即重新注册 |
+| `listAudioDevices()` | 枚举音频设备 `{mics, speakers, ready, preprocessSupported}`。**`ready: false` = 还在枚举/不可用**（软电话侧最多等 3 秒先回空列表），页面应提示稍后重试而不是当成"没有设备" |
+| `setAudioConfig(patch)` | 设备（`micId`/`speakerId`/`ringSpeakerId`）立即生效；`aec`/`ns`/`agc`（音频预处理）**下一通电话生效** |
+| `listVideoDevices()` | 枚举摄像头 `{cameras, supported, cameraSupported}` |
+| `setVideoConfig(patch)` | `enabled`（总开关）与摄像头立即生效；`width`/`height`/`fps`/`bitrateKbps` **下一通电话生效** |
+| `setLogConfig(patch)` | 级别与 `sipTrace` 立即生效；`file`/`console` 重启后生效 |
+| `setWSPort(port)` | 返回 `{port, actualPort, restartRequired}`；**重启后生效**，配合 `restartApp()` |
+| `setAutoStart(enabled)` | 开/关开机自启（沙箱实例返回 `config_unavailable`） |
+| `restartApp()` | 重启软电话。⚠️ resolve 之后进程随时退出、连接断开 |
+
+### 5.8 触发更新（下载 / 安装）
+
+```js
+sdk.on('system.update', (st) => {
+  // st.phase: idle / available / downloading / ready / failed
+  if (st.phase === 'available') sdk.startUpdate();        // 开始下载
+  if (st.phase === 'ready')     sdk.applyUpdate();        // 安装并重启
+});
+await sdk.checkUpdateNow();   // 立即检查站点（不用等下一个周期）
+```
+
+| 方法 | 说明 |
+| --- | --- |
+| `updateStatus()` | 更新状态快照（一般用事件，这里供初始化） |
+| `startUpdate()` / `cancelUpdate()` | 开始 / 取消下载 |
+| `applyUpdate()` | 安装并重启（要求 `phase === 'ready'`，否则 `invalid_params`） |
+| `checkUpdateNow()` | 立即检查一次更新站点（20 秒超时） |
+
+⚠️ 两点务必写进你的 UI：**必须由用户点击**（不要自动调用）；`applyUpdate()` 成功后
+进程会替换自身并重启，**页面连接随即断开**。
 
 ## 6. 视频订阅（重点）
 
@@ -222,6 +283,10 @@ sub.transforms();
 | `video.transform` | 旋转/镜像变化（桌面或网页改的） | `{remote:{rotation,mirror}, local:{...}}` |
 | `system.autoAnswer` | 自动接听开关变化 | `{enabled}` |
 | `system.updateConfig` | 自动更新配置变化 | `{url, appId, intervalMinutes, prerelease}` |
+| `contact.changed` | 通信录写入（桌面、网页、CSV/JSON 导入都算） | `{action, total}`；多标签/桌面据此刷新 |
+| `calllog.changed` | 通话记录被删除/清空 | `{action, deleted}`（新增记录仍由 `call.terminated`/`call.failed` 驱动） |
+| `system.config` | 配置被改写 | `{section, values}`，`section`: `account`/`audio`/`video`/`log`/`ws`/`autoStart` |
+| `audio.ready` | 音频后端后台初始化完成 | `{ready}`；据此刷新设备下拉（无 UI 版没有桌面界面，这是唯一信号） |
 | `system.update` | 自动更新状态变化 | `phase`: `idle`/`available`/`downloading`/`ready`/`failed`；含 `progress`、`error` 等 |
 
 通话对象（`call`）字段：`id`、`direction`、`remote`、`remoteName`、`state`、`muted`、

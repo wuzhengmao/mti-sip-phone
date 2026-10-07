@@ -5,17 +5,13 @@ import (
 	"strings"
 
 	"fyne.io/fyne/v2"
+
+	"mti-sip-phone/internal/appicon"
 )
 
-// 托盘图标：话机形状（Material Design phone 图标 path），
-// 未注册为红色，注册成功后为绿色（REQ-UI-011）。
-// SVG 静态资源由 Fyne driver 渲染为托盘位图。
-
-func phoneIconSVG(color string) string {
-	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
-<path fill="` + color + `" d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24c1.12.37 2.33.57 3.57.57a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.24.2 2.45.57 3.57a1 1 0 0 1-.24 1.02l-2.21 2.2z"/>
-</svg>`
-}
+// 托盘图标：话机形状，未注册为红色、注册成功后为绿色（REQ-UI-011）。
+// SVG 源在 internal/appicon（仅托盘无 UI 版要以同一份图标自己光栅化，
+// 那条路不链接 fyne），这里包成 Fyne 静态资源交给 driver 渲染。
 
 // micIconSVG 麦克风图标（Material Design mic / mic-off path），
 // 通话面板麦克风开关按钮用（REQ-UI-023）。
@@ -120,13 +116,13 @@ var (
 	IconLockOpen   = fyne.NewStaticResource("unlock.svg", []byte(unlockIconSVG("#ffffff")))
 
 	// IconPhoneRed 未注册状态托盘图标（红色话机）。
-	IconPhoneRed = fyne.NewStaticResource("phone-red.svg", []byte(phoneIconSVG("#e53935")))
+	IconPhoneRed = fyne.NewStaticResource("phone-red.svg", []byte(appicon.PhoneSVG(appicon.ColorRed)))
 	// IconPhoneGreen 已注册状态托盘图标（绿色话机）。
-	IconPhoneGreen = fyne.NewStaticResource("phone-green.svg", []byte(phoneIconSVG("#43a047")))
+	IconPhoneGreen = fyne.NewStaticResource("phone-green.svg", []byte(appicon.PhoneSVG(appicon.ColorGreen)))
 	// IconPhoneBlack 黑色话机（接听按钮图标，前景色黑色）。
-	IconPhoneBlack = fyne.NewStaticResource("phone-black.svg", []byte(phoneIconSVG("#1a1a1a")))
+	IconPhoneBlack = fyne.NewStaticResource("phone-black.svg", []byte(appicon.PhoneSVG("#1a1a1a")))
 	// IconPhoneWhite 白色话机（接听按钮：绿底白图标，REQ-UI-023 修订）。
-	IconPhoneWhite = fyne.NewStaticResource("phone-white.svg", []byte(phoneIconSVG("#ffffff")))
+	IconPhoneWhite = fyne.NewStaticResource("phone-white.svg", []byte(appicon.PhoneSVG("#ffffff")))
 	// IconMicOn 麦克风开：白色前景（配蓝色底 HighImportance）。
 	IconMicOn = fyne.NewStaticResource("mic-on.svg", []byte(micIconSVG("#ffffff", false)))
 	// IconMicOff 麦克风关：红色斜线（浅灰底上清晰可见）。

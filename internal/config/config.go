@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"mti-sip-phone/internal/variant"
 )
 
 // Account SIP 账户配置。
@@ -43,7 +45,13 @@ type Account struct {
 
 // WSConfig 本地 WebSocket 服务配置。
 type WSConfig struct {
-	Port int `json:"port"` // 监听端口，默认 8765，仅绑定 127.0.0.1；被占用时自动 +1
+	Port int `json:"port"` // 监听端口，默认 8765；被占用时自动 +1
+	// AllowRemote 允许远程连接（默认 false）：false = 只监听 127.0.0.1 并拒绝
+	// 非回环来源；true = 监听 0.0.0.0，其他 IP 也能连上来控制本机软电话。
+	//
+	// ⚠️ WS 接口**没有鉴权**（REQ-WS-012），放开后同一网段内任何设备都能拨号、
+	// 读通信录/通话记录、改配置、甚至触发重启——只在受控网络里开。
+	AllowRemote bool `json:"allowRemote"`
 }
 
 // LogConfig 日志配置。
@@ -161,7 +169,7 @@ const (
 // 网页可以经 WS `system.setUpdateConfig` 写这份配置（业务前端统一管理更新策略）。
 type UpdateConfig struct {
 	URL          string `json:"url"`             // 更新站点地址，空 = 不自动检查
-	AppID        string `json:"appId"`           // 应用 ID，默认 mti-sip-phone
+	AppID        string `json:"appId"`           // 应用 ID，默认按变体取（mti-sip-phone / mti-sip-phone-no-ui，REQ-UPD-021）
 	IntervalMins int    `json:"intervalMinutes"` // 检查周期（分钟），默认 5，钳制 1–1440
 	Prerelease   bool   `json:"prerelease"`      // 是否接受预览版，默认 false
 }
@@ -202,9 +210,22 @@ type Config struct {
 	RecentDial []string     `json:"recentDial"` // 最近呼叫号码（去重，最多 5 个，供拨号下拉）
 }
 
-// InstanceWSBaseOffset 沙箱实例的 WS 端口起点相对默认端口的偏移（用户要求 +10）：
-// 槽位 ≥1 的实例默认从 8765+10 起找空闲端口（找不到再 +1），避免与主实例抢 8765。
+// InstanceWSBaseOffset 沙箱实例的 WS 端口起点相对默认端口的**每槽**偏移
+// （用户要求 +10）：槽位 N（≥1）从 8765 + 10×N 起找空闲端口（被占用再 +1），
+// 主实例（槽位 0）保持 8765，各槽位之间也彼此错开。
+//
+// 取值只作用于**首次启动**（还没有该槽位的配置文件时）；之后以实例自己配置里
+// 保存的端口为准（用户可以在控制台的配置页改）。
 const InstanceWSBaseOffset = 10
+
+// SandboxWSPort 返回槽位 N 的 WS 端口起点（8765 + 10×N；槽位 0/负数回默认端口）。
+// 槽位上限 99 → 最大 9755，仍是合法端口。
+func SandboxWSPort(slot int) int {
+	if slot <= 0 {
+		return Default().WS.Port
+	}
+	return Default().WS.Port + InstanceWSBaseOffset*slot
+}
 
 // Default 返回默认配置。
 func Default() *Config {
@@ -242,7 +263,8 @@ func Default() *Config {
 		},
 		Update: UpdateConfig{
 			// URL 留空：默认不自动检查更新（配了站点才开始查，REQ-UPD-017）
-			AppID:        "mti-sip-phone",
+			// 应用 ID 按构建变体取默认（REQ-UPD-021）
+			AppID:        variant.UpdateAppID,
 			IntervalMins: 5,
 		},
 	}
@@ -391,8 +413,14 @@ func Load(path string) (*Config, error) {
 		cfg.WS.Port = 8765
 	}
 	// 自动更新：逐字段补零值 + 周期钳制（URL 空是合法值 = 不检查，不能补）
-	if cfg.Update.AppID == "" {
-		cfg.Update.AppID = "mti-sip-phone"
+	//
+	// 应用 ID 默认值**按构建变体给**（完整版 mti-sip-phone / 无 UI 版
+	// mti-sip-phone-no-ui）：两个变体共用同一份配置文件，另一个变体写下的
+	// 默认值要当成"未设置"，否则无 UI 版会去查完整版的发布物、把自己
+	// （updater 替换的就是 os.Executable()）换成完整版 exe。用户手填的
+	// 其它应用 ID 一律保留。
+	if cfg.Update.AppID == "" || cfg.Update.AppID == variant.OtherUpdateAppID {
+		cfg.Update.AppID = variant.UpdateAppID
 	}
 	cfg.Update.IntervalMins = ClampUpdateIntervalMins(cfg.Update.IntervalMins)
 	if cfg.Log.Level == "" {

@@ -1,6 +1,6 @@
 # 本地 WebSocket 控制协议
 
-> 适用版本：1.0.11。网页通过本机 WebSocket 连接 SIP 软电话，实现拨号、接听、挂断等控制，并接收振铃、挂断等事件。
+> 适用版本：1.0.15。网页通过本机 WebSocket 连接 SIP 软电话，实现拨号、接听、挂断等控制，并接收振铃、挂断等事件。
 >
 > 本文档面向网页前端开发者；JS SDK 已封装本协议，通常无需直接读写报文。
 
@@ -8,15 +8,19 @@
 
 | 项 | 说明 |
 | --- | --- |
-| 地址 | `ws://127.0.0.1:8765/ws`（端口以软电话配置为准） |
+| 地址 | `ws://127.0.0.1:8765/ws`（端口以软电话配置为准）。配置页「网页接入」可勾选 **允许远程连接**（`ws.allowRemote`，默认关）：勾选后监听 `0.0.0.0`、其他 IP 也能连，见下方「安全说明」 |
 | 鉴权 | 无（连接即可用），安全性由「仅监听回环地址 + 拒绝非回环连接」保证 |
 | 安全 | 服务仅绑定 127.0.0.1，且拒绝非回环来源连接 |
 | 心跳 | 客户端 60 秒内无消息会被断开；可定期发送任意非请求消息保活 |
 
 软电话同时提供 HTTP 服务：
 
-- `GET http://127.0.0.1:8765/` —— 测试页面（开箱即用）
+- `GET http://127.0.0.1:8765/` —— **网页控制台**（开箱即用的控制界面：通话 / 通话记录 / 通信录 / 配置 / 诊断五个页面）
 - `GET http://127.0.0.1:8765/sdk/sip-phone-sdk.js` —— JS SDK
+- `GET /css/app.css`、`GET /js/*.js` —— 控制台的样式与脚本（白名单提供，一律 `no-cache`）
+- `/index.html`、`/history`、`/contacts`、`/settings`、`/diag`、`/test.html` 都返回控制台（hash 路由 `#/call`、`#/history`、`#/contacts`、`#/settings`、`#/diag`）
+
+> **仅托盘无 UI 版**（产物 `mti-sip-phone-no-ui`）只有托盘、没有窗口，上面这套网页就是它的唯一界面：左键点托盘图标即用系统默认浏览器打开控制台。协议与完整版**完全一致**。
 
 ## 2. 消息格式
 
@@ -66,8 +70,32 @@
 | `call.setVideo` | `{ "callId": "...", "enabled": true }` | `{ "callId": "..." }` | 视频总开关（纯本地动作，REQ-VIDEO-008）：关 = 不显示远端、不推送本地、视频窗口关闭；状态变化推 `call.video` |
 | `call.dtmf` | `{ "callId": "...", "digit": "5" }` | `{ "callId": "..." }` | 发送 DTMF（RFC 4733 telephone-event，REQ-CALL-006）：`digit` 为单个字符 `0-9 * # A-D`，通话接通后才有效；参数缺失或 `digit` 不是单字符返回 `invalid_params` |
 | `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态、**自动更新配置 updateConfig**、自动接听开关） |
-| `contact.export` | `{}` | `{ "csv": "...", "count": 12 }` | 导出通信录 CSV 文本（REQ-WS-015）：表头 `号码,名称,备注,常用`，**UTF-8 带 BOM**（Excel 直接打开不乱码）。网页端不做通信录的增删改查 |
+| `contact.export` | `{}` | `{ "csv": "...", "count": 12 }` | 导出通信录 CSV 文本（REQ-WS-015）：表头 `号码,名称,备注,常用`，**UTF-8 带 BOM**（Excel 直接打开不乱码）。网页端的增删改查见 `contact.list/save/delete/setStarred/clear`（REQ-WS-018） |
 | `contact.import` | `{ "csv": "号码,名称,备注,常用\n2999,张三,前台,是\n" }` | `{ "added": 1, "updated": 0, "skipped": 0, "total": 12 }` | 导入通信录 CSV：按号码去重，**已存在的只覆盖号码/名称/备注，常用标志只增不减**（本地已标就保持、本地没标而 CSV 标了则变常用），不存在的整条新增；没有号码或整行解析失败的行计入 `skipped`。参数缺失返回 `invalid_params`，通信录不可用返回 `contacts_unavailable`。单条消息上限 4MB |
+| `calllog.query` | `{ "remote": "1001", "limit": 50, "offset": 0 }` | `{ "records": [...], "total": 357, "hasMore": true }` | 分页查询通话记录（REQ-WS-017），**新的在前**；`remote` 按号码子串筛选，`limit` 默认 50、上限 200（越界钳制）。时间戳一律**毫秒整数**，`0` 表示未发生（`answeredAt: 0` = 未接通，`endedAt: 0` = 进行中）。每条记录在号码命中通信录时带 `contact: {name, note, starred}`（口径同桌面通话记录页：号码规范化后查 core 的内存快照），页面据此显示「号码 名称★」与备注悬停。数据库未接入返回 `calllog_unavailable` |
+| `calllog.delete` | `{ "callIds": ["abc", "def"] }` | `{ "deleted": 2 }` | 按 callId 删除若干条通话记录；空数组返回 `invalid_params`。成功后广播 `calllog.changed` |
+| `calllog.clear` | `{}` | `{ "deleted": 357 }` | 清空全部通话记录（不可撤销）。成功后广播 `calllog.changed` |
+| `contact.list` | `{ "query": "zs" }`（可选） | `{ "count": 12, "total": 12, "contacts": [{ "number", "name", "note", "starred" }] }` | 列出联系人（REQ-WS-018）。给了 `query` 就**在软电话侧过滤**：支持**音头拼音 / 全拼 / 汉字混合**（`zs`/`zhangsan`/`张三`/`张san` 都能命中「张三」）、号码与备注的子串、号码的纯数字写法（`138` 命中 `+86 138-0000-0000`）——与桌面通信录页是**同一份实现**（`internal/contactsearch`，网页端没有拼音字典）。结果按**拼音排序**（空名称最前，同音再按规范化号码）；`count` 是本次返回条数、`total` 是通信录总数 |
+| `contact.save` | `{ "prevNumber": "1001", "number": "1002", "name": "张三", "note": "", "starred": true }` | `{ "contact": {...}, "count": 12 }` | 新增或修改联系人：`prevNumber` 非空 = 改号（传改号前的号码），`starred` 缺省 = 保持原状（新增时为 false）。号码为空/重复返回 `invalid_params`；返回的是规范化后的生效值（号码归一、名称/备注截断） |
+| `contact.delete` | `{ "numbers": ["1001", "sip:1002@host"] }` | `{ "deleted": 2, "count": 10 }` | 按号码（任意写法，见「去重键」）删除 |
+| `contact.setStarred` | `{ "numbers": ["1001"], "starred": true }` | `{ "updated": 1, "count": 12 }` | 批量设置/取消常用（★） |
+| `contact.clear` | `{}` | `{ "deleted": 12, "count": 0 }` | 清空通信录（不可撤销） |
+| `audio.devices` | `{}` | `{ "mics": [{"id","name"}], "speakers": [...], "ready": true, "preprocessSupported": true }` | 枚举音频设备（REQ-WS-016）。**异步回包**：软电话侧单飞 + 2 秒缓存 + 3 秒超时；超时先回空列表 + `ready: false`（页面应提示"枚举中"而不是当成没有设备） |
+| `video.devices` | `{}` | `{ "cameras": [{"id","name"}], "supported": true, "cameraSupported": true }` | 枚举摄像头（`cameraSupported: false` = 本平台没有采集后端，只能接不能发） |
+| `system.getConfig` | `{}` | 见下 | 配置快照（REQ-WS-019）：账户（**不含密码**，只有 `passwordSet`）、音频、视频、日志、`ws.port` 与 `ws.actualPort`、自动更新、开机自启 |
+| `system.setAccount` | account 字段子集 + `"password": "..."` / `"clearPassword": true` | 生效后的账户快照（不含密码） | 修改 SIP 账户：**只改传入的字段**；密码**只写不读**——传 `password` 改密码、传 `clearPassword: true` 清空，都不传则保持原密码。校验失败（端口越界、传输方式非法、`publicIP` 不是 IP 字面量、启用账户但缺服务器/账号…）返回 `invalid_params` 且**不落盘不改内存**。成功后立即按新配置重新注册 |
+| `system.setAudioConfig` | `{ "micId": "...", "speakerId": "...", "ringSpeakerId": "...", "aec": true, "ns": true, "agc": false }` | 生效后的音频配置（含 `ready` / `preprocessSupported`） | 修改音频配置（字段可选）：设备选择**立即生效**，AEC/NS/AGC（REQ-MEDIA-007）从**下一通电话**生效 |
+| `system.setVideoConfig` | `{ "enabled": true, "cameraId": "", "cameraName": "...", "width": 640, "height": 480, "fps": 25, "bitrateKbps": 512 }` | 生效后的视频配置（含 `supported` / `cameraSupported` / `cameraDisabled`） | 修改视频配置（字段可选）：`enabled`（总开关）与摄像头**立即生效**，采集参数从**下一通电话**生效。宽高 64–1920、帧率 1–30、码率 64–20480，越界返回 `invalid_params` |
+| `system.setLogConfig` | `{ "level": "debug", "dir": "", "file": true, "console": false, "sipTrace": false }` | 生效后的日志配置 | 修改日志配置（字段可选）：级别与 SIP 信令记录**立即生效**，写文件/控制台**重启后生效**；级别非 debug/info/warn/error 返回 `invalid_params`。注：`console`（把日志另写一份到 stderr）**桌面与网页界面都不提供**（GUI 子系统构建没有控制台，看不出效果），只有控制台版/终端里跑时才有意义；界面不传它，配置值保持不变 |
+| `system.setWSPort` | `{ "port": 8801 }` | `{ "port": 8801, "actualPort": 8765, "restartRequired": true }` | 修改本地 WS 端口（**重启后生效**）；`actualPort` 是当前进程实际监听的端口（启动时被占用会自动 +1）。配合 `system.restart` |
+| `system.setAutoStart` | `{ "enabled": true }` | `{ "enabled": true }` | 开/关开机自启（立即注册/移除系统项）。沙箱实例（`-instance N`）不支持，返回 `config_unavailable` |
+| `system.restart` | `{}` | `{ "restarting": true }` | 重启软电话程序。⚠️ **先回响应再重启**：resolve 之后进程随时退出、WS 断开 |
+| `system.checkUpdateNow` | `{}` | `{ "skipped": false, "upToDate": true, "latestVersion": "", "notified": false, "reason": "", "text": "已是最新版本", "currentVersion": "1.0.15" }` | 立即检查一次更新站点（不等下一个周期，20 秒超时） |
+| `update.status` | `{}` | 更新状态对象（同 `system.update` 事件负载） | 查询更新状态（页面一般用事件，这里供初始化） |
+| `update.start` | `{}` | 更新状态对象 | **开始下载**已告知的新版本（REQ-UPD-020，进度走 `system.update` 事件） |
+| `update.cancel` | `{}` | 更新状态对象 | 取消下载 |
+| `update.apply` | `{}` | `{ "phase": "ready", "applying": true }` | 安装已下载好的更新并重启。要求当前 `phase === "ready"`，否则返回 `invalid_params`；⚠️ **先回响应再安装**（安装会替换 exe 并重启） |
+| `call.setVideoPreview` | `{ "callId": "...", "enabled": true }` | `{ "callId": "..." }` | 本地视频回显开关（纯本地动作，REQ-VIDEO-009）：无 UI 版没有回显窗口，此方法与桌面口径保持一致；网页看本地画面用 `video.subscribe` 的 `local` |
 | `system.setAutoAnswer` | `{ "enabled": true }` | `{ "enabled": true }` | 自动接听开关（REQ-CALL-014）：与软电话界面上的「自动接听」按钮**共用一份状态**，变更后广播 `system.autoAnswer`，桌面按钮与网页据此同步。视频来电自动接听时按「视频接听」接通（REQ-VIDEO-004） |
 | `system.setUpdateConfig` | `{ "url": "https://update.example.com", "appId": "mti-sip-phone", "intervalMinutes": 5, "prerelease": false }` | 生效后的完整配置 `{url, appId, intervalMinutes, prerelease}` | 写入软电话的**自动更新配置**（REQ-UPD-018）：软电话据此自己定时查询更新站点（**url 留空 = 不检查**，周期 1–1440 分钟，prerelease 默认 false）。字段**都是可选的**，只改传入的那些；写入后落盘、立即生效（配了站点马上查一次）并广播 `system.updateConfig`。url 非 http/https 或周期越界返回 `invalid_params` |
 | `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64", "force": false }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.11" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选；`force: true` = **强制推送**，跳过"版本必须更高"的检查（REQ-UPD-015，页面对着手动推送/回滚用；SDK 的定时查询不带它） |
@@ -111,6 +139,9 @@
 - `update`：自动更新状态，无可用更新时省略（字段说明见 4. 事件 `system.update`）。
 - `video`：画面旋转/水平镜像（REQ-VIDEO-012），远端与本地回显各一份；网页连上（含断线重连）即可据此把按钮和渲染状态对齐。
 - `autoAnswer`：自动接听开关当前状态（与软电话界面的按钮共用一份，可用 `system.setAutoAnswer` 修改）。
+- `recentDial`：最近呼叫的号码（最多 5 个、新的在前），供拨号下拉用。
+- `noUI`：当前进程是「仅托盘无 UI 版」（REQ-UI-041）时为 true —— 页面据此自动订阅视频、隐藏「本地画面 / 保留软电话窗口」两个勾选项、不允许取消订阅。
+- `instance`：本进程的实例槽位（0 = 主实例，≥1 = 沙箱实例，REQ-NFR-007）；诊断页拼 `sip://` 拉起链接时要带上 `?instance=N`。
 
 ### 通信录 HTTP 接口（网页导入导出）
 
@@ -142,12 +173,40 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 
 ### system.notifyUpdate 说明
 
-由**业务前端**调用的**强制推送**通道（REQ-UPD-019）：把某个版本告知软电话，软电话弹提示、由用户在界面上确认后下载替换重启（**WS 只能告知，不能触发下载或重启**，REQ-UPD-009）。
+由**业务前端**调用的**强制推送**通道（REQ-UPD-019）：把某个版本告知软电话，软电话弹提示、由用户在界面上确认后下载替换重启（REQ-UPD-009 的**旧口径**）。⚠️ 1.0.15 起 `notifyUpdate` 仍只是"告知"，但**下载与安装已另有通道**：`update.start` / `update.apply`（REQ-UPD-020），仍必须由用户在可控界面（桌面提示窗或网页按钮）上点击，不做静默安装。
 
 - `version` 与 `url` 必填；`sha256`/`notes`/`os`/`arch` 可选（os/arch 提供时须与软电话自身一致）。
 - 版本不高于当前返回 `update_not_newer`；参数非法返回 `invalid_params`；正在下载/已就绪时再来一条返回 `internal`。
 - 同版本重复告知幂等（已在下载/就绪的同版本直接忽略）。
 - 「有没有新版本」**不在网页侧裁决**：软电话自己按 `system.setUpdateConfig` 的配置定时查询更新站点（REQ-UPD-017）；本方法用于页面手动推送（联调/回滚），SDK 的 `notifyUpdate` 恒带 `force`。
+
+### system.getConfig 返回示例
+
+```json
+{
+  "version": "1.0.15",
+  "os": "windows",
+  "arch": "amd64",
+  "account": {
+    "enabled": true, "server": "10.168.4.40", "port": 5060, "expires": 300,
+    "rport": true, "optchk": true, "stunEnabled": false, "stunServer": "stun.l.google.com:19302",
+    "proxy": "", "transport": "tls", "tlsVerify": false, "srtp": "supported",
+    "domain": "", "publicIP": "", "account": "2999", "authUser": "", "displayName": "",
+    "passwordSet": true
+  },
+  "audio": { "micId": "", "speakerId": "", "ringSpeakerId": "", "aec": true, "ns": true, "agc": false, "ready": true, "preprocessSupported": true },
+  "video": { "enabled": true, "disabled": false, "cameraId": "", "cameraName": "", "width": 640, "height": 480, "fps": 25, "bitrateKbps": 512, "supported": true, "cameraSupported": true, "cameraDisabled": "disabled" },
+  "log": { "level": "info", "dir": "C:/Users/x/AppData/Roaming/mti-sip-phone/logs", "file": true, "console": false, "sipTrace": false },
+  "ws": { "port": 8765, "actualPort": 8765 },
+  "update": { "url": "", "appId": "mti-sip-phone", "intervalMinutes": 5, "prerelease": false },
+  "autoStart": true
+}
+```
+
+- **密码永远不下发**：只有 `passwordSet` 布尔值；写入见 `system.setAccount` 的 `password` / `clearPassword`。
+- `audio.ready` / `preprocessSupported`、`video.supported` / `cameraSupported` 反映"本构建/本平台有什么"（无视频构建、无采集后端的平台据此把控件置灰）。
+- `ws.actualPort` 是当前进程实际监听的端口，`ws.port` 是配置里的期望值（启动时被占用会自动 +1 并写回配置）。
+- 与桌面口径一致：设备/总开关/日志级别立即生效，采集参数与音频预处理**下一通电话生效**，写文件/控制台与 WS 端口**重启后生效**。
 
 ### video.subscribe 返回示例
 
@@ -187,6 +246,10 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `system.updateConfig` | `{ "url", "appId", "intervalMinutes", "prerelease" }` | 自动更新配置变化（本机配置页保存或网页 `system.setUpdateConfig` 写入都会广播，REQ-UPD-018）；重连时也可从 `system.state` 的 `updateConfig` 字段取当前值 |
 | `system.autoAnswer` | `{ "enabled": true }` | 自动接听开关变化（桌面按钮点击或网页 `system.setAutoAnswer` 设置都会广播）；重连时也可从 `system.state` 的 `autoAnswer` 字段取当前值 |
 | `system.update` | 更新状态对象，见下 | 自动更新状态变化（受理/下载进度/就绪/失败） |
+| `contact.changed` | `{ "action": "save|delete|star|clear|import", "total": 12 }` | 通信录发生写入（REQ-WS-018）：**桌面界面、网页、CSV/JSON 导入所有写入路径都广播**，多标签与桌面列表据此刷新 |
+| `calllog.changed` | `{ "action": "delete|clear", "deleted": 2 }` | 通话记录被删除/清空（REQ-WS-017）；**新增记录**仍由 `call.terminated` / `call.failed` 驱动刷新 |
+| `system.config` | `{ "section": "account|audio|video|log|ws|autoStart", "values": {...} }` | 配置被改写（REQ-WS-019）：本机配置页保存或网页 `system.set*` 写入都会广播，其它网页据此同步表单 |
+| `audio.ready` | `{ "ready": true }` | 音频后端后台初始化完成（REQ-WS-016）：网页据此刷新设备列表（无 UI 版没有桌面界面，这是唯一的信号） |
 
 `call` 对象中的视频相关字段（REQ-VIDEO-*）：
 
@@ -240,6 +303,10 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `call_not_found` | 通话不存在 |
 | `video_unsupported` | 视频功能不可用：本构建没有视频，或用户在配置页关闭了「启用视频通话」总开关（REQ-VIDEO-014）。`video.subscribe`、`call.dial{video:true}`、`call.answer{video:true}` 会返回它 |
 | `update_not_newer` | 告知的版本不高于软电话当前版本（`system.notifyUpdate`） |
+| `calllog_unavailable` | 通话记录不可用（数据库未接入或打开失败） |
+| `audio_unavailable` | 音频能力不可用 |
+| `config_unavailable` | 该配置项依赖的外部能力未接入（重启 / 开机自启 / 信令开关；沙箱实例的 `system.setAutoStart` 即此） |
+| `update_unavailable` | 更新能力未接入 |
 | `internal` | 内部错误 |
 
 ## 6. 典型时序
@@ -293,7 +360,13 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 **WS 只能告知，下载与重启必须由用户在软电话界面上点击**。
 ## 7. 安全说明
 
-- WS 服务仅监听 127.0.0.1，不对外网暴露，且拒绝非回环来源连接。
-- 连接不做鉴权（已按用户要求取消 token）：**本机任何进程或网页均可控制软电话**，安全性完全依赖回环监听。
+- **默认**只监听 127.0.0.1 且拒绝非回环来源连接；连接不做鉴权（已按用户要求取消 token）——
+  即**本机任何进程或网页均可控制软电话**，安全性完全依赖回环监听。
+- **可选放开**：配置页「网页接入」的 **`ws.allowRemote`「允许远程连接」**（默认**关**）勾选后，
+  服务改为监听 **0.0.0.0** 并**不再拒绝非回环来源**，其他 IP 的浏览器也能控制本机软电话
+  （拨号/接听/挂断、通话记录与通信录的读写、配置修改与重启，全部开放）。
+  ⚠️ **仍然没有鉴权**：等于把这个控制权交给整个可路由网段。桌面配置页与网页配置页都写明了风险，
+  网页勾选时会二次确认，软电话启动时会打一条 WARN 日志。绑定地址在**启动时**决定，改完要重启生效。
+- 内网/办公网里临时要用可以开；公网可达的环境**不要开**（想远程用，走 SSH/VPN 隧道更稳妥）。
 - 更新相关：`system.notifyUpdate`（强制推送）与 `system.setUpdateConfig` 都只能"告知/配置"，**不能触发下载或重启**——下载必须由用户在软电话界面上点击，且提示窗会显示下载地址的主机名供用户判断来源。软电话自己查站点只读不写，不携带任何凭据。
 - **安全边界按现状固定**（增强方案**待定**）：只做「仅监听 `127.0.0.1` + 拒绝非回环来源」这一层，**不加额外鉴权**；来源端口白名单、token 鉴权等更强隔离已讨论，暂缓实施。部署时请按此前提使用（不要在有不可信本地程序/网页的机器上无人值守运行）。

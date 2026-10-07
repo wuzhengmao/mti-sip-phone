@@ -1,4 +1,4 @@
-//go:build !headless
+//go:build !headless && !noui
 
 package main
 
@@ -16,9 +16,9 @@ import (
 // Fyne 要求 UI 初始化与事件循环运行在主线程（goroutine 中运行会导致
 // 托盘失效与线程安全检查告警），因此 GUI 模式直接在主线程调用 Run。
 //
-// 该文件按构建标签 !headless 编译——headless 构建不含界面层，供无
-// CGO 交叉工具链的环境做纯 Go 构建（fyne 的 OpenGL 绑定依赖 CGO，
-// 交叉编译 GUI 产物需要目标平台的 gcc 工具链）。
+// 该文件按构建标签 !headless && !noui 编译——headless 构建不含界面层（供无
+// CGO 交叉工具链的环境做纯 Go 构建），noui 构建是"仅托盘无 UI 版"
+// （见 gui_noui.go：只起托盘，界面全部走网页控制台）。
 func runGUI(app *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath string, ctx context.Context, restart func() error, slot int) {
 	// 重启回调（REQ-UI-017 本地端口修改 / REQ-UPD-005 自动更新）：
 	// 标记重启并取消 ctx → 本函数返回 → main 的退出收尾释放单实例锁、

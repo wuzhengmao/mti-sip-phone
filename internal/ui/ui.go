@@ -74,7 +74,7 @@ type App struct {
 
 	// 拨号盘控件
 	dialEntry  *widget.Entry // 已废弃：由 dialSelect 替代（保留字段避免大改）
-	dialSelect *widget.SelectEntry
+	dialSelect *dialEntry    // 拨号输入框（普通 Entry：没有下拉箭头，建议走内容图层）
 
 	// 按键音出口（测试可替换；nil = 走音频管理器）
 	onKeyTone func(key string)
@@ -92,10 +92,13 @@ type App struct {
 	history     *historyState   // 列表状态（见 ui_history.go）
 
 	// ---- 通信录（REQ-UI-032，同样切在主窗体内）----
-	contactsPage *fyne.Container // 通信录页内容（buildContactsPage 构建）
-	contacts     *contactsState  // 页面状态（见 ui_contacts.go）
-	mainTip      *tooltipLayer   // 备注悬停提示图层（主窗体内容顶层，见 ui_tooltip.go）
-	callTip      *tooltipLayer   // 通话面板的提示图层
+	contactsPage *fyne.Container   // 通信录页内容（buildContactsPage 构建）
+	contacts     *contactsState    // 页面状态（见 ui_contacts.go）
+	mainTip      *tooltipLayer     // 备注悬停提示图层（主窗体内容顶层，见 ui_tooltip.go）
+	mainSuggest  *dialSuggestLayer // 拨号建议下拉图层（见 ui_dial_suggest.go）
+	// hideSuggestTimer 输入框失焦后"延迟收起"下拉的定时器（点选建议需要这点时间）
+	hideSuggestTimer *time.Timer
+	callTip          *tooltipLayer // 通话面板的提示图层
 
 	// 设置页控件
 	settingsScroll    *container.Scroll
@@ -134,6 +137,7 @@ type App struct {
 	logLevelSel       *widget.Select
 	logDirLabel       *widget.Label
 	wsPortEntry       *widget.Entry // 本地 WS 监听端口（默认 8765，修改后重启生效）
+	wsRemoteCheck     *widget.Check // 允许远程连接（监听 0.0.0.0，重启后生效；默认关）
 
 	// 自动更新（REQ-UPD-017）：软电话自己按周期查更新站点
 	updSiteEntry     *widget.Entry // 更新站点地址，空 = 不检查
@@ -366,6 +370,7 @@ func (a *App) buildMainWindow() {
 	// 顶层提示图层（备注/说明悬停用，见 ui_tooltip.go）**必须先建**：设置页的
 	// ⓘ 图标（REQ-MEDIA-007）在构建时就把它捕获进去了，晚建会拿到 nil。
 	a.mainTip = newTooltipLayer()
+	a.mainSuggest = newDialSuggestLayer()
 	a.buildDialPage()
 	a.buildSettingsPage()
 	// 音频预处理开关按配置回填（REQ-MEDIA-007；本构建没有 APM 时置灰）
@@ -376,7 +381,8 @@ func (a *App) buildMainWindow() {
 	// 窗口内容 = 当前页 + 顶层提示图层（备注悬停用，见 ui_tooltip.go）。
 	// 切页只换 Objects[0]，提示图层恒为 Objects[1]：它不含 Hoverable/Tappable，
 	// 命中测试会穿透到下面的页面，绘制顺序上又在最上层、不受滚动裁剪。
-	a.mainContent = container.NewStack(a.dialPage, a.mainTip)
+	// 图层顺序：页面 → 拨号建议下拉 → 备注提示（提示永远在最上层）
+	a.mainContent = container.NewStack(a.dialPage, a.mainSuggest, a.mainTip)
 	w.SetContent(a.mainContent)
 	w.Resize(fyne.NewSize(320, 620)) // 更窄的宽度 + 按键增高后的总高
 	w.CenterOnScreen()
@@ -483,8 +489,8 @@ func (a *App) buildDialPage() {
 	a.dialEntry = newFormEntry()
 	a.dialEntry.SetPlaceHolder("输入号码或 sip:xxx@主机")
 	a.dialEntry.TextStyle = fyne.TextStyle{Bold: true}
-	a.dialSelect = widget.NewSelectEntry(nil)
-	a.dialSelect.SetPlaceHolder("输入号码或 sip:xxx@主机")
+	a.dialSelect = newDialEntry(a)
+	a.dialSelect.SetPlaceHolder("输入号码或名称（支持拼音/首字母）")
 	// 注意：**输入框里敲数字不回显按键音、也不发 DTMF**（用户明确要求）——
 	// 按键音只属于"点号码盘"与"未聚焦时在主窗体敲数字"这两条路径。
 	a.dialSelect.Wrapping = fyne.TextWrapOff
@@ -493,7 +499,10 @@ func (a *App) buildDialPage() {
 	a.dialSelect.OnSubmitted = func(string) {
 		a.onCallButton()
 	}
-	a.refreshRecentDials()
+	// 边打边查（与通信录搜索同一套：拼音/音头/汉字/号码/备注）：**任何改动内容的
+	// 路径都会走到这里**——直接敲字、点击拨号按键、主窗体按键（都走 SetText），
+	// 结果和"最近呼叫"一起出现在输入框下方的下拉图层里（REQ-UI-024 修订）
+	a.wireDialInput()
 
 	inputRow := container.NewBorder(nil, nil, nil, nil, a.dialSelect)
 
@@ -800,12 +809,17 @@ func (a *App) buildSettingsPage() {
 	// ---- 网页接入（WS 服务端口，无 token 鉴权）----
 	a.wsPortEntry = newFormEntry()
 	a.wsPortEntry.SetText(strconv.Itoa(a.cfg.WS.Port))
+	a.wsRemoteCheck = widget.NewCheck("允许远程连接（只在受信任网络使用）", func(on bool) {
+		a.applyWSAllowRemote(on)
+	})
+	a.wsRemoteCheck.SetChecked(a.cfg.WS.AllowRemote)
 	wsHint := widget.NewLabel("本地网页控制服务端口（默认 8765，占用时自动 +1；修改后需重启生效）")
 	wsHint.Wrapping = fyne.TextWrapWord
 
 	wsCard := container.NewVBox(
 		widget.NewLabelWithStyle("网页接入（WS 端口）", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		a.wsPortEntry,
+		a.wsRemoteCheck,
 		wsHint,
 	)
 
@@ -984,13 +998,18 @@ func (a *App) showSettings() {
 		a.showInfo("提示", "通话中无法进入设置")
 		return
 	}
+	// 每次进入时刷新"允许远程连接"（网页配置页也能改它）
+	if a.wsRemoteCheck != nil {
+		a.wsRemoteCheck.SetChecked(a.cfg.WS.AllowRemote)
+	}
 	// 每次进入时刷新 WS 端口显示（端口可能在启动时被自动 +1 调整），
 	// 自动更新配置同样刷新（网页可能刚用 system.setUpdateConfig 改过）
 	if a.wsPortEntry != nil {
 		a.wsPortEntry.SetText(strconv.Itoa(a.cfg.WS.Port))
 	}
 	a.loadUpdateConfigIntoForm()
-	a.hideTip() // 切页时收起备注提示（指针可能没离开行）
+	a.hideTip()         // 切页时收起备注提示（指针可能没离开行）
+	a.hideDialSuggest() // 拨号建议下拉同理
 	a.mainContent.Objects[0] = a.settingsPage
 	a.mainContent.Refresh()
 	// 每次进入配置页回到顶部
@@ -1018,6 +1037,27 @@ func (a *App) watchWSPortFocus() {
 	}()
 }
 
+// applyWSAllowRemote 勾选/取消"允许远程连接"：落盘 + 提示重启
+// （监听地址在启动时绑定，改完必须重启才生效）。
+func (a *App) applyWSAllowRemote(on bool) {
+	if a.cfg.WS.AllowRemote == on {
+		return
+	}
+	a.cfg.WS.AllowRemote = on
+	a.persistConfig()
+	logx.Logger().Info("网页接入：允许远程连接已修改", "allowRemote", on)
+	msg := "已关闭「允许远程连接」：只监听 127.0.0.1。重启后生效。"
+	if on {
+		msg = "已开启「允许远程连接」：网页服务将监听 0.0.0.0，" +
+			"同网段任何设备都能控制本机软电话（接口没有鉴权）。重启后生效。"
+	}
+	a.showConfirm("重启", msg+"是否立即重启？", func(ok bool) {
+		if ok && a.onRestart != nil {
+			a.onRestart()
+		}
+	})
+}
+
 // applyWSPort 校验并保存 WS 端口修改，然后提示重启。
 func (a *App) applyWSPort() {
 	text := strings.TrimSpace(a.wsPortEntry.Text)
@@ -1041,7 +1081,9 @@ func (a *App) applyWSPort() {
 
 // showDialPage 返回拨号盘页。
 func (a *App) showDialPage() {
-	a.hideTip() // 切页时收起备注提示
+	a.hideTip()         // 切页时收起备注提示
+	a.hideDialSuggest() // 拨号建议下拉同理
+	a.hideDialSuggest()
 	a.mainContent.Objects[0] = a.dialPage
 	a.mainContent.Refresh()
 }
@@ -1130,6 +1172,9 @@ func (a *App) cameraUsable() bool {
 func (a *App) setCallUI(state int, call *core.Call) {
 	// 通话面板显示前记录主窗口是否显示（仅从空闲进入通话状态时
 	// 记录一次——状态间切换或重复事件不会覆盖记录）
+	if state != uiIdle {
+		a.hideDialSuggest() // 进通话（面板要显示）：拨号建议下拉先收起
+	}
 	if state != uiIdle && a.uiState == uiIdle {
 		a.mainWasVisible = a.isMainWindowVisible()
 		// 更新提示窗与通话面板都吸附右下角，通话期间先收起提示窗
@@ -1179,6 +1224,7 @@ func (a *App) setCallUI(state int, call *core.Call) {
 
 	case uiDialing:
 		a.mainW.Hide()
+		a.hideDialSuggest() // 主窗体要藏起来了，建议下拉别留在画布上
 		a.mainShown = false
 		a.applyMainCallMode(true) // 通话中：主窗体只放开号码按键（REQ-UI-030）
 		a.setKeypadEnabled(false) // 呼叫未接通，发不了 DTMF（REQ-CALL-006）
@@ -1342,14 +1388,10 @@ func (a *App) applyMainCallMode(inCall bool) {
 	}
 }
 
-// refreshRecentDials 刷新拨号下拉的最近呼叫号码（去重后最多 5 个）。
-func (a *App) refreshRecentDials() {
-	if a.dialSelect == nil {
-		return
-	}
-	recent := a.core.RecentDials()
-	a.dialSelect.SetOptions(recent)
-}
+// refreshRecentDials 拨号框的"最近呼叫"现在由建议下拉图层呈现（获得焦点即列出），
+// 不再往 SelectEntry 塞选项——这里保留一个空实现，避免散落的调用点全改
+// （最近呼叫的数据源仍是 core.RecentDials()）。
+func (a *App) refreshRecentDials() {}
 
 // setKeypadEnabled 启用/禁用拨号按键。
 func (a *App) setKeypadEnabled(enabled bool) {
@@ -1538,6 +1580,16 @@ func (a *App) onEvent(ev core.Event) {
 		if st, ok := ev.Data.(core.AutoAnswerState); ok {
 			a.setAutoAnswer(st.Enabled)
 		}
+
+	case "contact.changed":
+		// 通信录被写入（桌面这里改的、网页 contact.* 改的、CSV/JSON 导入都算）：
+		// 页面开着就重载一次。多标签/两端同开时靠这条事件保持一致。
+		a.contactsOnCallEnded()
+		a.historyOnCallEnded() // 通话记录行要重算名称/★/备注
+
+	case "calllog.changed":
+		// 通话记录被删除/清空（一般来自网页）：开着记录页就重载
+		a.historyOnCallEnded()
 
 	case "register.state":
 		if data, ok := ev.Data.(map[string]any); ok {

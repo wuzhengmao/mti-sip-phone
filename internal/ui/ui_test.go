@@ -309,7 +309,7 @@ func TestTrayRegisteredState(t *testing.T) {
 func TestDialEntryTypingIsSilent(t *testing.T) {
 	test.NewApp()
 	a := &App{}
-	a.dialSelect = widget.NewSelectEntry(nil)
+	a.dialSelect = newDialEntry(a)
 	tones := 0
 	a.onKeyTone = func(string) { tones++ }
 

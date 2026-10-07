@@ -169,9 +169,7 @@ internal/
   protocol/       sip:// 协议解析与系统协议注册
   single/         单实例 + 参数转发
   autostart/      开机自启
-web/
-  test.html       测试页面（内嵌进二进制）
-  sdk/            JS SDK 与类型声明
+web/            网页控制台（单页四视图，内嵌进二进制）+ JS SDK
 release/          更新站点发布配置与元数据
 scripts/          第三方库构建与一键发布脚本
 docs/             需求、架构设计、WS 协议、自动更新、变更记录

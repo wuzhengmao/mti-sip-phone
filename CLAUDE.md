@@ -6,7 +6,14 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x64 / arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前开发版本 **1.0.14**（1.0.13 已定版并合并到 master，含 **SIP 信令 TLS(SIPS) 传输（REQ-ACC-006）**——传输新增 tls、sips:// 拉起、本端自签 TLS 监听、TCP/TLS 信令保活，以及真机联调修出的来电接听/振铃取消/长通话挂断等一批 TCP/TLS 信令缺陷；此前 1.0.12 的 G.722 宽频、视频总开关等一并包含）。1.0.14 进行中：崩溃现场记录（REQ-LOG-009，见「已知陷阱」的日志条）、**媒体加密 SRTP（REQ-MEDIA-009，SDES/`a=crypto`，见「重要约定」的 SRTP 条）**。
+当前开发版本 **1.0.15**（1.0.14 已定版，含 Windows 386 摄像头采集、Windows 产物静态链接、Linux 交叉 CXX 修复）。1.0.15 进行中：**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）** 与 **网页控制台四个页面（REQ-WEB-001~004 + REQ-WS-016~019 + REQ-UPD-020/021）**。
+
+<details>
+<summary>1.0.14 已完成内容（点击展开）</summary>
+
+1.0.14（1.0.13 已定版并合并到 master，含 **SIP 信令 TLS(SIPS) 传输（REQ-ACC-006）**——传输新增 tls、sips:// 拉起、本端自签 TLS 监听、TCP/TLS 信令保活，以及真机联调修出的来电接听/振铃取消/长通话挂断等一批 TCP/TLS 信令缺陷；此前 1.0.12 的 G.722 宽频、视频总开关等一并包含）；另有崩溃现场记录（REQ-LOG-009）、**媒体加密 SRTP（REQ-MEDIA-009）**、音频预处理 AEC/NS/AGC（REQ-MEDIA-007）、窗口位置记忆（REQ-UI-040）。
+
+</details>
 版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），
 正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
 
@@ -21,6 +28,7 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x
 | 音频设备 | github.com/gen2brain/malgo v0.11.26 | miniaudio 绑定，**CGO**；`-tags noaudio` 切空后端（纯 Go 构建/测试） |
 | GUI | fyne.io/fyne/v2 v2.8.1 | 要求 UI 运行在主线程 |
 | WebSocket | github.com/coder/websocket | 仅监听 127.0.0.1，无 token 鉴权 |
+| 托盘（无 UI 版） | fyne.io/systray（**已是完整版的直接依赖**）+ fyne-io/oksvg + srwiley/rasterx + fyne-io/image（图标 SVG 光栅化与 ICO 编码，均已在 go.sum） | 仅托盘版**不引入 fyne/v2 与 GLFW/OpenGL**；Linux/Win 侧纯 Go，只有 macOS 用 cgo |
 | 其他 | google/uuid、golang.org/x/sys（Windows 注册表） | |
 
 ## 构建、测试与运行
@@ -28,6 +36,16 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x
 ```bash
 # 构建脚本按目标打印本次能力（如 CGO+音频+视频，缺库时标出无视频/无Opus）；视频/Opus 取决于
 # 第三方静态库是否已生成（见下），缺哪个就降级为哪个没有。
+#
+# **两个构建变体**（每个目标各出一份，脚本自动跑两遍；REQ-UI-041）：
+#   full（默认）= 完整版：Fyne 桌面界面 + 托盘
+#   noui（-tags noui）= 仅托盘无 UI 版：只起系统托盘、**不创建任何窗口**，全部操作走网页
+#        控制台（托盘左键用系统默认浏览器打开 http://127.0.0.1:<WS端口>/ ）
+#   产物名：dist/sip-phone-<os>-<arch>[.exe] / dist/sip-phone-no-ui-<os>-<arch>[.exe]
+#   （发布到站点后按 APP_ID 改名：mti-sip-phone-no-ui-windows-x64.exe）
+#   no-ui 变体**不链接 fyne/GLFW/OpenGL**，所以它**不需要图形栈**——Linux 交叉因此不需要
+#   X11/Wayland/GL 那 11 个 .pc，Windows 交叉也彻底不碰 glfw（仍需 mingw：音频是 CGO）。
+#   纯 Go 自检（不需要 CGO）：GOOS=linux CGO_ENABLED=0 go build -tags "noui noaudio" ./cmd/sip-phone
 # 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.11-rc），
 # 正式构建用 SIP_PHONE_RELEASE=1（发布脚本会设）；不经脚本的 go build/go run 是基础版本号。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
@@ -178,6 +196,9 @@ internal/
   calllog/    通话记录 SQLite 存储（纯 Go 驱动 modernc.org/sqlite，无 CGO）
   contacts/   通信录 SQLite 存储（同一套单 worker 骨架；主键是规范化号码，
               写操作由 core 串行"写库 + 重建内存快照"，导入时常用标志只增不减）
+  contactsearch/ 通信录的拼音索引/搜索/排序（REQ-UI-035）：音头/全拼/汉字/号码/
+              备注/纯数字。**桌面通信录页与网页控制台共用这一份**（网页端没有拼音
+              字典，别在 JS 里再实现一遍），改这里两边同时生效
   sip/        SIP 电话层（phone.go 为核心：注册/呼叫/保持全部信令与竞态处理；
               netwatch.go 为注册看护：休眠唤醒/网络切换后立即重新注册，REQ-CALL-009；
               tls.go 为 TLS 传输：客户端配置 + 自签证书 + 本端 TLS 监听，REQ-ACC-006）
@@ -200,12 +221,17 @@ internal/
   protocol/   sip:// 协议解析与系统协议注册（Windows 注册表 / Linux .desktop）
   single/     单实例（命名互斥体/flock）+ 第二实例参数转发（随机 token）
   autostart/  开机自启（Windows HKCU Run / Linux XDG autostart，其他平台 no-op）
-web/
-  test.html   测试页面（内嵌进二进制，右列事件日志）
-  sdk/        JS SDK（sip-phone-sdk.js + .d.ts，无 token；更新只保留强制推送
-              notifyUpdate，查询在软电话侧）
-release/      发布到更新站点的配置与元数据：release.conf（站点/应用 ID/令牌）、
-              app.json（应用级元数据，经站点 metadata 接口写入）、icon.svg（图标，经 icon 接口写入）
+web/          网页控制台（**内嵌进二进制**，改完必须重新构建 + 重启才生效）
+  index.html  控制台外壳（单页 + hash 路由 #/call #/history #/contacts #/settings）
+  css/app.css 样式（含原测试页的基础样式）
+  js/         common.js（DOM/格式化/toast/弹窗/离线错误静默）、icons.js（图标路径）、
+              store.js（SDK 单例 + 状态 + 事件扇出）、callbar.js（常驻通话条）、
+              app.js（路由与启动）、views/{call,history,contacts,settings,diag}.js
+  sdk/        JS SDK（sip-phone-sdk.js + .d.ts，无 token；更新既有强制推送
+              notifyUpdate，也能触发下载/安装（update.*），查询在软电话侧）
+release/      发布到更新站点的配置与元数据：release.conf + app.json（完整版）、
+              release-no-ui.conf + app-no-ui.json（仅托盘无 UI 版，release.sh --no-ui）、
+              icon.svg（两个应用各写一次）；app.json 经站点 metadata 接口整份替换
 scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）、固定路径测试运行器
               （test.sh，防火墙只弹一次）与一键发布（release.sh/.bat）
 docs/         design.md（架构设计：分层与依赖、各模块职责、关键决策、目录地图——新同学先看这份）、
@@ -241,6 +267,33 @@ main（组装）
   - 呼出 CANCEL 与对端 2xx 竞态：收到 2xx 后必须补 ACK+BYE（RFC 3261 §9.1）；
   - 2xx 已收但本地已挂断：补 ACK+BYE。
 - **保持 re-INVITE**：TransactionRequest + 手动读响应 + 手动 ACK。**ACK 必须复用 re-INVITE 请求自身的 From/CallID/CSeq 头**（用初始 INVITE 的头会导致对端校验失败——呼入保持无法取消的历史 bug）；OnRetransmission 补发 ACK；事务保留 5 秒后 Terminate。
+
+## 仅托盘无 UI 版（`-tags noui`，REQ-UI-041）
+
+同一份代码的第二个变体：**只起系统托盘，不创建任何窗口**（无主界面/通话面板/视频窗口/
+更新提示窗）。托盘左键 → 系统默认浏览器打开网页控制台（`http://127.0.0.1:<WS端口>/`，
+点一次开一个、1 秒防抖），右键菜单两项：「打开控制台」「退出」。图标仍按注册状态变色。
+
+- **分流只在 `cmd` 层**：`gui.go`（`!headless && !noui`）、`gui_noui.go`（`noui`）、
+  `gui_headless.go`（`headless && !noui`）三份实现同一个 `runGUI` 签名，
+  **参数表必须逐一对齐**（历史踩坑见 gui_headless.go 头注释）。`internal/ui` 一行不改。
+- **托盘在 `internal/tray`**：直接用 `fyne.io/systray`（Fyne 托盘就是它），
+  **不要调 `SetSystemTrayWindow`**（那是给 Fyne 窗口用的，会把左键回调改成显示窗口）；
+  左键用 `systray.SetOnTapped`，且**必须在 `systray.Run` 之前设置**（Linux 注册
+  StatusNotifierItem 时按"有没有左键回调"决定 `ItemIsMenu`）。图标：Windows 要 **ICO**、
+  Linux 要 **PNG**，由 `internal/appicon` 的同一份 SVG 运行期光栅化（与 Fyne 内部同一套
+  oksvg/rasterx 算法），渲染失败退化为纯色圆点（图标缺失会让人连右键菜单都点不到）。
+- **变体标识在 `internal/variant`**（叶子包）：`NoUI` / `UpdateAppID` /
+  `OtherUpdateAppID`（应用名不区分变体：托盘提示与完整版一样是 `mti-sip-phone`）。两个变体**共用同一份配置目录**（用户确认是替代关系，同机只能跑一个），
+  所以 `config.Load` 归一化时把"另一个变体的默认应用 ID"当成未设置改回本变体默认
+  （REQ-UPD-021）——否则无 UI 版会查完整版的发布物，把**自己**（`updater` 替换的是
+  `os.Executable()`）换成完整版 exe。
+- **无 UI 版没有桌面视频出口**：媒体引擎的本地回显默认值改由
+  `core.App.HasDesktopVideoSink()` 决定（`sip.Phone.startVideo` 里注入），否则采集循环
+  每帧白做一次 YUV→RGBA（≈30MB/s）却没人看。网页订阅本地画面走 `LocalVideoWanted`，
+  不受影响。
+- **发布是站点上的独立应用**：`release/release-no-ui.conf`（APP_ID `mti-sip-phone-no-ui`
+  + 独立令牌）+ `release/app-no-ui.json`；`scripts/release.sh --no-ui` 切换配置与产物清单。
 
 ## 视频呼叫
 
@@ -372,9 +425,40 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **通信录的 ★ 是自绘 SVG 图标，不要用文字 "★"**：Fyne 的主题图标集里没有星形，默认字体的回退链在精简的 Linux 环境不保证有 U+2605（会渲染成方框）。`IconStar` 与顶栏入口 `IconContacts` 都在 `icons.go`，用 `markAfterLayout`（已支持任意个标记）跟在名称后面。
 - **Windows 原生文件对话框的 CLSID 别抄网上的**：`CLSID_FileSaveDialog` 是 **{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}**（网上常见的 `C0A651F5-…` 在本机注册表里不存在，`CoCreateInstance` 返回 `REGDB_E_CLASSNOTREG` 0x80040154，表现为"点了导出什么都不发生"）。保存/打开都用 `IID_IFileDialog` 取接口即可（`IFileSaveDialog` 由它派生，基础方法槽位一致：Show(3)/SetFileTypes(4)/SetOptions(9)/SetFileName(15)/SetTitle(17)/GetResult(20)/SetDefaultExtension(22)），取消要与不可用分开（`HRESULT_FROM_WIN32(ERROR_CANCELLED)`）。验证方法：起一个 goroutine 调对话框，主 goroutine `FindWindowW` 按标题找窗口再 `WM_CLOSE` 关掉（见会话内的一次性验证程序）。
 - **`coder/websocket` 单条消息默认读上限 32KB**（`read.go` 的 `defaultReadLimit`）：通信录导入是一整份 CSV，超限会**直接断开连接、没有任何业务错误**。服务端在 `Accept` 后 `conn.SetReadLimit(4<<20)` 放开（仅回环监听，没有滥用面）。 不过**网页的一键导入导出走的是 HTTP**（`GET /api/contacts.csv`、`POST /api/contacts/import`），完全绕开这个限制；WS 的那两个方法保留给需要走 WS 的客户端。
+- **网页控制台是「单页外壳 + hash 路由」**（`web/index.html` + `web/js/views/*`，`#/call`
+  `#/history` `#/contacts` `#/settings`）：**不要改回多个独立 HTML 页面**——视频订阅是
+  **连接级**的（断开即退订），整页跳转会丢订阅、`video.web` 事件抖动；而且无 UI 版没有
+  桌面通话面板，切页时必须还能接听/挂断（靠常驻通话条 `web/js/callbar.js`）。
+  网页资源**全部内嵌**在二进制里：改完必须**重新构建 + 重启**（否则看的还是旧页面），
+  由 `internal/wsapi/server.go` 的 `pageFiles` 白名单静态处理器提供（一律 `no-cache`），
+  **新增文件要同时加白名单**（`/js/views/diag.js` 就是这么加上去的），否则 404。
+  另：**用 `display` 布局的元素别指望 `hidden` 属性**——作者样式会盖掉 UA 的
+  `display:none`（`.call-bar` 就这么在没通话时显示了一条黄色空条），要用 `hidden`
+  就得配一条 `[hidden] { display: none; }`。
+  对端展示（通话条/通话卡片/通话记录）**统一走 `App.display.peer()`**（「号码 名称 - 备注★」，
+  备注直接显示、不用 tooltip）；`system.state.noUI` 告诉页面当前是不是仅托盘无 UI 版
+  （那边没有桌面视频窗口：自动订阅视频、隐藏「保留窗口」、不给取消订阅）。
+  视图加载**必须先看 `store.isConnected()`**：页面刚打开时 WS 还没连上，抢跑请求会以
+  "尚未连接软电话"失败、右下角一次刷出好几条 toast（用户实测过）。服务端数据一律用 `textContent` 渲染（通信录名称/
+  备注来自用户导入的文件，拼 innerHTML 等于开 XSS）。
+- **网页侧的新能力一律走 core 的方法，不要在 wsapi 里直接改 `cfg`**：配置类方法
+  （`system.setAccount/setAudioConfig/setVideoConfig/setLogConfig/setWSPort/setAutoStart`）
+  统一是"只改传入字段（指针区分未传）→ 校验（失败 `invalid_params` 且不落盘不改内存）→
+  改内存 → 落盘 → 广播 `system.config`"，实现在 `internal/core/settings.go`。
+  `core.App` 拿不到 `audio.Manager`（会循环依赖），音频能力经 `core.AudioControl` 注入
+  （`internal/audio/control.go` 适配，main 里 `app.SetAudioControl(...)`）。
+- **会终止进程的动作必须"先回响应、再异步执行"**（`system.restart`、`update.apply`）：
+  先动手的话响应发不出去，页面只看到连接断开、不知道成没成。`update.apply` 还要前置校验
+  `phase == ready`（异步回包后没法改口）。
 - **需求变更同步更新 docs/requirements.md 与 changelog.md。**
 - 单通话限制：呼叫/振铃/通话中禁止新呼出（返回错误）；新来电直接 486 USER_BUSY。
-- **多实例（沙箱槽位，REQ-NFR-007）**：默认单实例（不带参数就是主实例，行为一字不变）；`-instance N`（1–99）或 `sip://…?instance=N` 可再启动实例。**槽位 0 = 主实例，用原目录与原行为**；槽位 ≥1 用 `<配置目录>/instances/N/`（配置/记录/通信录/日志/锁各自一份），首次启动生成空白配置、WS 端口从 8775 起。沙箱实例**不做** sip:// 协议与开机自启注册（只由主实例做，否则会互相覆盖），sip:// 拉起仍转发给主实例。
+- **网页接入的远程开关（REQ-WS-005 修订）**：`ws.allowRemote`（默认 **false**）为真时
+  `wsapi.ListenAndServe` 绑 **0.0.0.0** 且 `remoteAllowed()` 不再拒绝非回环来源（四处校验
+  统一走它）。**接口没有鉴权**，放开等于把控制权交给整个网段——界面与文档都写明风险，
+  网页勾选要二次确认，启动打 WARN。绑定地址在启动时确定（改完必须重启），
+  `FindFreeWSPort` 也随之按实际要绑的地址探测。别把这个开关和"信令 TLS/媒体 SRTP"混起来，
+  它是**网页控制接口的暴露范围**。
+- **多实例（沙箱槽位，REQ-NFR-007）**：默认单实例（不带参数就是主实例，行为一字不变）；`-instance N`（1–99）或 `sip://…?instance=N` 可再启动实例。**槽位 0 = 主实例，用原目录与原行为**；槽位 ≥1 用 `<配置目录>/instances/N/`（配置/记录/通信录/日志/锁各自一份），首次启动生成空白配置、WS 端口起点 = **8765 + 10×N**（槽位 1 → 8775、槽位 2 → 8785…；被占用再 +1，之后以该实例配置里保存的端口为准，可在控制台配置页改）。沙箱实例**不做** sip:// 协议与开机自启注册（只由主实例做，否则会互相覆盖），sip:// 拉起仍转发给主实例。
 - WS 端口可配置（默认 8765），被占用自动 +1 并保存；无 token 鉴权（仅回环）。
 - SDP 编解码优先级：PCMA > PCMU > Opus；Opus 本端 offer 固定 PT 96（rtpmap `opus/48000/2`），answer 仍复用对端 PT；**RTP 端口按 RFC 3550 取偶数、RTCP = RTP + 1**（`bindRTPRTCP` 命中奇数就重选，音频/视频两对端口都走它），SDP 用 `a=rtcp` 宣告 RTCP 端口。
 - 视频 PT 固定（**只作用于本端 offer**）：H264=99 / H263-1998=98 / VP8=100 / VP9=101；优先级顺序不变
@@ -415,6 +499,13 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 
 ## 已知陷阱（修改相关代码前必读）
 
+- **设备枚举（`audio.devices` / `video.devices`）必须异步回包**：miniaudio 在音频服务
+  不可达时能阻塞十几秒，同步做会把页面的那次请求挂死。服务端 `enumGuard` 做**单飞 +
+  2 秒缓存 + 3 秒超时**（超时先回空列表 + `ready:false`，页面显示"枚举中"）。异步/乱序
+  回包是安全的：写路径有 `wsConn.wmu` 串行化，SDK 的 `_request` 按 `id` 配对。
+- **`audio.Manager.OnReady` 支持多个回调**（原来是 `m.onReady = fn`，后注册的顶掉先注册的）：
+  桌面的设置页刷新与 main 的 `audio.ready` 事件广播现在各注册一份。改回单回调会让
+  "无 UI 版网页刷新不了设备列表"或"桌面下拉不刷新"，二选一失灵。
 - **sipgo**：
   - `DialogStateEnded=3 > DialogStateEstablished=1`，振铃结束判断必须用 `== DialogStateEnded`，不能用 `< Established`；
   - 2xx 的 ACK 是独立事务走 OnAck handler；RespondSDP 按 RFC 6026 阻塞等待 ACK（最长 64×T1=32s），必须放后台 goroutine；
@@ -488,6 +579,20 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   服务端认的就是 Contact 里的 `ob`（同机 MicroSIP 也只是加了 `;ob`）；再按 RFC 5626 补 `Supported: outbound`
   与 Contact 的 `reg-id=1`/`+sip.instance`（**已回滚，见下条**）。
 - **注册看护（`internal/sip/netwatch.go`，REQ-CALL-009）的休眠检测必须用墙钟**：判断"系统刚休眠唤醒"要比较相邻两次巡检的 `UnixNano()` 差；**别写成 `ts.Sub(last)` / `time.Since`**——它们走**单调时钟**，而系统挂起期间单调时钟不走（Linux `CLOCK_MONOTONIC` 明确如此，Windows QPC 视硬件），恰好检测不到要检测的那段"丢失的时间"（写成 Sub 会静默失效，注入假时钟的单测同样测不出来，只有真机休眠能验）。另外三条约束：① 看护的 kick 通道是 buffer=1 + `select default` 非阻塞投递、**任何一方都不 close**（改成阻塞发送会把看护卡死）；② 上网基线要**进 ticker 循环前**先探一次（只记录不判定），否则注册后首个巡检周期内的网络切换永远检测不到；③ 网络变化后启用 STUN 时**重探失败要清空 `publicIP`**（回退本机地址），留着失效的公网地址注册会得到"显示已注册但不可达"。TCP/TLS 传输另需丢弃 sipgo 复用的连接（UDP 通配绑定可自愈，长连接死了不会被清出池；池键按传输分类，取 TLS 连接要用 `"tls"` 作 network）。
+- **画布上只要有 overlay，键盘焦点就换了"域"**（踩过：拨号建议下拉）：
+  `canvas.Focused()`/`canvas.Focus()` 走的是 `focusManager()`，而它**有 overlay 时返回
+  overlay 自己的焦点管理器**（`internal/driver/*/canvas.go`），`FocusManager.Focus(obj)`
+  又要求 obj 在**它自己那棵内容树**里，找不到就静默失败。于是只要挂一个
+  `widget.PopUp`/`PopUpMenu`，主内容里的输入框就再也收不到键入——`PopUpMenu` 的
+  `Show()` 还会 `canvas.Focus(自己)`（够狠），而手动 `canvas.Focus(输入框)` 也救不回来
+  （输入框不在 overlay 的树里）。真机现象是"弹出下拉后再打字就无效，得先关掉下拉"。
+  **要"浮层 + 继续输入"只能用窗口内容 Stack 的顶层图层**（`ui_tooltip.go` 与
+  `ui_dial_suggest.go` 都是这个套路：图层 MinSize 归零、自绘底色 + 普通 Button 行、
+  布局里把绝对坐标换算成图层内坐标）。
+  **顺带一条：图层里的东西被"失焦"藏掉时一定要延迟**——Fyne 的鼠标是 press/release
+  两次独立命中测试（`glfw/window.go` 的 `mouseClicked`：按下先 Unfocus、抬起再重新找
+  对象、只有与按下同一个对象才派发 `Tapped`）。在 `FocusLost` 里立刻隐藏，会让
+  "点下拉里的行"永远点不中（点的那一下先失焦 → 图层没了 → 抬起命中到下面的页面）。
 - **Fyne 的键盘分发是"二选一"，别指望覆写子类能收到键**：驱动先把键入交给**当前聚焦的控件**，**只有没有控件聚焦时**才走 canvas 的 `OnTypedKey`/`OnTypedRune`（见 `internal/driver/glfw/window.go` 的键处理）。踩过：① 拨号框的按键音钩子做成"继承 `widget.SelectEntry` 覆写 `TypedRune`"——SelectEntry 聚焦时 `FocusGained` 会把焦点转给**它内部的 Entry**，覆写的方法永远收不到键（表现为输入框里敲数字没有任何回调）；所以"输入框里敲数字要响/要发 DTMF"这种需求**做不到也别做**——本项目的约定恰好相反：**输入框里输入数字不响也不发 DTMF**（用户明确要求），按键音只属于"点号码盘"与"未聚焦输入框时在主窗体敲数字"两条路径。② 想让通话中键盘数字发 DTMF，则必须先把输入框 `Disable()`（禁用后不可聚焦，键才会落到 canvas 回调）——通话中主窗体正是这么做的。
 - **Fyne**：UI 必须主线程（goroutine 运行会托盘失效+线程告警）；dialog 的 parent 传 nil 直接 panic（主窗口未显示时不要弹 dialog）；`SetSystemTrayWindow` 会覆盖 CloseIntercept（需重新接管）并注册单击回调；Window 无 Visible() 查询 API（主窗口显示状态用全局标识 mainShown 跟踪）。
 - **Fyne 托盘菜单**：菜单最后一项若不带 `IsQuit` 标记，Fyne 会自动补一个本地化的 `Quit` 项（`driver_desktop.go` 的 `addMissingQuitForMenu`，按 `lang.L("Quit")` 比对标签，中文标签匹配不上）。本项目的「退出」项经 `markTrayQuit` 处理——**仅 Linux 打标记**，Windows 保持多一个 Quit 的现状（用户要求）。新增托盘菜单项时注意最后一项的角色。
@@ -921,7 +1026,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   的 `index out of range`，每次崩的字符串都不一样）。所以涉及后台加载的界面
   （如通话记录窗口）**不要**写成渲染测试；纯文案/逻辑函数照常测。真实驱动下
   `fyne.Do` 会投递到主循环，不存在这个问题。
-- **改完内嵌网页 / JS SDK 后，用无头 Edge 跑一遍页面查运行期错误**：`web/test.html` 与 SDK
+- **改完内嵌网页 / JS SDK 后，用无头 Edge 跑一遍页面查运行期错误**：控制台页面与 SDK
   是**内嵌进二进制**的（改完必须重新构建 + 重启，否则页面还是旧的——踩过：SDK 改坏后页面报
   `Uncaught TypeError: this._startHeartbeat is not a function`，本地文件已修好却没重建，
   看页面仍旧报错）。验证命令（Edge 在 Win11 自带，路径见下）：

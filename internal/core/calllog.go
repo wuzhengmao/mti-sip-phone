@@ -98,6 +98,18 @@ func (a *App) ClearCallLog() (int, error) {
 	return a.callLog.Clear()
 }
 
+// PublishCallLogChanged 广播"通话记录被删除/清空"（REQ-WS-017）。
+//
+// 只覆盖删除类变更：新增记录由 call.terminated / call.failed 驱动刷新
+//（记录先入库再发事件，所以收到事件时查库一定能查到）。
+// 放在 core 里而不是 wsapi：桌面界面与网页都是消费者，事件得是同一份。
+func (a *App) PublishCallLogChanged(action string, deleted int) {
+	a.bus.Publish("calllog.changed", map[string]any{
+		"action":  action,
+		"deleted": deleted,
+	})
+}
+
 // logStart 记开始（未接入存储时无副作用）。
 func (a *App) logStart(r CallRecord) {
 	if a.callLog != nil {

@@ -316,3 +316,14 @@ func TestAudioPreprocessDefaults(t *testing.T) {
 		t.Errorf("显式设置的开关不该被默认值覆盖：aec=%v ns=%v agc=%v", cfg.Audio.AEC, cfg.Audio.NS, cfg.Audio.AGC)
 	}
 }
+
+// TestSandboxWSPort 沙箱槽位的 WS 端口起点：8765 + 10×槽位（用户要求），
+// 槽位 0/负数回默认端口；上限槽位 99 → 9755 仍是合法端口。
+func TestSandboxWSPort(t *testing.T) {
+	cases := map[int]int{0: 8765, -1: 8765, 1: 8775, 2: 8785, 3: 8795, 99: 9755}
+	for slot, want := range cases {
+		if got := SandboxWSPort(slot); got != want {
+			t.Fatalf("SandboxWSPort(%d) = %d，期望 %d", slot, got, want)
+		}
+	}
+}

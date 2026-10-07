@@ -34,6 +34,13 @@ func (d *videoDemux) setPrimary(s VideoSink) {
 	d.mu.Unlock()
 }
 
+// hasPrimary 是否注册了主槽（桌面界面在不在）。
+func (d *videoDemux) hasPrimary() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.primary != nil
+}
+
 // add 追加一个附加订阅者。
 func (d *videoDemux) add(s VideoSink) {
 	if s == nil {
@@ -144,6 +151,15 @@ func (a *App) LocalVideoWanted() bool {
 	}
 	return false
 }
+
+// HasDesktopVideoSink 是否注册了桌面视频帧出口（界面层）。
+//
+// 只有完整版（Fyne 界面）会注册主槽；仅托盘无 UI 版与 headless 都没有窗口，
+// 本地画面的唯一消费者是网页订阅。电话层据此决定媒体引擎的**回显默认值**：
+// 没有桌面出口时回显默认关——否则采集循环会每帧白做一次 YUV→RGBA 分配
+// （640×480×25fps ≈ 30MB/s），而转换结果只会被静默丢弃。
+// 网页订阅本地画面不受影响（走 LocalVideoWanted）。
+func (a *App) HasDesktopVideoSink() bool { return a.video.hasPrimary() }
 
 // ---------------------------------------------------------------------------
 // 显示用的旋转 / 水平镜像（REQ-VIDEO-012）

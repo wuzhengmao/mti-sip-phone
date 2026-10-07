@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mti-sip-phone 控制台</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body class="app">
+
+<!-- 顶栏：导航 + 连接/注册状态（任何视图都看得到） -->
+<header class="topbar">
+  <div class="brand">mti-sip-phone<small id="verShort">控制台</small></div>
+  <nav class="tabs">
+    <a href="#/call" data-view="call">通话</a>
+    <a href="#/history" data-view="history">通话记录</a>
+    <a href="#/contacts" data-view="contacts">通信录</a>
+    <a href="#/settings" data-view="settings">配置</a>
+    <a href="#/diag" data-view="diag">诊断</a>
+  </nav>
+  <div class="topstatus">
+    <span id="connBadge" class="badge">未连接</span>
+    <span id="regBadge" class="badge">未注册</span>
+    <span class="acct" id="localAccount">—</span>
+    <!-- 全局更新提醒（REQ-UPD-020）：有可用更新/正在下载/待安装/失败时出现，
+         点它跳到「通话」页并把那张更新卡片滚进视野——原来只有通话页能看到。 -->
+    <a id="updBadge" class="badge warn" href="#/call" hidden></a>
+  </div>
+</header>
+
+<!-- 常驻通话条：来电/通话时出现在任何视图上方，随时能接听/挂断 -->
+<div class="call-bar" id="callBar" hidden>
+  <span class="who" id="barName">—</span>
+  <span class="st" id="barState"></span>
+  <span class="st" id="barTimer"></span>
+  <span class="spacer"></span>
+  <button id="barAnswer" class="green" hidden>接听</button>
+  <button id="barAnswerVideo" class="green" hidden>视频接听</button>
+  <button id="barReject" class="red" hidden>拒接</button>
+  <button id="barMute" class="yellow" hidden>保持</button>
+  <button id="barHangup" class="red" hidden>挂断</button>
+</div>
+
+<main>
+<!-- ==================== 通话 ==================== -->
+<section class="view" id="view-call">
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>连接状态</h2>
+        <div class="row">
+          <label>WS 地址</label>
+          <input type="text" id="wsUrl" readonly>
+        </div>
+        <div class="row">
+          <label>本机号码</label>
+          <input type="text" id="localAccount2" readonly placeholder="未配置">
+        </div>
+        <div class="state-line" id="stateLine"></div>
+      </div>
+
+      <div class="card">
+        <h2>拨号</h2>
+        <div class="row">
+          <!-- 号码输入：输入时**同时查通信录**（拼音/音头/汉字/号码/备注，与通信录页同一套），
+               结果与"最近呼叫"一起出现在下面的下拉里（与桌面版逻辑一致） -->
+          <span class="suggest-wrap">
+            <input type="text" id="dialTarget" autocomplete="off"
+                   placeholder="输入号码或名称（支持拼音/首字母）">
+            <div id="dialSuggest" class="suggest" hidden></div>
+          </span>
+          <button id="btnDial">呼叫</button>
+          <button id="btnDialVideo" class="green">视频呼叫</button>
+        </div>
+        <div class="dtmf-pad" id="dialPad"></div>
+        <label class="chk"><input type="checkbox" id="chkKeyTone" checked> 按键音</label>
+        <p class="hint-text">未接通时点按填入号码；接通后同一组按键直接发 DTMF。</p>
+      </div>
+
+      <div class="card">
+        <h2>通话控制</h2>
+        <div id="callArea" style="display:none">
+          <div class="caller" id="callName"></div>
+          <div class="hint"><span id="callHint"></span> <span id="timer"></span></div>
+          <div class="row">
+            <button id="btnAnswer" class="green">接听</button>
+            <button id="btnAnswerVideo" class="green">视频接听</button>
+            <button id="btnReject" class="red">拒接</button>
+            <button id="btnMute" class="yellow" style="display:none">保持</button>
+            <button id="btnHangup" class="red">挂断</button>
+            <button id="btnVideoToggle" class="icon-btn" title="视频" style="display:none"></button>
+          </div>
+          <div id="mediaRows" style="display:none">
+            <div class="media-line">
+              <button id="btnSpeaker" class="icon-btn" title="扬声器"></button>
+              <input type="range" id="volSpeaker" min="0" max="100" step="5" value="100">
+              <span class="vol-val" id="volSpeakerVal">100%</span>
+            </div>
+            <div class="media-line">
+              <button id="btnMic" class="icon-btn" title="麦克风"></button>
+              <input type="range" id="volMic" min="0" max="200" step="5" value="100">
+              <span class="vol-val" id="volMicVal">100%</span>
+            </div>
+          </div>
+        </div>
+        <p id="noCall" class="state-line">当前没有进行中的通话</p>
+        <label class="chk"><input type="checkbox" id="chkAutoAnswer"> 自动接听</label>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>视频 <span id="videoBadge" class="badge">未订阅</span></h2>
+        <div class="filters">
+          <label>最大宽<select id="vidMaxW"></select></label>
+          <label>最大高<select id="vidMaxH"></select></label>
+          <label>帧率<select id="vidFps"></select></label>
+          <label>质量<select id="vidQuality"></select></label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <label class="chk" id="vidLocalRow"><input type="checkbox" id="vidLocal" checked> 本地画面</label>
+          <label class="chk" id="vidKeepWindowRow"><input type="checkbox" id="vidKeepWindow"> 保留软电话窗口</label>
+        </div>
+        <div class="row">
+          <button id="btnSubVideo" class="green">订阅视频</button>
+        </div>
+        <!-- 两路画面各自带一行表头：左边是名称 + 统计角标，右边是这一路自己的
+             旋转/水平镜像按钮——按钮跟各自的画面**对齐**（原来四个按钮挤在一行，
+             看不出哪两个属于哪一路）。 -->
+        <div class="video-grid">
+          <div class="vcell">
+            <div class="vhead">
+              <span class="vlabel">远端画面 <span id="remoteStat" class="badge">—</span></span>
+              <span class="vacts">
+                <button id="btnRotRemote" class="icon-btn off" disabled title="远端画面旋转 90°（宽高随之互换）"></button>
+                <button id="btnMirRemote" class="icon-btn off" disabled title="远端画面水平镜像"></button>
+              </span>
+            </div>
+            <video id="remoteVideo" playsinline muted></video>
+          </div>
+          <div class="vcell">
+            <div class="vhead">
+              <span class="vlabel">本地画面 <span id="localStat" class="badge">—</span></span>
+              <span class="vacts">
+                <button id="btnRotLocal" class="icon-btn off" disabled title="本地画面旋转 90°（宽高随之互换）"></button>
+                <button id="btnMirLocal" class="icon-btn off" disabled title="本地画面水平镜像"></button>
+              </span>
+            </div>
+            <video id="localVideo" playsinline muted></video>
+          </div>
+        </div>
+        <p class="hint-text" id="vidWindowHint">订阅后软电话不再显示自己的视频窗口（画面在这里看）；<code>保留软电话窗口</code> 勾上则两边都显示。</p>
+      </div>
+
+      <div class="card" id="cardUpdate" hidden>
+        <h2>软件更新</h2>
+        <p class="state-line" id="updLine">—</p>
+        <div class="row">
+          <button id="btnUpdDownload" class="green" hidden>下载</button>
+          <button id="btnUpdCancel" class="gray" hidden>取消下载</button>
+          <button id="btnUpdApply" class="red" hidden>安装并重启</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 通话记录 ==================== -->
+<section class="view" id="view-history" hidden>
+  <div class="card">
+    <h2>通话记录</h2>
+    <div class="row">
+      <input type="text" id="histFilter" placeholder="按号码筛选">
+      <button id="btnHistRefresh" class="ghost">刷新</button>
+      <button id="btnHistDelete" class="red" disabled>删除选中</button>
+      <button id="btnHistClear" class="red">清空</button>
+    </div>
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th style="width:28px"></th>
+          <th style="width:86px">方向</th>
+          <th>号码 / 名称</th>
+          <th style="width:150px">开始时间</th>
+          <th style="width:104px" title="未接通 = 振铃/拨号时长（开始→结束）；接通后 = 开始→接通">振铃/拨号</th>
+          <th style="width:92px" title="接通→结束；未接通显示 —">通话时长</th>
+          <th style="width:70px">结果</th>
+          <th style="width:150px"></th>
+        </tr>
+      </thead>
+      <tbody id="histList"></tbody>
+    </table>
+    <div class="list-foot">
+      <span class="total" id="histTotal"></span>
+      <button id="btnHistMore" class="ghost" hidden>加载更多</button>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 通信录 ==================== -->
+<section class="view" id="view-contacts" hidden>
+  <div class="card">
+    <h2>通信录</h2>
+    <div class="row">
+      <button id="btnCtTabStar" class="ghost">常用联系人</button>
+      <button id="btnCtTabAll" class="ghost">所有联系人</button>
+      <input type="text" id="ctSearch" placeholder="搜索号码 / 名称 / 备注">
+    </div>
+    <div class="row">
+      <button id="btnCtAdd">新增</button>
+      <button id="btnCtStar" class="gray" disabled>设为常用</button>
+      <button id="btnCtUnstar" class="gray" disabled>取消常用</button>
+      <button id="btnCtDelete" class="red" disabled>删除选中</button>
+      <button id="btnCtClear" class="red">清空</button>
+    </div>
+    <div class="row">
+      <button id="btnExportContacts" class="ghost">导出 CSV</button>
+      <button id="btnImportContacts" class="ghost">导入 CSV</button>
+      <button id="btnExportContactsJSON" class="ghost">导出 JSON</button>
+      <button id="btnImportContactsJSON" class="ghost">导入 JSON</button>
+    </div>
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th style="width:28px"></th>
+          <th style="width:34px">★</th>
+          <th style="width:180px">号码</th>
+          <th>名称</th>
+          <th>备注</th>
+          <th style="width:180px"></th>
+        </tr>
+      </thead>
+      <tbody id="ctList"></tbody>
+    </table>
+    <div class="list-foot">
+      <span class="total" id="ctCount"></span>
+      <button id="btnCtMore" class="ghost" hidden>显示更多</button>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 配置 ==================== -->
+<section class="view" id="view-settings" hidden>
+  <div class="settings-grid">
+    <div class="card">
+      <h2>SIP 账户</h2>
+      <label class="chk"><input type="checkbox" id="accEnabled"> 启用该账户</label>
+      <div class="field-row" style="margin-top:8px">
+        <div class="field"><label>服务器</label><input type="text" id="accServer" placeholder="如 10.168.4.40"></div>
+        <div class="field"><label>端口</label><input type="number" id="accPort" placeholder="5060"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>账号</label><input type="text" id="accAccount"></div>
+        <div class="field"><label>认证 ID（留空 = 用账号）</label><input type="text" id="accAuthUser"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>显示名</label><input type="text" id="accDisplayName"></div>
+        <div class="field"><label>密码</label><input type="password" id="accPassword" placeholder="留空 = 不修改"></div>
+      </div>
+      <div class="field-row-3">
+        <div class="field"><label>传输</label><select id="accTransport"></select></div>
+        <div class="field"><label>媒体加密</label><select id="accSrtp"></select></div>
+        <div class="field"><label>注册有效期（秒）</label><input type="number" id="accExpires"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>域名（留空 = 用服务器）</label><input type="text" id="accDomain" placeholder="如 sip.example.com"></div>
+        <div class="field"><label>声明 IP（留空 = 自动）</label><input type="text" id="accPublicIP" placeholder="如 203.0.113.7"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>出站代理（可选）</label><input type="text" id="accProxy" placeholder="host:port"></div>
+        <div class="field"><label>STUN 服务器</label><input type="text" id="accStunServer"></div>
+      </div>
+      <label class="chk"><input type="checkbox" id="accRPort"> 启用 rport（NAT 穿透）</label>
+      <label class="chk"><input type="checkbox" id="accOptChk"> 启用服务端心跳检测（仅 UDP）</label>
+      <label class="chk"><input type="checkbox" id="accStunEnabled"> 启用 STUN 公网地址探测</label>
+      <label class="chk"><input type="checkbox" id="accTLSVerify"> 校验服务器证书（仅 TLS）</label>
+      <label class="chk"><input type="checkbox" id="accClearPassword"> 清除已保存的密码</label>
+      <div class="save-row">
+        <span class="hint-text" id="accHint">保存后会立即按新配置重新注册。</span>
+        <button id="btnSaveAccount">保存并注册</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>音频设备</h2>
+      <div class="field"><label>麦克风</label><select id="audMic"></select></div>
+      <div class="field"><label>扬声器</label><select id="audSpeaker"></select></div>
+      <div class="field"><label>振铃扬声器</label><select id="audRing"></select></div>
+      <div class="row">
+        <button id="btnRefreshAudio" class="ghost">刷新设备</button>
+        <span class="hint-text" id="audHint"></span>
+      </div>
+      <div style="margin-top:10px">
+        <label class="chk"><input type="checkbox" id="audAEC"> 回声消除（AEC）</label>
+        <label class="chk"><input type="checkbox" id="audNS"> 降噪（NS）</label>
+        <label class="chk"><input type="checkbox" id="audAGC"> 自动增益（AGC）</label>
+      </div>
+      <div class="save-row">
+        <span class="hint-text">设备切换立即生效；三个预处理开关从下一通电话生效。</span>
+        <button id="btnSaveAudio">保存</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>视频</h2>
+      <label class="chk"><input type="checkbox" id="vidEnabled"> 启用视频通话</label>
+      <div class="field" style="margin-top:8px"><label>摄像头</label><select id="vidCamera"></select></div>
+      <div class="field-row-3">
+        <div class="field"><label>宽</label><input type="number" id="vidWidth"></div>
+        <div class="field"><label>高</label><input type="number" id="vidHeight"></div>
+        <div class="field"><label>帧率</label><input type="number" id="vidFpsCfg"></div>
+      </div>
+      <div class="field"><label>码率（kbps）</label><input type="number" id="vidBitrate"></div>
+      <div class="row">
+        <button id="btnRefreshVideo" class="ghost">刷新摄像头</button>
+        <span class="hint-text" id="vidHint"></span>
+      </div>
+      <div class="save-row">
+        <span class="hint-text">总开关立即生效；摄像头与采集参数从下一通电话生效。</span>
+        <button id="btnSaveVideo">保存</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>日志</h2>
+      <div class="field"><label>级别</label><select id="logLevel"></select></div>
+      <div class="field"><label>日志目录（重启后生效）</label><input type="text" id="logDir" placeholder="留空 = 配置目录下的 logs"></div>
+      <div><label class="chk"><input type="checkbox" id="logFile"> 写入日志文件（重启后生效）</label></div>
+      <div><label class="chk"><input type="checkbox" id="logSipTrace"> 记录 SIP 信令（含报文全文）</label></div>
+      <div class="save-row">
+        <span class="hint-text">级别与信令开关立即生效；写文件需重启。</span>
+        <button id="btnSaveLog">保存</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>应用</h2>
+      <label class="chk"><input type="checkbox" id="appAutoStart"> 开机自动启动</label>
+      <div class="field" style="margin-top:8px">
+        <label>本地 WS 端口（重启后生效）</label>
+        <input type="number" id="wsPort" min="1" max="65535">
+      </div>
+      <label class="chk"><input type="checkbox" id="wsAllowRemote"> 允许远程连接（重启后生效）</label>
+      <p class="hint-text">⚠️ 网页接口<b>没有鉴权</b>：勾选后监听 0.0.0.0，同网段任何设备都能拨号、读通信录/通话记录、改配置甚至重启本机软电话。只在受控网络里开。</p>
+      <p class="hint-text" id="wsHint">—</p>
+      <div class="row">
+        <button id="btnSaveWS" class="ghost">保存端口</button>
+        <button id="btnRestart" class="red">立即重启程序</button>
+      </div>
+      <p class="state-line" id="appLine">—</p>
+    </div>
+
+    <div class="card">
+      <h2>自动更新</h2>
+      <p class="state-line" id="verLine">当前版本：—</p>
+      <div class="field"><label>更新站点（留空 = 不自动检查）</label><input type="text" id="updSite" placeholder="如 https://update.example.com"></div>
+      <div class="field-row">
+        <div class="field"><label>应用 ID</label><input type="text" id="updAppId"></div>
+        <div class="field"><label>检查周期（分钟）</label><input type="number" id="updInterval" min="1" max="1440"></div>
+      </div>
+      <label class="chk"><input type="checkbox" id="updPrerelease"> 接受预览版</label>
+      <div class="row" style="margin-top:8px">
+        <button id="btnWriteUpdCfg" class="gray">保存更新配置</button>
+        <button id="btnCheckUpdate" class="ghost">立即检查</button>
+      </div>
+      <p class="hint-text" id="updHint">软电话按上面的周期自己检查更新；网页也能下载与安装（见「通话」页的更新提示）。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 诊断 ==================== -->
+<section class="view" id="view-diag" hidden>
+  <div class="settings-grid">
+    <div class="card">
+      <h2>运行信息</h2>
+      <p class="state-line" id="diagInfo">—</p>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="chkLogFrames"> 显示视频帧事件</label>
+        <button id="btnClearLog" class="ghost">清空日志</button>
+        <span class="hint-text" id="logHint">最近 200 条事件</span>
+      </div>
+      <div id="log" style="height:360px"></div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>用 sip:// 链接拉起软电话</h2>
+        <p class="hint-text">链接<b>已按当前配置自动填好并生成</b>（服务器/端口/账号/传输/实例槽位）——
+          程序关掉后直接点它就按同样的参数起来。要改参数就改下面几项再点「生成拉起链接」。
+          密码不会下发，需要带密码的链接时手填一次再生成。</p>
+        <div class="field"><label>服务器</label>
+          <input type="text" id="uriServer" placeholder="如 10.168.4.40:15060（不写端口按传输取 5060 / TLS 5061）"></div>
+        <div class="field-row">
+          <div class="field"><label>账号</label><input type="text" id="uriAccount" placeholder="如 2999"></div>
+          <div class="field"><label>认证密码（可留空）</label><input type="text" id="uriPassword"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>传输</label><select id="uriTransport"></select></div>
+          <div class="field"><label>实例槽位（0 = 主实例）</label><input type="number" id="uriInstance" min="0" max="99" placeholder="0"></div>
+        </div>
+        <div class="row">
+          <button id="btnGenUri" class="green">生成拉起链接</button>
+        </div>
+        <div class="state-line" id="uriLine" style="display:none"></div>
+      </div>
+
+      <div class="card">
+        <h2>链接说明</h2>
+        <p class="hint-text">
+          · 明文信令：<code>sip://账号:密码@服务器:端口</code><br>
+          · TCP 信令：<code>sip://…?transport=tcp</code><br>
+          · TLS 信令：<code>sips://账号:密码@服务器:端口</code>（默认端口 5061）<br>
+          · 沙箱实例：<code>sip://…?instance=2</code>（该实例没在跑就用它的独立数据目录启动）<br>
+          链接里含明文密码，只适合内部系统使用。
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<div id="toast"></div>
+
+<script src="/sdk/sip-phone-sdk.js"></script>
+<script src="js/common.js"></script>
+<script src="js/icons.js"></script>
+<script src="js/store.js"></script>
+<script src="js/callbar.js"></script>
+<script src="js/views/call.js"></script>
+<script src="js/views/history.js"></script>
+<script src="js/views/contacts.js"></script>
+<script src="js/views/settings.js"></script>
+<script src="js/views/diag.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

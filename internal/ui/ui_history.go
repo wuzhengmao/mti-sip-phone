@@ -170,7 +170,8 @@ func (a *App) showHistory() {
 		a.showInfo("提示", "通话中无法查看通话记录")
 		return
 	}
-	a.hideTip() // 切页时收起备注提示
+	a.hideTip()         // 切页时收起备注提示
+	a.hideDialSuggest() // 拨号建议下拉同理
 	a.mainContent.Objects[0] = a.historyPage
 	a.mainContent.Refresh()
 	a.history.reload()

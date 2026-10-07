@@ -204,13 +204,13 @@ func (a *App) SaveContact(prevNumber string, c Contact) error {
 	if NormalizeNumber(c.Number) == "" {
 		return ErrContactNumberEmpty
 	}
-	return a.mutateContacts(func() error { return a.contacts.Save(prevNumber, c) })
+	return a.mutateContacts("save", func() error { return a.contacts.Save(prevNumber, c) })
 }
 
 // DeleteContacts 按号码（任意形态）删除若干条，返回实际删除条数。
 func (a *App) DeleteContacts(numbers []string) (int, error) {
 	n := 0
-	err := a.mutateContacts(func() error {
+	err := a.mutateContacts("delete", func() error {
 		var err error
 		n, err = a.contacts.Delete(contactKeys(numbers))
 		return err
@@ -221,7 +221,7 @@ func (a *App) DeleteContacts(numbers []string) (int, error) {
 // SetContactsStarred 批量设置/取消常用标志，返回受影响条数。
 func (a *App) SetContactsStarred(numbers []string, starred bool) (int, error) {
 	n := 0
-	err := a.mutateContacts(func() error {
+	err := a.mutateContacts("star", func() error {
 		var err error
 		n, err = a.contacts.SetStarred(contactKeys(numbers), starred)
 		return err
@@ -232,7 +232,7 @@ func (a *App) SetContactsStarred(numbers []string, starred bool) (int, error) {
 // ClearContacts 清空通信录，返回删除条数。
 func (a *App) ClearContacts() (int, error) {
 	n := 0
-	err := a.mutateContacts(func() error {
+	err := a.mutateContacts("clear", func() error {
 		var err error
 		n, err = a.contacts.Clear()
 		return err
@@ -245,7 +245,7 @@ func (a *App) ClearContacts() (int, error) {
 // 两步必须整体串行（contactWriteMu）：写入方可能并发（界面线程 + 多个 WS 连接），
 // 若 A 写完后 B 再写、A 的快照却后于 B 完成，就会把旧数据当成最新快照发布出去。
 // 存储层是单 worker 串行执行 SQL，read-your-writes 由它保证。
-func (a *App) mutateContacts(fn func() error) error {
+func (a *App) mutateContacts(action string, fn func() error) error {
 	if a.contacts == nil {
 		return ErrContactsUnavailable
 	}
@@ -254,7 +254,18 @@ func (a *App) mutateContacts(fn func() error) error {
 	if err := fn(); err != nil {
 		return err
 	}
-	return a.ReloadContacts()
+	if err := a.ReloadContacts(); err != nil {
+		return err
+	}
+	// 通信录已变更（动因 action）：广播给所有订阅者。
+	// 放在这里而不是各个写方法里，是为了让**所有**写入路径都只维护一处——
+	// 桌面界面（新增/编辑/删除/清空）、网页控制台（contact.* 方法）、
+	// CSV/JSON 导入都会经过这里，多标签页与桌面列表据此刷新。
+	a.bus.Publish("contact.changed", map[string]any{
+		"action": action,
+		"total":  a.ContactCount(),
+	})
+	return nil
 }
 
 // ExportContactsCSV 导出全部联系人为 CSV 文本（表头 + 号码/名称/备注/常用）。
@@ -271,7 +282,7 @@ func (a *App) ExportContactsCSV() (string, error) {
 func (a *App) ImportContactsCSV(text string) (ContactImportResult, error) {
 	list, skipped := ParseContactsCSV(text)
 	res := ContactImportResult{Skipped: skipped}
-	err := a.mutateContacts(func() error {
+	err := a.mutateContacts("import", func() error {
 		added, updated, err := a.contacts.Merge(list)
 		res.Added, res.Updated = added, updated
 		return err

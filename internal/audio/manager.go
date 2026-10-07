@@ -58,7 +58,7 @@ type Manager struct {
 	cmds       chan func()
 	workerDone chan struct{}
 	readyCh    chan struct{}
-	onReady    func()
+	onReady    []func() // 就绪回调（可注册多个：界面刷新设备列表 + 网页 audio.ready 事件）
 	closeOnce  sync.Once
 }
 
@@ -95,7 +95,7 @@ func (m *Manager) initBackend() {
 	}
 	m.initDone = true
 	engine := m.engine // 初始化期间已挂上的引擎：就绪后补启动
-	cb := m.onReady
+	cbs := m.onReady
 	m.mu.Unlock()
 
 	if err != nil {
@@ -110,22 +110,31 @@ func (m *Manager) initBackend() {
 		// 初始化期间接通的通话：补启动音频流（队列保证与后续操作顺序一致）
 		m.enqueue(func() { m.startStreamFor(engine) })
 	}
-	if cb != nil {
-		cb()
+	for _, cb := range cbs {
+		if cb != nil {
+			cb()
+		}
 	}
 }
 
-// OnReady 注册后端初始化结束（成功或失败）后的回调，最多生效一次。
+// OnReady 注册后端初始化结束（成功或失败）后的回调，每个注册者各调一次。
 // 回调在后台 goroutine 中执行：涉及界面的操作请自行用 fyne.Do 包裹。
 // 若注册时初始化已结束，回调会被立即调用。
+//
+// 可以注册多个（历史上只保留最后一个，界面那时是唯一消费者）：
+// 仅托盘无 UI 版没有界面，网页靠 main 注册的这条回调发 audio.ready 事件
+// 刷新设备列表，两者不能互相顶掉。
 func (m *Manager) OnReady(fn func()) {
+	if fn == nil {
+		return
+	}
 	m.mu.Lock()
 	if m.initDone {
 		m.mu.Unlock()
 		fn()
 		return
 	}
-	m.onReady = fn
+	m.onReady = append(m.onReady, fn)
 	m.mu.Unlock()
 }
 

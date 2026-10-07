@@ -71,8 +71,17 @@ cmd/sip-phone/main.go            进程入口：命令行/单实例/协议注册
 三条"接入面"最终都落到同一套核心：
 
 1. **桌面 UI**（Fyne）：用户操作 → `ui` 调 `core.App` 的方法；
-2. **网页/SDK**（本地 WS）：`wsapi` 收到请求 → 调同样的 `core.App` 方法；
+2. **网页控制台/SDK**（本地 WS）：`wsapi` 收到请求 → 调同样的 `core.App` 方法；
 3. **`sip://` 协议拉起**（浏览器点链接）：第二实例把参数转发给第一实例 → `main.handleLaunchArgs` 写入账户配置并注册。
+
+**两个构建变体**（同一份代码，构建标签区分）：
+
+| 变体 | 标签 | 界面 | 托盘 |
+| --- | --- | --- | --- |
+| 完整版（默认） | 无 | `internal/ui`（Fyne 主窗口 + 通话面板 + 视频窗口 + 更新提示窗） | Fyne 托盘（`internal/ui/buildTray`） |
+| **仅托盘无 UI 版** | `noui` | **没有**（不编入 fyne/GLFW/OpenGL） | `internal/tray`（直接用 `fyne.io/systray`，左键开网页、右键菜单） |
+
+变体的分流只在 `cmd` 层：`gui.go`（`!headless && !noui`）、`gui_noui.go`（`noui`）、`gui_headless.go`（`headless && !noui`）三份实现同一个 `runGUI` 签名。`internal/ui` 一行都不改——它本来就只被 `gui.go` 引用。变体相关的常量都在 `internal/variant`（叶子包，供 `internal/config` 与 `internal/tray` 用；放 core 会与 config 循环依赖）。
 
 ### 3.2 关键规则：core 只有接口，谁也不能反向依赖
 
@@ -101,6 +110,8 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 - **状态只有一份**（在 `core.App`），界面与网页都是它的投影；`system.getState`/`system.state` 返回同一份快照。
 - 事件名与负载见 `docs/ws-protocol.md`；`wsapi` 不做业务判断，只做"分发 + 推送"。
 - 总线是**容量 64 的 channel、满即丢**——所以**视频帧绝不能走总线**（见 5.5）。
+
+**网页控制台相关的补充事件**（1.0.15）：`contact.changed`（通信录任何写入路径都会广播，多标签/桌面同步）、`calllog.changed`（记录被删除/清空）、`system.config`（配置被改写，`section` 指明哪一段）、`audio.ready`（音频后端后台初始化完成）。它们都由 `core.App`（而不是 wsapi）广播，因为桌面与网页都是消费者，事件得是同一份。
 
 ### 3.4 并发模型（改代码前必须知道）
 
@@ -157,11 +168,16 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 
 ### 4.7 `internal/wsapi`（本地控制服务）
 
-- **职责**：HTTP 服务（测试页 + `/sdk/*` 静态资源 + `/ws`）、方法分发（`call.*` / `system.*` / `video.*`）、事件推送、心跳；**视频中枢** `video.go` 把帧按"通道+参数"分组编码成 JPEG 推送。
-- **关键文件**：`server.go`（HTTP/WS 接入）、`handler.go`（方法分发）、`protocol.go`（方法名与错误码）、`video.go`（订阅与编码）。
-- **注意**：仅回环、无 token（安全边界见 ws-protocol.md）；新增方法要**同时**加进外层分发列表与内层分支（漏了会返回 `unknown_method`，有测试兜底）。
+- **职责**：HTTP 服务（网页控制台 + `/sdk/*` + `/ws` + 通信录 REST）、方法分发（`call.*` / `system.*` / `video.*` / `calllog.*` / `contact.*` / `audio.*` / `update.*`）、事件推送、心跳；**视频中枢** `video.go` 把帧按"通道+参数"分组编码成 JPEG 推送。
+- **关键文件**：`server.go`（HTTP/WS 接入、静态资源白名单）、`handler.go`（主分发 + `call.*`）、`handler_calllog.go` / `handler_contacts.go` / `handler_config.go` / `handler_update.go`（分组子分发，主 switch 的 `default` 依次询问）、`protocol.go`（方法名与错误码）、`video.go`（订阅与编码）。
+- **注意**：
+  - 仅回环、无 token（安全边界见 ws-protocol.md）；新增方法要**同时**加进外层 case 与内层分支，或挂到某个分组分发器上（漏了会返回 `unknown_method`，有测试兜底）。
+  - **设备枚举异步回包**（`audio.devices` / `video.devices`）：枚举可能阻塞数秒，服务端放独立 goroutine 做完再回，配 `enumGuard` 单飞 + 2 秒缓存 + 3 秒超时。写路径本来就有 `wmu` 串行化、SDK 按 id 配对响应，所以异步/乱序是安全的。
+  - **会终止进程的动作先回响应**（`system.restart`、`update.apply`）：先动手的话响应发不出去，页面只看到连接断开。
 
-### 4.8 `internal/ui`（Fyne 界面）
+### 4.8 `internal/ui`（Fyne 界面，仅完整版）
+
+> 该包**只在完整版构建里编译**（`-tags noui` 时整包不参与，no-ui 版因此不链接 fyne/GLFW/OpenGL）。
 
 - **职责**：主窗口（拨号盘 + 设置页）、**通话面板**（吸附右下角、不占任务栏）、**更新提示窗**（同样吸附右下角）、来电振铃动效、视频窗口与本地回显、托盘（图标颜色 = 注册状态）。
 - **关键文件**：`ui.go`（主窗口/拨号盘/设置/托盘/状态刷新）、`ui_call.go`（通话面板与紧凑按钮）、`ui_history.go`（通话记录页：与配置页一样切在主窗体内，紧凑双行列表 + 自绘文本 + 拖动/Shift 多选 + 滚动加载）、`ui_video.go`（视频窗口/回显/变换）、`ui_contacts.go`（通信录页：两个自绘 tab、拼音搜索、CSV 导入导出、右键批量操作）、`ui_tooltip.go`（备注悬停提示图层）、`ui_update.go`（更新提示窗）、`widgets.go`（内页共用：自绘单行文本 `plainText`、标准外观按钮 `plainButton`、统一顶栏 `pageTopBar`）、`theme.go`/`icons.go`/`statusdot.go`。
@@ -171,6 +187,9 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 
 | 包 | 职责 | 注意 |
 | --- | --- | --- |
+| `internal/variant` | 变体标识（`NoUI` / `AppName` / `UpdateAppID`），按 `noui` 标签分文件 | 叶子包：不能 import core/config（config 要 import 它来做 `update.appId` 的变体归一） |
+| `internal/tray` | 仅托盘无 UI 版的托盘：菜单、图标（SVG 运行期光栅化成 PNG/ICO）、打开浏览器 | 直接用 `fyne.io/systray`，**不调 `SetSystemTrayWindow`**（那是 Fyne 窗口用的）；左键点击=开网页 |
+| `internal/appicon` | 话机图标的 SVG 源（绿/红），`internal/ui` 与 `internal/tray` 各取所需 | 单一真相源：托盘图标字号/形状两版一致 |
 | `internal/video` | cgo 封装：FFmpeg 解码、OpenH264/libvpx/FFmpeg 编码、swscale；`camera_*.go` 按平台实现采集 | 静态库不入库（`scripts/build-video-libs.*` 生成）；`-tags video` 才编入 |
 | `internal/calllog` | 通话记录（REQ-CALL-007）的 SQLite 存储：`Start/MarkAnswered/Finish` 三个写入 + 分页查询/删除/清空 | **所有 SQL 排在单 worker 的 FIFO 队列上串行执行**：SIP 线程只做一次 channel send（永不阻塞信令），界面的查询排在写之后（读己之写）；`call_id` 主键 + `Finish` 带 `ended_at=0` 条件保证幂等（SIP 层会重复上报结束）；启动时把上次遗留的"进行中"记录清扫为「已中断」 |
 | `internal/contacts` | 通信录（REQ-CONTACT-001）的 SQLite 存储：全量快照、新增/修改（号码可改，撞号报错）、批量设常用、删除、清空、按号码合并导入 | 与 calllog 同一套单 worker 串行骨架，但**没有异步入队**（写入全部来自界面/WS，不是信令线程）；去重判断与写入在同一事务；导入时常用标志**只增不减**（本地 or 导入） |
@@ -235,9 +254,11 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 | 音频设备 / 提示音 / 按键音 | `internal/audio/manager.go`、`backend_malgo.go`、`tone.go` |
 | WS 方法 / 事件 | `internal/wsapi/{protocol,handler,server}.go`（协议文档同步 `docs/ws-protocol.md`） |
 | 网页视频订阅 | `internal/wsapi/video.go` + `web/sdk/sip-phone-sdk.js` |
-| JS SDK / 测试页 | `web/sdk/*`、`web/test.html`（改完重建二进制才生效——它们是内嵌资源） |
-| 构建脚本 / 交叉编译 | `build.bat`、`build.sh`、`scripts/build-*-lib.*`（先读 CLAUDE.md 构建章节） |
-| 一键发布到更新站点 | `scripts/release.sh` + `release/release.conf`（见 auto-update.md） |
+| 网页控制台（四个页面） | `web/index.html`（外壳）+ `web/css/app.css` + `web/js/{common,icons,store,callbar,app}.js` + `web/js/views/{call,history,contacts,settings}.js`（改完**重建二进制 + 重启**才生效——都是内嵌资源） |
+| JS SDK | `web/sdk/sip-phone-sdk.{js,d.ts}`（同样内嵌，改完要重建） |
+| 仅托盘无 UI 版（托盘行为/图标） | `cmd/sip-phone/gui_noui.go` + `internal/tray/*` + `internal/variant/*`（构建标签 `noui`） |
+| 构建脚本 / 交叉编译 | `build.bat`、`build.sh`（两者都按 full / noui 两个变体各跑一遍目标）、`scripts/build-*-lib.*`（先读 CLAUDE.md 构建章节） |
+| 一键发布到更新站点 | `scripts/release.sh` + `release/release.conf`（完整版）/ `release/release-no-ui.conf`（`--no-ui`，见 auto-update.md） |
 | 版本号 | `internal/core/buildinfo.go`（唯一真相源，人工修改） |
 
 ## 八、上手第一小时

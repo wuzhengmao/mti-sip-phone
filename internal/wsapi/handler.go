@@ -152,7 +152,7 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		resp = okMessage(msg.ID, map[string]string{"callId": callID})
 
 	case MethodAnswer, MethodHangup, MethodReject, MethodMute, MethodMuteMic, MethodMuteSpeaker,
-		MethodSetMicGain, MethodSetSpeakerVolume, MethodSetVideo, MethodDTMF:
+		MethodSetMicGain, MethodSetSpeakerVolume, MethodSetVideo, MethodSetVideoPreview, MethodDTMF:
 		var p struct {
 			CallID  string `json:"callId"`
 			Code    int    `json:"code"`
@@ -161,8 +161,8 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 			Enabled bool   `json:"enabled"` // 仅 call.setVideo：视频总开关（REQ-VIDEO-008）
 			Digit   string `json:"digit"`   // 仅 call.dtmf：一个 DTMF 字符（0-9 * # A-D）
 			// 音量（REQ-MEDIA-006）：**百分比整数**，0 = 禁用（同开关的「关」）
-			Gain           *int `json:"gain"`           // 仅 call.setMicGain：0–200
-			SpeakerVolume  *int `json:"speakerVolume"`  // 仅 call.setSpeakerVolume：0–100
+			Gain          *int `json:"gain"`          // 仅 call.setMicGain：0–200
+			SpeakerVolume *int `json:"speakerVolume"` // 仅 call.setSpeakerVolume：0–100
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil || p.CallID == "" {
 			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 callId"))
@@ -207,6 +207,10 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 			err = s.app.SetSpeakerVolume(p.CallID, float32(*p.SpeakerVolume)/100)
 		case MethodSetVideo:
 			err = s.app.SetVideoEnabled(p.CallID, p.Enabled)
+		case MethodSetVideoPreview:
+			// 本地回显开关（纯本地，REQ-VIDEO-009）：无 UI 版没有视频窗口，
+			// 这里只是与桌面口径保持一致（网页订阅本地画面走 video.subscribe）
+			err = s.app.SetVideoPreview(p.CallID, p.Enabled)
 		case MethodDTMF:
 			err = s.app.SendDTMF(p.CallID, p.Digit)
 		}
@@ -415,7 +419,30 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		})
 
 	default:
+		// 分组的子分发器（各文件一组方法，主 switch 不再无限膨胀）：
+		// 依次询问，谁认领谁返回响应。
+		if r, ok := s.dispatchCallLog(msg); ok {
+			resp = r
+			break
+		}
+		if r, ok := s.dispatchContacts(msg); ok {
+			resp = r
+			break
+		}
+		if r, ok := s.dispatchConfig(c, msg); ok {
+			resp = r
+			break
+		}
+		if r, ok := s.dispatchUpdate(ctx, msg); ok {
+			resp = r
+			break
+		}
 		resp = errMessage(msg.ID, CodeUnknownMethod, fmt.Errorf("未知方法: %s", msg.Method))
+	}
+
+	// 异步回包的方法（设备枚举等）返回零值 Message：响应已经由它们自己发出
+	if resp.Type == "" {
+		return
 	}
 
 	c.wmu.Lock()
@@ -462,6 +489,14 @@ func codeOf(err error) string {
 		return CodeInvalidParams
 	case errors.Is(err, core.ErrUpdateInProgress):
 		return CodeInternal
+	case errors.Is(err, core.ErrCallLogUnavailable):
+		return CodeCallLogUnavailable
+	case errors.Is(err, core.ErrAudioUnavailable):
+		return CodeAudioUnavailable
+	case errors.Is(err, core.ErrConfigUnavailable):
+		return CodeConfigUnavailable
+	case errors.Is(err, core.ErrConfigInvalid):
+		return CodeInvalidParams
 	default:
 		return CodeInternal
 	}

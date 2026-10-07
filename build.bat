@@ -2,6 +2,11 @@
 rem mti-sip-phone Windows build script: native builds, output to dist\
 rem Depends: Go 1.24+, MinGW-W64 gcc (CGO; WinLibs or MSYS2)
 rem NOTE: keep this file ASCII-only, cmd.exe parses bat as GBK on zh-CN Windows
+rem Two build variants (see internal\variant and cmd\sip-phone\gui_noui.go):
+rem   full  - complete app (Fyne desktop UI + system tray)   <- default
+rem   noui  - tray-only build (-tags noui): no windows at all, every action goes
+rem           through the web console (tray click opens the browser). It does not
+rem           link fyne/GLFW at all, so no OpenGL/X11 is involved.
 rem windows/386 GUI build needs 32-bit MinGW: MSYS2 (pacman -S mingw-w64-i686-gcc)
 rem or WinLibs i686 at %USERPROFILE%\tools\winlibs-i686; without it the 386
 rem target is skipped, there is no headless fallback anymore.
@@ -57,96 +62,45 @@ goto :ver_done
 echo Version: %APP_VERSION% - release build
 :ver_done
 
-rem 1) Windows amd64 GUI: no console, tray app, CGO+audio
-rem -extldflags -static: link the mingw runtimes (libwinpthread/libstdc++/libgcc)
-rem into the exe. Without it the binary needs those DLLs on PATH -- they are NOT
-rem part of Windows, so a copy of the exe on a machine without MinGW fails to
-rem start ("libwinpthread-1.dll not found"). Same as the 386 target below.
-call :codec_setup windows-amd64
-echo [1/4] Building dist\sip-phone-windows-amd64.exe (%FEATURES%, static)...
-go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui -extldflags -static" -o dist\sip-phone-windows-amd64.exe .\cmd\sip-phone
+rem ===============================================================
+rem Windows targets. Every GUI target runs once per variant:
+rem   dist\sip-phone-<os>-<arch>[.exe]           - full   (Fyne UI + tray)
+rem   dist\sip-phone-no-ui-<os>-<arch>[.exe]     - noui   (tray only)
+rem The console artifact (-headless server / command line debug) exists for the
+rem full variant only: the tray-only build has no UI to debug and that artifact
+rem is never published.
+rem ===============================================================
+
+call :variant_setup full
+call :build_amd64
+if errorlevel 1 goto :err
+call :build_console
+if errorlevel 1 goto :err
+call :build_386
+if errorlevel 1 goto :err
+call :build_arm64
 if errorlevel 1 goto :err
 
-rem 2) Windows console build (-headless server mode / command line debug)
-call :codec_setup windows-amd64
-echo [2/4] Building dist\sip-phone-console.exe (%FEATURES%, console/headless, static)...
-go build %TAGS_ARG% -ldflags "%LDFLAGS% -extldflags -static" -o dist\sip-phone-console.exe .\cmd\sip-phone
+call :variant_setup noui
+call :build_amd64
+if errorlevel 1 goto :err
+call :build_386
+if errorlevel 1 goto :err
+call :build_arm64
 if errorlevel 1 goto :err
 
-rem 3) Windows 386 GUI: needs 32-bit MinGW, otherwise skipped
-set "GCC32="
-if exist "C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe" set "GCC32=C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe"
-if exist "%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe" set "GCC32=%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe"
-rem NOTE: no parentheses or trailing "..." in echo lines inside if/else blocks,
-rem cmd.exe mis-parses them as a command group and aborts with a syntax error.
-if not defined GCC32 goto :skip386
-set CGO_ENABLED=1
-set CC=%GCC32%
-rem Audio preprocessing's C++ bridge (internal/audio/apm_bridge.cc) needs a CXX
-rem of the SAME architecture as CC: Go's default is a bare "g++" which resolves
-rem to the x64 toolchain on PATH, so a 32-bit target would link with the wrong
-rem one. Derive it from CC by swapping the suffix.
-set "CXX=%GCC32:gcc.exe=g++.exe%"
-set GOOS=windows
-set GOARCH=386
-call :codec_setup windows-386
-echo [3/4] Building dist\sip-phone-windows-386.exe (%FEATURES%, static)...
-go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui -extldflags -static" -o dist\sip-phone-windows-386.exe .\cmd\sip-phone
-if errorlevel 1 goto :err
-goto :arm64
-
-:skip386
-echo [3/4] i686 gcc not found, skipping dist\sip-phone-windows-386.exe
-echo       install MSYS2 mingw-w64-i686-gcc or WinLibs i686 to enable it
-
-:arm64
-rem 4) Windows arm64 GUI. Needs llvm-mingw (LLVM/Clang based): GCC-based
-rem mingw-w64 has no aarch64-w64-mingw32 target, so the usual MinGW toolchain
-rem cannot produce this one. Skipped when not installed.
-set "LLVM_BIN="
-set "LLVM_HINT="
-if defined LLVM_MINGW set "LLVM_BIN=%LLVM_MINGW%\bin"
-if defined LLVM_MINGW set "LLVM_HINT=LLVM_MINGW=%LLVM_MINGW%"
-if not defined LLVM_BIN if exist "%USERPROFILE%\tools\llvm-mingw\bin\aarch64-w64-mingw32-clang.exe" set "LLVM_BIN=%USERPROFILE%\tools\llvm-mingw\bin"
-if not defined LLVM_BIN goto :skiparm64
-if not exist "%LLVM_BIN%\aarch64-w64-mingw32-clang.exe" goto :skiparm64
-set CGO_ENABLED=1
-set "CC=%LLVM_BIN%\aarch64-w64-mingw32-clang.exe"
-set "CXX=%LLVM_BIN%\aarch64-w64-mingw32-clang++.exe"
-set "PATH=%LLVM_BIN%;%PATH%"
-set GOOS=windows
-set GOARCH=arm64
-rem No codec probing here on purpose: the video / Opus / AEC static libraries
-rem are not built for windows-arm64 (and build-video-libs.bat cannot produce
-rem them), so the hints printed for the x86 targets would be misleading.
-rem This target is always the base build: CGO + audio devices + G.711/G.722.
-set "TAGS_ARG="
-set "CGO_CFLAGS="
-set "CGO_CXXFLAGS="
-set "CGO_LDFLAGS="
-echo [4/4] Building dist\sip-phone-windows-arm64.exe (CGO, audio, no video/opus/AEC)...
-echo       note: base build only - no arm64 static libraries for video/Opus/AEC
-go build -ldflags "%LDFLAGS% -H=windowsgui" -o dist\sip-phone-windows-arm64.exe .\cmd\sip-phone
-if errorlevel 1 goto :err
-set "ARM64_ON=1"
 goto :summary
-
-:skiparm64
-echo [4/4] llvm-mingw not found, skipping dist\sip-phone-windows-arm64.exe
-echo       install: download llvm-mingw-^<version^>-ucrt-x86_64.zip from
-echo         https://github.com/mstorsjo/llvm-mingw/releases
-echo       unpack it to %%USERPROFILE%%\tools\llvm-mingw so that
-echo         %%USERPROFILE%%\tools\llvm-mingw\bin\aarch64-w64-mingw32-clang.exe exists
-echo       or set LLVM_MINGW to an existing llvm-mingw directory
-echo       note: GCC-based mingw-w64 has no aarch64 target, llvm-mingw is required
 
 :summary
 echo Build OK: version %APP_VERSION%
-echo   dist\sip-phone-windows-amd64.exe          - tray GUI, no console, static
-echo   dist\sip-phone-console.exe                - console, headless/debug, static
-if defined GCC32 echo   dist\sip-phone-windows-386.exe            - tray GUI, static
-if defined ARM64_ON echo   dist\sip-phone-windows-arm64.exe          - tray GUI, base build
-if not defined ARM64_ON if defined LLVM_HINT echo   dist\sip-phone-windows-arm64.exe: %LLVM_HINT% has no aarch64-w64-mingw32-clang.exe
+if defined AMD64_ON echo   dist\sip-phone-windows-amd64.exe           - tray GUI, static
+if defined NOUI_AMD64_ON echo   dist\sip-phone-no-ui-windows-amd64.exe   - tray only, no UI, static
+if defined CONSOLE_ON echo   dist\sip-phone-console.exe                 - console, headless/debug, static
+if defined 386_ON echo   dist\sip-phone-windows-386.exe             - tray GUI, static
+if defined NOUI_386_ON echo   dist\sip-phone-no-ui-windows-386.exe     - tray only, no UI, static
+if defined ARM64_ON echo   dist\sip-phone-windows-arm64.exe           - tray GUI, base build
+if defined NOUI_ARM64_ON echo   dist\sip-phone-no-ui-windows-arm64.exe   - tray only, no UI, base build
+echo (skipped targets and their reasons are printed above)
 echo Linux GUI and Windows GUI cross builds: run ./build.sh on Linux
 exit /b 0
 
@@ -157,6 +111,135 @@ exit /b 1
 :vererr
 echo Build FAILED: cannot parse base version from internal\core\buildinfo.go
 exit /b 1
+
+rem ---------------------------------------------------------------
+rem Build variant + per-target subroutines (called from the block above).
+rem ---------------------------------------------------------------
+
+:variant_setup
+rem %~1 = full | noui. Sets the artifact infix, the extra build tag and the
+rem summary flag prefix. Variables are read inside the called subroutines
+rem (which are parsed when they run), never inside a parenthesized block of
+rem the caller - that is where cmd's delayed expansion would bite.
+set "VAR_INFIX="
+set "VAR_TAGS_EXTRA="
+set "VAR_LABEL=full"
+set "VAR_FLAG="
+if not "%~1"=="noui" goto :eof
+set "VAR_INFIX=no-ui-"
+set "VAR_TAGS_EXTRA=noui"
+set "VAR_LABEL=no-ui"
+set "VAR_FLAG=NOUI_"
+goto :eof
+
+:build_amd64
+rem Native amd64: no console (GUI subsystem), static mingw runtime.
+rem -extldflags -static: link the mingw runtimes (libwinpthread/libstdc++/libgcc)
+rem into the exe. Without it the binary needs those DLLs on PATH -- they are NOT
+rem part of Windows, so a copy of the exe on a machine without MinGW fails to
+rem start ("libwinpthread-1.dll not found"). Same as the 386 target.
+rem GOOS/GOARCH/CC/CXX are set explicitly on every target: a previous 386 or
+rem arm64 build leaves its own values behind, and the noui pass runs after them.
+set CGO_ENABLED=1
+set GOOS=windows
+set GOARCH=amd64
+if defined GCC (set "CC=%GCC%") else (set "CC=")
+if defined GCC (set "CXX=%GCC:gcc.exe=g++.exe%") else (set "CXX=")
+call :codec_setup windows-amd64 %VAR_TAGS_EXTRA%
+if errorlevel 1 exit /b 1
+echo [%VAR_LABEL%] Building dist\sip-phone-%VAR_INFIX%windows-amd64.exe (%FEATURES%, static)...
+go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui -extldflags -static" -o dist\sip-phone-%VAR_INFIX%windows-amd64.exe .\cmd\sip-phone
+if errorlevel 1 exit /b 1
+set "%VAR_FLAG%AMD64_ON=1"
+exit /b 0
+
+:build_console
+rem Console subsystem build: runs with -headless (WS service only) or as a
+rem command line debug build. Full variant only (see the note above).
+set CGO_ENABLED=1
+set GOOS=windows
+set GOARCH=amd64
+if defined GCC (set "CC=%GCC%") else (set "CC=")
+if defined GCC (set "CXX=%GCC:gcc.exe=g++.exe%") else (set "CXX=")
+call :codec_setup windows-amd64
+if errorlevel 1 exit /b 1
+echo [full] Building dist\sip-phone-console.exe (%FEATURES%, console/headless, static)...
+go build %TAGS_ARG% -ldflags "%LDFLAGS% -extldflags -static" -o dist\sip-phone-console.exe .\cmd\sip-phone
+if errorlevel 1 exit /b 1
+set "CONSOLE_ON=1"
+exit /b 0
+
+:build_386
+rem 32-bit build: needs 32-bit MinGW, otherwise skipped.
+set "GCC32="
+if exist "C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe" set "GCC32=C:\msys64\mingw32\bin\i686-w64-mingw32-gcc.exe"
+if exist "%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe" set "GCC32=%USERPROFILE%\tools\winlibs-i686\mingw32\bin\i686-w64-mingw32-gcc.exe"
+rem NOTE: no parentheses or trailing "..." in echo lines inside if/else blocks,
+rem cmd.exe mis-parses them as a command group and aborts with a syntax error.
+if not defined GCC32 goto :build_386_skip
+set CGO_ENABLED=1
+set CC=%GCC32%
+rem Audio preprocessing's C++ bridge (internal/audio/apm_bridge.cc) and the
+rem camera source need a CXX of the SAME architecture as CC: Go's default is a
+rem bare "g++" which resolves to the x64 toolchain on PATH, so a 32-bit target
+rem would link with the wrong one. Derive it from CC by swapping the suffix.
+set "CXX=%GCC32:gcc.exe=g++.exe%"
+set GOOS=windows
+set GOARCH=386
+call :codec_setup windows-386 %VAR_TAGS_EXTRA%
+if errorlevel 1 exit /b 1
+echo [%VAR_LABEL%] Building dist\sip-phone-%VAR_INFIX%windows-386.exe (%FEATURES%, static)...
+go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui -extldflags -static" -o dist\sip-phone-%VAR_INFIX%windows-386.exe .\cmd\sip-phone
+if errorlevel 1 exit /b 1
+set "%VAR_FLAG%386_ON=1"
+exit /b 0
+
+:build_386_skip
+echo [%VAR_LABEL%] i686 gcc not found, skipping dist\sip-phone-%VAR_INFIX%windows-386.exe
+echo       install MSYS2 mingw-w64-i686-gcc or WinLibs i686 to enable it
+exit /b 0
+
+:build_arm64
+rem Needs llvm-mingw (LLVM/Clang based): GCC-based mingw-w64 has no
+rem aarch64-w64-mingw32 target, so the usual MinGW toolchain cannot produce this
+rem one. Skipped when not installed.
+set "LLVM_BIN="
+set "LLVM_HINT="
+if defined LLVM_MINGW set "LLVM_BIN=%LLVM_MINGW%\bin"
+if defined LLVM_MINGW set "LLVM_HINT=LLVM_MINGW=%LLVM_MINGW%"
+if not defined LLVM_BIN if exist "%USERPROFILE%\tools\llvm-mingw\bin\aarch64-w64-mingw32-clang.exe" set "LLVM_BIN=%USERPROFILE%\tools\llvm-mingw\bin"
+if not defined LLVM_BIN goto :build_arm64_skip
+if not exist "%LLVM_BIN%\aarch64-w64-mingw32-clang.exe" goto :build_arm64_skip
+set CGO_ENABLED=1
+set "CC=%LLVM_BIN%\aarch64-w64-mingw32-clang.exe"
+set "CXX=%LLVM_BIN%\aarch64-w64-mingw32-clang++.exe"
+set GOOS=windows
+set GOARCH=arm64
+rem No codec probing here on purpose: the video / Opus / AEC static libraries
+rem are not built for windows-arm64 (and build-video-libs.bat cannot produce
+rem them), so the hints printed for the x86 targets would be misleading.
+rem This target is always the base build: CGO + audio devices + G.711/G.722.
+set "TAGS_ARG="
+set "CGO_CFLAGS="
+set "CGO_CXXFLAGS="
+set "CGO_LDFLAGS="
+if defined VAR_TAGS_EXTRA set "TAGS_ARG=-tags %VAR_TAGS_EXTRA%"
+echo [%VAR_LABEL%] Building dist\sip-phone-%VAR_INFIX%windows-arm64.exe (CGO, audio, no video/opus/AEC)...
+echo       note: base build only - no arm64 static libraries for video/Opus/AEC
+go build %TAGS_ARG% -ldflags "%LDFLAGS% -H=windowsgui" -o dist\sip-phone-%VAR_INFIX%windows-arm64.exe .\cmd\sip-phone
+if errorlevel 1 exit /b 1
+set "%VAR_FLAG%ARM64_ON=1"
+exit /b 0
+
+:build_arm64_skip
+echo [%VAR_LABEL%] llvm-mingw not found, skipping dist\sip-phone-%VAR_INFIX%windows-arm64.exe
+echo       install: download llvm-mingw-^<version^>-ucrt-x86_64.zip from
+echo         https://github.com/mstorsjo/llvm-mingw/releases
+echo       unpack it to %%USERPROFILE%%\tools\llvm-mingw so that
+echo         %%USERPROFILE%%\tools\llvm-mingw\bin\aarch64-w64-mingw32-clang.exe exists
+echo       or set LLVM_MINGW to an existing llvm-mingw directory
+echo       note: GCC-based mingw-w64 has no aarch64 target, llvm-mingw is required
+exit /b 0
 
 rem ---------------------------------------------------------------
 rem Codec static libraries, built once by the matching script:
@@ -174,6 +257,9 @@ rem (fatal error: wels/codec_api.h -- seen in practice, same story for
 rem  opus/opus.h).
 rem Keep in sync with the #cgo LDFLAGS in internal\video\ffmpeg.go and
 rem internal\media\codec_opus.go.
+rem
+rem %~1 = target (windows-amd64 / windows-386), %~2 = extra build tag for the
+rem variant (noui for the tray-only build, empty for the full one).
 rem ---------------------------------------------------------------
 :codec_setup
 set "TAGS_ARG="
@@ -188,7 +274,17 @@ set "CGO_LDFLAGS="
 call :video_setup %~1
 call :audio_setup %~1
 call :apm_setup %~1
+if not "%~2"=="" goto :codec_variant_tag
 if defined BUILD_TAGS set "TAGS_ARG=-tags %BUILD_TAGS%"
+goto :codec_features
+:codec_variant_tag
+if defined BUILD_TAGS (
+    set "BUILD_TAGS=%BUILD_TAGS%,%~2"
+) else (
+    set "BUILD_TAGS=%~2"
+)
+set "TAGS_ARG=-tags %BUILD_TAGS%"
+:codec_features
 rem FEATURES: what this target really gets (no codec lists - audio is the
 rem base and Opus is part of audio; video and Opus come from their static
 rem libraries). All four combinations spelled out; how to add a missing one
@@ -200,6 +296,7 @@ if defined VIDEO_ON if defined AUDIO_ON set "FEATURES=CGO, audio, video"
 rem Audio preprocessing (AEC/NS/AGC, REQ-MEDIA-007) is listed separately:
 rem it degrades independently of Opus.
 if defined APM_ON set "FEATURES=%FEATURES%, AEC"
+if not "%~2"=="" set "FEATURES=%FEATURES%, no UI"
 goto :eof
 
 :apm_setup

@@ -106,18 +106,18 @@ func main() {
 		}
 	}
 
-	// 沙箱实例：首次启动（还没有配置文件）时按「固定偏移 +10」给 WS 端口一个
-	// 起点（默认 8765 → 8775，被占用仍会自动 +1 并存入本实例自己的配置），
-	// 免得与主实例抢 8765。已有配置（用户改过端口）时不覆盖。
+	// 沙箱实例：首次启动（还没有配置文件）时按「8765 + 10×槽位」给 WS 端口一个
+	// 起点（槽位 1 → 8775、槽位 2 → 8785，被占用仍会自动 +1 并存入本实例自己的
+	// 配置），免得与主实例及其它槽位抢。已有配置（用户改过端口）时不覆盖。
 	if slot >= 1 && !cfgExisted {
-		cfg.WS.Port = config.Default().WS.Port + config.InstanceWSBaseOffset
+		cfg.WS.Port = config.SandboxWSPort(slot)
 		// 沙箱实例本来就不做系统级自启注册（只由主实例负责），配置项也一并
 		// 初始化为关，免得它的设置页显示"已开启"却其实没注册。
 		cfg.AutoStart = false
 		if err := cfg.Save(cfgPath); err != nil {
 			logx.Logger().Warn("沙箱实例：改写 WS 端口起点失败", "err", err)
 		} else {
-			logx.Logger().Info("沙箱实例：首次启动，WS 端口起点已设为默认+10",
+			logx.Logger().Info("沙箱实例：首次启动，WS 端口起点已设为 8765+10×槽位",
 				"instance", slot, "config", cfgPath, "wsPort", cfg.WS.Port)
 		}
 	}
@@ -191,6 +191,21 @@ func main() {
 	bus := core.NewBus()
 	app := core.New(cfg, nil, bus)
 	app.SetConfigPath(cfgPath)
+	app.SetInstanceSlot(slot) // 诊断页拼 sip:// 拉起链接要用（沙箱实例要带 ?instance=N）
+	// 网页控制台的配置能力（REQ-WS-016 起）：重启程序、开机自启项的注册/移除、
+	// SIP 信令记录开关——core 拿不到这些（都在 main 里），按注入方式接进去。
+	// 沙箱实例（slot != 0）本就不做系统级注册，这里传 nil 表示"该能力未接入"，
+	// 网页端调用会得到明确的错误而不是静默生效。
+	app.SetRestartFunc(restart)
+	if slot == 0 {
+		app.SetAutoStartController(func(on bool) error {
+			if on {
+				return autostart.Enable(exePath)
+			}
+			return autostart.Disable()
+		})
+	}
+	app.SetSIPTraceController(sip.SetTraceEnabled)
 
 	// 通话记录（REQ-CALL-007）：本地 SQLite（纯 Go 驱动，不影响交叉编译）。
 	// 打不开只降级为"本次运行不记录"，不阻断启动。Close 幂等，退出收尾与
@@ -242,6 +257,12 @@ func main() {
 	// 最多等 2 秒即继续启动，就绪后由界面刷新设备列表。
 	audioMgr := audio.NewManager()
 	defer audioMgr.Close()
+	// 网页控制台的配置页要枚举/选择音频设备（REQ-WS-016）：core 不能 import
+	// internal/audio（会循环），所以注入一个适配器。
+	app.SetAudioControl(audio.NewControl(audioMgr))
+	// 音频后端是后台初始化的：就绪后广播 audio.ready，网页据此刷新设备列表
+	//（桌面版用自己的 OnReady 回调刷新下拉，两者互不顶掉，见 Manager.OnReady）
+	audioMgr.OnReady(app.NotifyAudioReady)
 	// SIP 软电话：本地监听端口 40000~50000 随机选择空闲端口（REQ-ACC-013 修订），
 	// rport 按配置开关（REQ-ACC-016，默认开启）
 	sip.SetTraceEnabled(cfg.Log.SIPTrace) // SIP 信令记录按配置开关（默认关）
@@ -300,14 +321,14 @@ func main() {
 
 	// 7. 本地 WS 控制服务。
 	// WS 端口可配置（默认 8765），被占用时自动 +1 选择空闲端口并保存。
-	if wsPort := wsapi.FindFreeWSPort(cfg.WS.Port); wsPort != cfg.WS.Port {
+	if wsPort := wsapi.FindFreeWSPort(cfg.WS.Port, cfg.WS.AllowRemote); wsPort != cfg.WS.Port {
 		logx.Logger().Info("WS 端口被占用，自动选择空闲端口", "port", wsPort)
 		cfg.WS.Port = wsPort
 		_ = cfg.Save(cfgPath)
 	}
 	srv := wsapi.New(app)
 	go func() {
-		if err := srv.ListenAndServe(ctx, cfg.WS.Port); err != nil {
+		if err := srv.ListenAndServe(ctx, cfg.WS.Port, cfg.WS.AllowRemote); err != nil {
 			logx.Logger().Error("WS 服务异常退出", "err", err)
 			stop()
 		}
