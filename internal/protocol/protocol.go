@@ -43,12 +43,17 @@ type Account struct {
 	// 启动一个沙箱实例（多实例联调/对比用，见 config.InstanceDir 与
 	// config.AllowMultiInstance）。
 	Instance int
+	// UpdateSite 更新站点（查询参数 updatesite，REQ-UPD-022）：拉起时写入
+	// **本实例**的更新配置（只改 URL 字段）；空 = 不修改。合法性（http/https）
+	// 由 core.SetUpdateConfig 校验，解析层只透传。
+	UpdateSite string
 }
 
 // ParseSipURL 解析 sip:// / sips:// URI：
 //
 //	sip://account:password@host:port?transport=tcp
 //	sips://account:password@host:port        ⇒ transport=tls（默认端口 5061）
+//	sip://account@host?updatesite=https://…  ⇒ 更新站点（省略 = 不改配置）
 //
 // 账号与密码支持 URL 编码。
 func ParseSipURL(raw string) (*Account, error) {
@@ -98,6 +103,9 @@ func ParseSipURL(raw string) (*Account, error) {
 			acc.Instance = n
 		}
 	}
+	// 更新站点（查询参数 updatesite）：sip://账号@服务器?updatesite=https://…
+	// 省略/空 = 不改配置；scheme 是否合法由 SetUpdateConfig 校验（此处只透传）。
+	acc.UpdateSite = strings.TrimSpace(u.Query().Get("updatesite"))
 	return acc, nil
 }
 

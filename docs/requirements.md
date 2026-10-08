@@ -255,6 +255,8 @@
 | REQ-UPD-018 | **网页写入更新配置**：WS 方法 `system.setUpdateConfig`（`{url?, appId?, intervalMinutes?, prerelease?}`，字段可选、只改传入的），写入后落盘、立即生效并广播 `system.updateConfig`（桌面配置页与其它网页同步）；`system.getState` 的 `updateConfig` 字段返回当前值；JS SDK 提供 `setUpdateConfig(cfg)`，构造参数 `updateUrl`/`updateAppId`/`updateIntervalMinutes`/`updatePrerelease` 在连上软电话后自动写入一次 | P1 | 已完成 |
 | REQ-UPD-020 | **网页触发下载/安装**（修订 REQ-UPD-009 的口径）：新增 WS `update.start` / `update.cancel` / `update.apply` / `update.status` 与 `system.checkUpdateNow`（立即检查，20 秒超时）。**仍必须由用户在可控界面上点击**（无 UI 版里网页就是唯一界面），不做静默自动安装。`update.apply` 前置校验 phase 必须是 `ready`，否则 `invalid_params`；安装与重启都是**先回响应、再异步执行**。无 UI 版在更新站点上是**独立应用**（APP_ID `mti-sip-phone-no-ui`，与完整版分开归档与令牌） | P1 | 已完成 |
 | REQ-UPD-021 | **变体默认应用 ID**：`update.appId` 的默认值按构建变体取（完整版 `mti-sip-phone` / 无 UI 版 `mti-sip-phone-no-ui`）。两个变体共用同一份配置文件，所以 `config.Load` 归一化时把"另一个变体的默认值"当成未设置并改回本变体默认（用户手填的其它应用 ID 原样保留）——否则无 UI 版会去查完整版的发布物，把**自己**（updater 替换的是 `os.Executable()`）换成完整版 exe | P1 | 已完成 |
+| REQ-UPD-022 | **sip:// 拉起的 updatesite 参数**：`sip://账号@服务器?updatesite=https://…` 拉起时把更新站点写进**本实例**的更新配置（只改 URL，应用 ID/周期/预览版保持原值）；**省略 = 不改配置**；非法站点（非 http/https）只记告警日志、不中断账户拉起。写入走 `SetUpdateConfig` 全套（校验/落盘/立即检查/广播同步桌面与网页）。诊断页生成拉起链接时按当前配置里的更新站点**自动附加** `updatesite` 参数（百分号编码，无输入框），配置变化（含其它网页保存）后缓存即时刷新 | P1 | 已完成 |
+| REQ-UPD-023 | **网页配置页「使用主站点」按钮**：自动更新卡片「更新站点」标签旁新增小按钮，点击把官方站点填进输入框、**不自动保存**（与桌面版一致）。官方地址单一真相源为 `config.PrimaryUpdateSite`（桌面/网页共用），网页经 `system.state.updatePrimarySite` 下发、**不硬编码** | P1 | 已完成 |
 | REQ-UPD-019 | **SDK 只保留强制推送**：SDK 移除全部站点查询能力（`checkUpdate`/`listReleases`/`setUpdateSource`/定时器/`update.check` 事件与相关构造参数），只保留 `notifyUpdate(info)`——**恒为强制推送**（不受版本高低与预览版约束），供页面手动推送/联调；「有没有新版本」由软电话自己查询 | P1 | 已完成 |
 
 ### 4.11 非功能需求（NFR）

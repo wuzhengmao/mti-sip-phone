@@ -50,9 +50,7 @@ func themeColorNRGBA(name fyne.ThemeColorName) color.NRGBA {
 	return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
 }
 
-// primaryUpdateSite 项目官方更新站点（配置页「使用主站点」按钮一键填入用）。
-// 配置里**不默认填**：更新站点留空 = 不自动检查更新（REQ-UPD-017）。
-const primaryUpdateSite = "https://update.wuzm219.cn"
+// 官方更新站点常量见 config.PrimaryUpdateSite（桌面与网页共用一份，REQ-UPD-023）。
 
 // App GUI 应用：组装 Fyne 窗口与托盘，订阅核心事件驱动界面。
 type App struct {
@@ -775,7 +773,7 @@ func (a *App) buildSettingsPage() {
 	// 与其他输入项一样的整行长度
 	updSiteBtn := newCompactTextOnlyButton("使用主站点",
 		themeColorNRGBA(theme.ColorNameButton), themeColorNRGBA(theme.ColorNameForeground),
-		func() { a.updSiteEntry.SetText(primaryUpdateSite) })
+		func() { a.updSiteEntry.SetText(config.PrimaryUpdateSite) })
 	updSiteBtn.label.TextSize = 12 // 比表单正文小一号，"小按钮"
 	border := themeColorNRGBA(theme.ColorNameInputBorder)
 	updSiteBtn.bg.StrokeColor = &border

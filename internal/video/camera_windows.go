@@ -9,18 +9,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pion/mediadevices/pkg/driver"
 	"github.com/pion/mediadevices/pkg/frame"
 	"github.com/pion/mediadevices/pkg/io/video"
 	"github.com/pion/mediadevices/pkg/prop"
 
-	// 副作用导入：把 DirectShow 摄像头驱动注册进 driver 管理器。
-	// 这是仓库内的一份实现（从 mediadevices 的 pkg/driver/camera 复制，
-	// 补上了上游漏写的 STDMETHODCALLTYPE 调用约定）——**amd64 与 386 共用**。
-	// 不能改回上游的 camera 包：它在 i686 上编不过，windows-386 会再次丢摄像头。
-	_ "mti-sip-phone/internal/video/dshow"
-
 	"mti-sip-phone/internal/logx"
+	// DirectShow 摄像头驱动：仓库内的一份实现（从 mediadevices 的
+	// pkg/driver/camera 复制，补上了上游漏写的 STDMETHODCALLTYPE 调用约定）
+	// ——**amd64 与 386 共用**。不能改回上游的 camera 包：它在 i686 上编不过，
+	// windows-386 会再次丢摄像头。枚举与打开走 dshow.List / dshow.NewDevice
+	//（每次实时枚举，不经过 mediadevices 管理器的一次性注册缓存）。
+	"mti-sip-phone/internal/video/dshow"
 )
 
 // Windows 摄像头：DirectShow（cgo + C++，链接 mingw 自带的
@@ -30,15 +29,17 @@ import (
 // STDMETHODCALLTYPE，与 qedit.h 的 __stdcall 冲突），所以本仓库内保留了一份
 // 修好的副本（internal/video/dshow），两个架构都走它。
 //
-// ⚠️ 设备 ID 不稳定：mediadevices 的驱动 ID 由包装层生成，**每次进程启动都会变**。
-// 所以配置里存的是设备**名称**，打开时按 ID → 名称逐级回退（PickCamera）。
+// 枚举与打开都走 dshow.List / dshow.NewDevice——**每次实时枚举**，应用运行
+// 期间摄像头关闭/拔出/插入都会反映到设备列表（不走 mediadevices 管理器
+// 的一次性注册缓存）。设备 ID 现在是 DirectShow 设备路径（稳定标识）；
+// 配置里仍存设备**名称**，打开时按 ID → 名称逐级回退（PickCamera）。
 
 // 包级串行化：DirectShow 同一设备不能并发打开，且上一路 Close 未完成时
 // 立刻开下一路会失败。用一把锁把 Open/Close 串起来。
 var cameraOpenMu sync.Mutex
 
 type windowsCamera struct {
-	drv      driver.Driver
+	drv      dshow.Device
 	reader   video.Reader
 	w, h     int
 	fps      int
@@ -50,18 +51,13 @@ type windowsCamera struct {
 func cameraSupported() bool { return true }
 
 func listCameras() ([]CameraInfo, error) {
-	var out []CameraInfo
-	for _, d := range driver.GetManager().Query(func(d driver.Driver) bool {
-		return d.Info().DeviceType == driver.Camera
-	}) {
-		name := d.Info().Name
-		if name == "" {
-			name = d.Info().Label
-		}
-		if name == "" {
-			name = d.ID()
-		}
-		out = append(out, CameraInfo{ID: d.ID(), Name: name})
+	list, err := dshow.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CameraInfo, 0, len(list))
+	for _, d := range list {
+		out = append(out, CameraInfo{ID: d.ID, Name: d.Name})
 	}
 	return out, nil
 }
@@ -70,26 +66,23 @@ func openCamera(id string, w, h, fps int) (Camera, error) {
 	cameraOpenMu.Lock()
 	defer cameraOpenMu.Unlock()
 
-	drivers := driver.GetManager().Query(func(d driver.Driver) bool {
-		return d.Info().DeviceType == driver.Camera
-	})
-	if len(drivers) == 0 {
+	// 每次实时枚举：配置里存的旧 ID（历史随机 UUID）或名称都可能对不上，
+	// 按「ID（设备路径）精确匹配 → 名称匹配 → 第一个设备」回退。
+	list, err := dshow.List()
+	if err != nil {
+		return nil, fmt.Errorf("枚举摄像头失败: %w", err)
+	}
+	if len(list) == 0 {
 		return nil, fmt.Errorf("未找到可用摄像头")
 	}
-
-	// 按 ID 精确匹配（ID 每次启动可能变，故失败时回退到第一个设备）
-	drv := drivers[0]
-	for _, d := range drivers {
-		if d.ID() == id {
-			drv = d
+	target := list[0].ID
+	for _, d := range list {
+		if d.ID == id || d.Name == id {
+			target = d.ID
 			break
 		}
 	}
-
-	vr, ok := drv.(driver.VideoRecorder)
-	if !ok {
-		return nil, fmt.Errorf("摄像头驱动不支持视频采集")
-	}
+	drv := dshow.NewDevice(target)
 
 	// 依次尝试像素格式：NV12（原生 4:2:0，无需色度重采样）→ YUY2（兼容性最好）。
 	//
@@ -103,7 +96,7 @@ func openCamera(id string, w, h, fps int) (Camera, error) {
 			lastErr = fmt.Errorf("打开设备失败（可能被其他程序占用）: %w", err)
 			continue
 		}
-		reader, err := vr.VideoRecord(prop.Media{
+		reader, err := drv.VideoRecord(prop.Media{
 			Video: prop.Video{
 				Width:       w,
 				Height:      h,

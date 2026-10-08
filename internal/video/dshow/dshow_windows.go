@@ -9,9 +9,12 @@
 // __stdcall —— x86_64 上被忽略（所以 amd64 一直正常），i686 上是真实冲突、
 // 编不过（windows-386 曾因此没有摄像头）。补上后 amd64 与 386 共用这一份实现。
 //
-// 设备仍注册到 mediadevices 的 driver 管理器（上层 internal/video 按
-// driver.Camera 查询，与历史行为一致），因此依赖 mediadevices 的
-// driver/frame/io/prop 包，但**不再依赖它的 camera 包**。
+// **不再注册到 mediadevices 的 driver 管理器**：管理器把首次发现的设备
+// 永久缓存、没有注销 API，应用运行期间摄像头关闭/拔出/插入都反映不到列表里
+//（真机缺陷：笔记本摄像头关闭后刷新设备，两边界面都还显示它）。现在由
+// `List` 每次实时枚举、`NewDevice` 按设备路径直接构造可打开的驱动，完全
+// 绕开管理器——依赖 mediadevices 的 frame/io/prop 包，不依赖它的
+// driver/availability 包。
 package dshow
 
 // #cgo LDFLAGS: -lstrmiids -lole32 -loleaut32 -lquartz
@@ -26,8 +29,6 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/pion/mediadevices/pkg/driver"
-	"github.com/pion/mediadevices/pkg/driver/availability"
 	"github.com/pion/mediadevices/pkg/frame"
 	"github.com/pion/mediadevices/pkg/io/video"
 	"github.com/pion/mediadevices/pkg/prop"
@@ -52,54 +53,59 @@ type camera struct {
 	bufGo  []byte
 }
 
-func init() {
-	Initialize()
+// DeviceInfo 一次实时枚举得到的摄像头。
+type DeviceInfo struct {
+	// ID 是 DirectShow 的设备路径（getName 返回的 label）——**稳定标识**，
+	// 跨进程不变，NewDevice 用它直接打开设备。
+	ID string
+	// Name 是友好名（getFriendlyName），展示与配置持久化用。
+	Name string
 }
 
-// Initialize finds and registers camera devices. This is part of an experimental API.
-func Initialize() {
+// Device 一个可打开的摄像头（满足 Open/Close/VideoRecord）。
+type Device interface {
+	Open() error
+	Close() error
+	VideoRecord(prop.Media) (video.Reader, error)
+}
+
+// List 实时枚举 DirectShow 摄像头：**每次调用都重新枚举**，设备在应用运行
+// 期间关闭/拔出/插入都能立即反映（不走 mediadevices 管理器的一次性注册缓存）。
+func List() ([]DeviceInfo, error) {
 	C.CoInitializeEx(nil, C.COINIT_MULTITHREADED)
 
 	var list C.cameraList
 	var errStr *C.char
 	if C.listCamera(&list, &errStr) != 0 {
-		// Failed to list camera
-		fmt.Printf("Failed to list camera: %s\n", C.GoString(errStr))
-		return
+		return nil, fmt.Errorf("failed to list camera: %s", C.GoString(errStr))
 	}
+	defer C.freeCameraList(&list, &errStr)
 
+	out := []DeviceInfo{}
 	for i := 0; i < int(list.num); i++ {
-		cName := C.getName(&list, C.int(i))
-		if cName == nil {
-			continue
-		}
-		label := C.GoString(cName)
-		info := driver.Info{
-			Label:      label,
-			DeviceType: driver.Camera,
+		var id, name string
+		if n := C.getName(&list, C.int(i)); n != nil {
+			id = C.GoString(n)
 		}
 		if fn := C.getFriendlyName(&list, C.int(i)); fn != nil {
-			info.Name = C.GoString(fn)
+			name = C.GoString(fn)
 		}
-		driver.GetManager().Register(&camera{name: label}, info)
+		if name == "" {
+			name = id
+		}
+		if id == "" {
+			continue
+		}
+		out = append(out, DeviceInfo{ID: id, Name: name})
 	}
-
-	C.freeCameraList(&list, &errStr)
+	return out, nil
 }
 
-// SetupObserver is a stub implementation for Windows.
-func SetupObserver() error {
-	return availability.ErrUnimplemented
-}
-
-// StartObserver is a stub implementation for Windows.
-func StartObserver() error {
-	return availability.ErrUnimplemented
-}
-
-// DestroyObserver is a stub implementation for Windows.
-func DestroyObserver() error {
-	return availability.ErrUnimplemented
+// NewDevice 用设备路径（List 返回的 ID）构造一个摄像头驱动。打开是**按路径
+// 现开设备**（camera.Open 里 C 侧按 name 查找），不依赖任何注册缓存，所以
+// 设备随时可新建、可打开。
+func NewDevice(devicePath string) Device {
+	return &camera{name: devicePath}
 }
 
 func (c *camera) Open() error {

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>mti-sip-phone 控制台</title>
+<title>MTI 软电话控制台</title>
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body class="app">
@@ -353,7 +353,13 @@
     <div class="card">
       <h2>自动更新</h2>
       <p class="state-line" id="verLine">当前版本：—</p>
-      <div class="field"><label>更新站点（留空 = 不自动检查）</label><input type="text" id="updSite" placeholder="如 https://update.example.com"></div>
+      <div class="field">
+        <div class="row" style="justify-content:space-between;margin-bottom:4px">
+          <label>更新站点（留空 = 不自动检查）</label>
+          <button id="btnPrimaryUpdSite" class="ghost" style="padding:2px 10px;font-size:12px">使用主站点</button>
+        </div>
+        <input type="text" id="updSite" placeholder="如 https://update.example.com">
+      </div>
       <div class="field-row">
         <div class="field"><label>应用 ID</label><input type="text" id="updAppId"></div>
         <div class="field"><label>检查周期（分钟）</label><input type="number" id="updInterval" min="1" max="1440"></div>
@@ -411,6 +417,7 @@
           · TCP 信令：<code>sip://…?transport=tcp</code><br>
           · TLS 信令：<code>sips://账号:密码@服务器:端口</code>（默认端口 5061）<br>
           · 沙箱实例：<code>sip://…?instance=2</code>（该实例没在跑就用它的独立数据目录启动）<br>
+          · 更新站点：<code>sip://…?updatesite=https%3A%2F%2F…</code>（按当前配置自动附加，省略 = 不改）<br>
           链接里含明文密码，只适合内部系统使用。
         </p>
       </div>

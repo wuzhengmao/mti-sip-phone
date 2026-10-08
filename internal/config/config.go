@@ -161,6 +161,11 @@ const (
 	UpdateIntervalMaxMins = 24 * 60
 )
 
+// PrimaryUpdateSite 项目官方更新站点（配置页「使用主站点」按钮一键填入用，
+// REQ-UPD-017/023）。配置里**不默认填**：更新站点留空 = 不自动检查。
+// 桌面设置页与网页控制台共用这一份（网页经 system.state.updatePrimarySite 下发）。
+const PrimaryUpdateSite = "https://update.wuzm219.cn"
+
 // UpdateConfig 自动更新配置（REQ-UPD-017，查询由软电话自己发起）。
 //
 // 软电话**不查更新服务器**的旧约定已作废：配了 URL 就按周期查
