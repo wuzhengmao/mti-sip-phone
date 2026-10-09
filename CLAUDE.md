@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x64 / arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.15**（2026-10-07 定版并合并 master）：新增**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）**与**网页控制台（五个页面，取代原测试页，REQ-WEB-001~004）**，补齐 26 个 WS 方法（通话记录 / 通信录增删改查 / 配置读写 / 设备枚举 / 网页触发更新，REQ-WS-016~019 + REQ-UPD-020/021），拨号框边打边查通信录；另新增「允许远程连接」开关与沙箱端口 `8765+10×槽位`。下一个开发版本号未定（未开始）。
+当前版本 **1.0.15**（2026-10-07 定版并合并 master）：新增**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）**与**网页控制台（五个页面，取代原测试页，REQ-WEB-001~004）**，补齐 26 个 WS 方法（通话记录 / 通信录增删改查 / 配置读写 / 设备枚举 / 网页触发更新，REQ-WS-016~019 + REQ-UPD-020/021），拨号框边打边查通信录；另新增「允许远程连接」开关与沙箱端口 `8765+10×槽位`。当前开发版本 **1.0.16**（未定版）：sip:// 拉起与生成支持 `updatesite` 参数、网页配置页「使用主站点」按钮。
 
 <details>
 <summary>1.0.14 已完成内容（点击展开）</summary>
@@ -941,6 +941,15 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   `ISampleGrabber::SetMediaType` 固定格式，摄像头不支持就**整条采集链路失败**。
   很多 USB 摄像头只给 YUY2，固定 NV12 会一台都打不开——症状是「本地回显和发送
   都没有，但远端视频正常」（接收链路与摄像头无关）。
+- **摄像头枚举必须每次实时做，不能走 mediadevices 管理器的一次性注册缓存**
+  （真机缺陷：笔记本摄像头关闭后刷新设备，桌面/网页两边列表里都还有它）：
+  mediadevices 的 `driver.GetManager().Register` **没有注销 API**，启动时注册
+  过的设备会永久留在列表里，热插拔/禁用一概反映不出来。dshow 驱动因此**不再
+  注册进管理器**：枚举走 `dshow.List`（每次现调 C 侧 `listCamera`）、打开走
+  `dshow.NewDevice`（按设备路径直接新建驱动实例，`camera.Open` 本来就是按
+  名字现开设备）。设备 ID 现在是 **DirectShow 设备路径**（`@device:sw:{…}`，
+  稳定标识），不再是每次启动随机生成的 UUID——「设备 ID 不稳定、配置里存名称」
+  的旧口径只保留按名称回退的兼容逻辑（PickCamera）。
 - **视频窗口不置顶**（用户要求）；位置用 `moveVideoWindowAboveCallPanel`：
   **靠 `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` 的可见矩形做相对修正**，
   不能直接用 `GetWindowRect`——它含不可见的调整边框，比无边框的通话面板在右边

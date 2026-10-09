@@ -30,7 +30,8 @@ fi
 #   release/icon.svg  --PUT-->  /api/v1/apps/<app>/icon         （文件名由站点按内容决定）
 #
 # 注意：
-#   - Windows 上一键只能产出 Windows 产物（Linux 产物由 Linux 机器上的 build.sh 产出）；
+#   - 编译统一走**容器**（docker/build.sh）：一次产出全部 10 个产物（完整版 +
+#     无 UI 版 × 5 平台），基线固定 Debian 10 / glibc 2.28（信创兼容下限）；
 #   - 构建产物的 mtime 必须晚于本次构建开始，否则视为旧产物跳过（防把上次的二进制当新版本发出去）；
 #   - 版本号只读不写，升版仍需人工改 internal/core/buildinfo.go。
 set -euo pipefail
@@ -199,25 +200,17 @@ fi
 BUILD_START="$(date +%s)"
 
 if [ "$DO_BUILD" = 1 ]; then
-    if [ "$HOST" = windows ]; then
-        # Windows 上必须走 build.bat：git-bash 里跑 build.sh 会因 GOOS 默认
-        # windows 而产出「名为 linux-* 的 Windows 二进制」。
-        BUILD_BAT="$(cygpath -w "$ROOT/build.bat" 2>/dev/null || echo "$ROOT/build.bat")"
-        if [ "$PRERELEASE" = true ]; then
-            echo "编译（开发版，版本带 -rc）：build.bat"
-            cmd //c "$BUILD_BAT"
-        else
-            echo "编译（正式版，SIP_PHONE_RELEASE=1）：build.bat"
-            SIP_PHONE_RELEASE=1 cmd //c "$BUILD_BAT"
-        fi
+    # 统一走**容器编译**（docker/build.sh）：一次产出全部 10 个产物（完整版 + 无 UI 版
+    # × 5 平台），构建基线固定 Debian 10 / glibc 2.28（信创系统 UOS/麒麟 的兼容下限，
+    # 见 docker/README.md）。Windows / Linux 宿主同一条路——不再按平台分
+    # build.bat / build.sh（那两条老路留给没装容器的机器手工用）。
+    # 正式版把 SIP_PHONE_RELEASE=1 透传进容器（docker/build.sh 用 -e 带入）。
+    if [ "$PRERELEASE" = true ]; then
+        echo "编译（开发版，版本带 -rc）：docker/build.sh（容器）"
+        bash "$ROOT/docker/build.sh"
     else
-        if [ "$PRERELEASE" = true ]; then
-            echo "编译（开发版，版本带 -rc）：build.sh"
-            bash "$ROOT/build.sh"
-        else
-            echo "编译（正式版，SIP_PHONE_RELEASE=1）：build.sh"
-            SIP_PHONE_RELEASE=1 bash "$ROOT/build.sh"
-        fi
+        echo "编译（正式版，SIP_PHONE_RELEASE=1）：docker/build.sh（容器）"
+        SIP_PHONE_RELEASE=1 bash "$ROOT/docker/build.sh"
     fi
 else
     echo "跳过编译（--no-build）：直接使用 dist/ 里已有的产物"

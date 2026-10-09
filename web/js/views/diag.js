@@ -14,6 +14,11 @@ window.SipApp.views = window.SipApp.views || {};
 
   const MAX_LOG = 200; // 日志最多保留的条数（长时间开着也不会把页面拖慢）
 
+  // 当前配置里的更新站点（REQ-UPD-022）：生成拉起链接时自动附加 updatesite 参数。
+  // fillURIFromConfig 里取配置快照缓存，设置页（或其它网页）保存新站点后
+  // 经 store 的 updateConfig 事件即时刷新。
+  let lastUpdateSite = '';
+
   const TRANSPORTS = [
     { value: 'udp', label: 'udp（默认）' },
     { value: 'tcp', label: 'tcp' },
@@ -69,6 +74,8 @@ window.SipApp.views = window.SipApp.views || {};
       // 连上（或重连）后按**当前配置**自动填好各项并生成一条链接：
       // 程序关掉后直接点这一条就能用同样的参数把它拉起来（用户要求）。
       store.on('connected', fillURIFromConfig);
+      // 更新配置变化（如设置页保存了新站点）→ 刷新缓存的更新站点并重新生成链接
+      store.on('updateConfig', fillURIFromConfig);
       fillURIFromConfig();
     },
     onShow: function () { refreshInfo(); fillURIFromConfig(); },
@@ -93,6 +100,8 @@ window.SipApp.views = window.SipApp.views || {};
       if (a.account) $('uriAccount').value = a.account;
       if (a.transport) $('uriTransport').value = a.transport;
       $('uriInstance').value = store.state.instance || 0;
+      // 更新站点（REQ-UPD-022）：配置里配了就自动附加到生成链接
+      lastUpdateSite = String((snap.update && snap.update.url) || '').trim();
       if (a.passwordSet) {
         addLog('拉起链接', '已按当前配置生成（密码不下发，需要带密码时请手填一次再点「生成拉起链接」）');
       }
@@ -121,6 +130,9 @@ window.SipApp.views = window.SipApp.views || {};
       if (slot > 99) { App.ui.toast('实例槽位范围 0–99', 'err'); return; }
       params.push('instance=' + slot);
     }
+    // 更新站点按当前配置自动附加（REQ-UPD-022）；百分号编码保证 URL 里的
+    // :/&? 不破坏参数结构（服务端 Query().Get 自动解码）。
+    if (lastUpdateSite) params.push('updatesite=' + encodeURIComponent(lastUpdateSite));
     if (params.length) uri += '?' + params.join('&');
 
     const line = $('uriLine');

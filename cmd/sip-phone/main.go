@@ -437,6 +437,18 @@ func handleLaunchArgs(app *core.App, cfg *config.Config, args []string, onDone f
 			logx.Logger().Error("应用 sip:// 配置失败", "err", err)
 			continue
 		}
+		// sip:// 链接附带 updatesite（REQ-UPD-022）：把更新站点写进**本实例**的
+		// 更新配置（只改 URL，应用 ID/周期/预览版保持原值）；省略 = 不改。
+		// 走 SetUpdateConfig 拿全套：http/https 校验、落盘、下发 updater
+		//（配置变化即立即查一次）、广播 system.updateConfig 同步桌面与网页。
+		// 非法站点只告警，不中断账户拉起。
+		if acc.UpdateSite != "" {
+			upd := app.UpdateConfig()
+			upd.URL = acc.UpdateSite
+			if err := app.SetUpdateConfig(upd); err != nil {
+				logx.Logger().Warn("应用 sip:// 链接里的更新站点失败", "url", acc.UpdateSite, "err", err)
+			}
+		}
 		if onDone != nil {
 			onDone()
 		}

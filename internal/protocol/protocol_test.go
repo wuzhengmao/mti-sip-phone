@@ -56,6 +56,35 @@ func TestParseSipsURL(t *testing.T) {
 	}
 }
 
+// TestParseSipURLUpdateSite sip:// 的 updatesite 查询参数（REQ-UPD-022）：
+// 省略/空 = 空串（应用层视为不改配置）；值经百分号解码并去两端空格后原样透传
+//（scheme 合法性由 core.SetUpdateConfig 校验，解析层不把关）；与其它参数、
+// sips:// 前缀可组合。
+func TestParseSipURLUpdateSite(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"sip://1001:pwd@10.0.0.1:5060", ""},
+		{"sip://1001:pwd@10.0.0.1:5060?updatesite=https://update.wuzm219.cn", "https://update.wuzm219.cn"},
+		{"sip://1001:pwd@10.0.0.1:5060?transport=tcp&instance=9&updatesite=https://update.wuzm219.cn", "https://update.wuzm219.cn"},
+		{"sip://1001:pwd@10.0.0.1:5060?updatesite=https%3A%2F%2Fupdate.wuzm219.cn%2Fsub", "https://update.wuzm219.cn/sub"},
+		{"sip://1001:pwd@10.0.0.1:5060?updatesite=%20https://update.wuzm219.cn%20", "https://update.wuzm219.cn"},
+		{"sip://1001:pwd@10.0.0.1:5060?updatesite=%20%20", ""},   // 纯空格 → 视为省略
+		{"sip://1001:pwd@10.0.0.1:5060?updatesite=ftp://x", "ftp://x"}, // 非法 scheme 透传（应用层拒绝）
+		{"sips://2999:pwd@10.168.4.40?updatesite=https://update.wuzm219.cn", "https://update.wuzm219.cn"},
+	}
+	for _, c := range cases {
+		acc, err := ParseSipURL(c.raw)
+		if err != nil {
+			t.Fatalf("%s 解析失败: %v", c.raw, err)
+		}
+		if acc.UpdateSite != c.want {
+			t.Fatalf("%s 更新站点应为 %q，实际 %q", c.raw, c.want, acc.UpdateSite)
+		}
+	}
+}
+
 // TestSplitURL Windows 协议拉起时参数带启动器前缀，sip:// 与 sips:// 都要能识别
 // （sips:// 里不含 "sip://" 子串，前缀匹配必须两个都查，且 sips 在前）。
 func TestSplitURL(t *testing.T) {

@@ -4,9 +4,9 @@ import "context"
 
 // CameraInfo 一个摄像头设备。
 //
-// 注意 ID 的不稳定性：Windows 侧（pion/mediadevices）的驱动 ID 由包装层
-// 生成，**每次进程启动都可能变化**。配置里持久化的是设备**名称**，
-// 打开时按「ID 精确匹配 → 名称精确匹配 → 默认设备」逐级回退（见 PickCamera）。
+// Windows 侧的 ID 是 DirectShow 设备路径（稳定标识，跨进程不变）；配置里
+// 持久化的是设备**名称**，打开时按「ID 精确匹配 → 名称精确匹配 → 默认设备」
+// 逐级回退（见 PickCamera）。
 type CameraInfo struct {
 	ID   string
 	Name string

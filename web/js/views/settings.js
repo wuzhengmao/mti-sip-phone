@@ -332,6 +332,14 @@ window.SipApp.views = window.SipApp.views || {};
           App.ui.toast(res.text || '检查完成', 'ok');
         }).catch(function (e) { App.ui.errToast('检查失败', e); });
       });
+      // 「使用主站点」（REQ-UPD-023）：只把官方站点填进输入框，**不自动保存**
+      //（与桌面版一致）；官方地址由 system.state.updatePrimarySite 下发，
+      // 网页不硬编码。
+      $('btnPrimaryUpdSite').addEventListener('click', function () {
+        const site = store.state.updatePrimarySite;
+        if (!site) { App.ui.toast('未获取到主站点信息', 'err'); return; }
+        $('updSite').value = site;
+      });
 
       // 音频后端就绪 → 刷新设备列表（无 UI 版没有桌面界面，靠这条事件）
       sdk.on('audio.ready', function () { loadAudioDevices(); });

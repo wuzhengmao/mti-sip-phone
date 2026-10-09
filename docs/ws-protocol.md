@@ -69,7 +69,7 @@
 | `call.setSpeakerVolume` | `{ "callId": "...", "speakerVolume": 80 }` | `{ "callId": "..." }` | 扬声器音量（REQ-MEDIA-006，纯本地动作）：`speakerVolume` 为 **0–100 的百分比整数**，**0 = 禁用**，大于 0 时同时解除禁用；变更推 `call.audio` |
 | `call.setVideo` | `{ "callId": "...", "enabled": true }` | `{ "callId": "..." }` | 视频总开关（纯本地动作，REQ-VIDEO-008）：关 = 不显示远端、不推送本地、视频窗口关闭；状态变化推 `call.video` |
 | `call.dtmf` | `{ "callId": "...", "digit": "5" }` | `{ "callId": "..." }` | 发送 DTMF（RFC 4733 telephone-event，REQ-CALL-006）：`digit` 为单个字符 `0-9 * # A-D`，通话接通后才有效；参数缺失或 `digit` 不是单字符返回 `invalid_params` |
-| `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态、**自动更新配置 updateConfig**、自动接听开关） |
+| `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态、**自动更新配置 updateConfig**、**官方更新站点 updatePrimarySite**、自动接听开关） |
 | `contact.export` | `{}` | `{ "csv": "...", "count": 12 }` | 导出通信录 CSV 文本（REQ-WS-015）：表头 `号码,名称,备注,常用`，**UTF-8 带 BOM**（Excel 直接打开不乱码）。网页端的增删改查见 `contact.list/save/delete/setStarred/clear`（REQ-WS-018） |
 | `contact.import` | `{ "csv": "号码,名称,备注,常用\n2999,张三,前台,是\n" }` | `{ "added": 1, "updated": 0, "skipped": 0, "total": 12 }` | 导入通信录 CSV：按号码去重，**已存在的只覆盖号码/名称/备注，常用标志只增不减**（本地已标就保持、本地没标而 CSV 标了则变常用），不存在的整条新增；没有号码或整行解析失败的行计入 `skipped`。参数缺失返回 `invalid_params`，通信录不可用返回 `contacts_unavailable`。单条消息上限 4MB |
 | `calllog.query` | `{ "remote": "1001", "limit": 50, "offset": 0 }` | `{ "records": [...], "total": 357, "hasMore": true }` | 分页查询通话记录（REQ-WS-017），**新的在前**；`remote` 按号码子串筛选，`limit` 默认 50、上限 200（越界钳制）。时间戳一律**毫秒整数**，`0` 表示未发生（`answeredAt: 0` = 未接通，`endedAt: 0` = 进行中）。每条记录在号码命中通信录时带 `contact: {name, note, starred}`（口径同桌面通话记录页：号码规范化后查 core 的内存快照），页面据此显示「号码 名称★」与备注悬停。数据库未接入返回 `calllog_unavailable` |
@@ -131,7 +131,12 @@
     "remote": { "rotation": 90, "mirror": false },
     "local": { "rotation": 0, "mirror": true }
   },
-  "autoAnswer": false
+  "autoAnswer": false,
+  "updateConfig": { "url": "https://update.wuzm219.cn", "appId": "mti-sip-phone", "intervalMinutes": 5, "prerelease": false },
+  "updatePrimarySite": "https://update.wuzm219.cn",
+  "recentDial": ["1001", "1002"],
+  "noUI": false,
+  "instance": 0
 }
 ```
 
@@ -142,6 +147,8 @@
 - `recentDial`：最近呼叫的号码（最多 5 个、新的在前），供拨号下拉用。
 - `noUI`：当前进程是「仅托盘无 UI 版」（REQ-UI-041）时为 true —— 页面据此自动订阅视频、隐藏「本地画面 / 保留软电话窗口」两个勾选项、不允许取消订阅。
 - `instance`：本进程的实例槽位（0 = 主实例，≥1 = 沙箱实例，REQ-NFR-007）；诊断页拼 `sip://` 拉起链接时要带上 `?instance=N`。
+- `updateConfig`：自动更新配置（`url`/`appId`/`intervalMinutes`/`prerelease`，REQ-UPD-017/018），网页连上就能拿到当前值，可用 `system.setUpdateConfig` 改写。
+- `updatePrimarySite`：官方更新站点（REQ-UPD-023），网页配置页「使用主站点」按钮一键填入用——网页不硬编码、由状态快照下发。
 
 ### 通信录 HTTP 接口（网页导入导出）
 

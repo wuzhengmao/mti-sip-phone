@@ -18,6 +18,7 @@ window.SipApp = window.SipApp || {};
     arch: '',
     noUI: false, // 仅托盘无 UI 版（core.State.noUI）：网页据此自动订阅视频、隐藏窗口相关项
     instance: 0, // 实例槽位（0 = 主实例）：诊断页拼 sip:// 拉起链接要用
+    updatePrimarySite: '', // 官方更新站点（system.state 下发，配置页「使用主站点」按钮用，REQ-UPD-023）
     recentDial: [],
     update: null,            // 更新状态（system.update / system.state.update）
     autoAnswer: false,
@@ -71,6 +72,7 @@ window.SipApp = window.SipApp || {};
       if (data.os) state.os = data.os;     // 编译目标平台/架构（诊断页与版本行用）
       state.noUI = !!data.noUI;            // 仅托盘无 UI 版（REQ-UI-041）
       state.instance = data.instance || 0;  // 实例槽位（漏了这个，诊断页永远是 0）
+      if (data.updatePrimarySite) state.updatePrimarySite = data.updatePrimarySite; // 官方更新站点（REQ-UPD-023）
       if (data.arch) state.arch = data.arch;
       if (data.autoAnswer !== undefined) state.autoAnswer = data.autoAnswer;
       if (data.update) state.update = data.update;

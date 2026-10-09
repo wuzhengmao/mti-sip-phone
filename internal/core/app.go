@@ -83,6 +83,9 @@ type State struct {
 	// UpdateConfig 自动更新配置（站点/应用 ID/周期/预览版，REQ-UPD-017）：
 	// 网页连上就能拿到当前值，也可用 system.setUpdateConfig 改写
 	UpdateConfig config.UpdateConfig `json:"updateConfig"`
+	// UpdatePrimarySite 官方更新站点（网页配置页「使用主站点」按钮一键填入用，
+	// REQ-UPD-023）：网页不硬编码、由 system.state 下发
+	UpdatePrimarySite string `json:"updatePrimarySite,omitempty"`
 	// RecentDial 最近呼叫号码（最多 5 个，最新的在前）：网页控制台的拨号下拉用
 	RecentDial []string `json:"recentDial"`
 	// NoUI 当前进程是「仅托盘无 UI 版」（REQ-UI-041）：网页控制台据此调整——
@@ -260,6 +263,8 @@ func (a *App) State() State {
 		RecentDial: append([]string(nil), a.cfg.RecentDial...),
 		NoUI:       variant.NoUI,
 		Instance:   a.instance,
+		// 官方更新站点（网页「使用主站点」按钮用，REQ-UPD-023）
+		UpdatePrimarySite: config.PrimaryUpdateSite,
 	}
 	for _, id := range a.callOrder {
 		c := *a.calls[id]

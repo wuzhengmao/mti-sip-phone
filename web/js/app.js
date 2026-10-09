@@ -69,7 +69,7 @@ window.SipApp = window.SipApp || {};
     // 排查"页面是不是连上了/跑的是不是新版本"时一眼可见
     if (st.version) {
       $('verShort').textContent = '控制台 ' + st.version;
-      document.title = 'mti-sip-phone 控制台 · ' + st.version;
+      document.title = 'MTI 软电话控制台 · ' + st.version;
     }
 
     const line = $('stateLine');
