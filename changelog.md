@@ -6,13 +6,17 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
-## [1.0.16] - 待发布
+## [1.0.16] - 2026-10-09
 
 ### 新增
 
 - **sip:// 拉起支持 `updatesite` 参数**（REQ-UPD-022）：`sip://账号@服务器?updatesite=https://…` 拉起时把更新站点写进**本实例**的更新配置（只改 URL，应用 ID/周期/预览版保持原值）；**省略 = 不改配置**；非法站点只记告警日志、不中断账户拉起。写入走 `SetUpdateConfig` 全套（校验/落盘/立即检查/广播同步桌面与网页）。
 - **诊断页拉起链接按当前配置自动附加 `updatesite` 参数**（REQ-UPD-022）：生成链接时自动带上配置里的更新站点（无输入框），配置改动（含其它网页保存）后缓存即时刷新；链接里站点经百分号编码，不会破坏参数结构。
 - **网页配置页自动更新卡片新增「使用主站点」按钮**（REQ-UPD-023）：把官方站点填进「更新站点」输入框、**不自动保存**（与桌面版一致）。官方地址单一真相源移到 `config.PrimaryUpdateSite`（桌面/网页共用），网页经 `system.state.updatePrimarySite` 下发、不硬编码。
+- **容器化交叉编译（信创系统支持）**：新增 `docker/`——一个镜像一次产出**全部 10 个产物**（完整版 + 无 UI 版 × 5 平台），构建基线固定 **Debian 10 / glibc 2.28**：信创两大桌面（统信 UOS 专业版 **2.28**、银河麒麟 V10 **2.31**）的兼容下限都覆盖到了——此前用较新发行版编的 Linux 产物在这两类系统上会报 `GLIBC_2.3x not found`。镜像已发布在 Docker Hub **`wuzm219/msp-builder`**，换台机器 `docker pull` 即用。
+  - **怎么用**：`bash docker/build.sh --build-image`（首次构建镜像）→ `--libs`（首次编音视频静态库）→ 无参数（日常出 10 个产物）；不用 Docker Desktop 之外的依赖（WSL 3.0 的 `wslc` 因多个子命令卡死暂不使用，保留 `CONTAINER_CLI` 入口）。**发版脚本 `release.sh` 已统一走容器编译**（正式版把 `SIP_PHONE_RELEASE=1` 透传进容器），不再按平台分 build.bat / build.sh——后者留给本机开发自测。
+  - **兼容性口径**：glibc 2.28 基线的产物在 glibc ≥ 2.28 的系统上都能跑（glibc 严格向后兼容）；**第三方静态库（视频/Opus/AEC）必须在同一镜像内编译**（脚本已保证）；Windows 产物不受影响（门槛仍由 Go 工具链决定：Windows 10+）。**龙芯（LoongArch）/ 申威平台仍无产物**——架构层面未支持，与 glibc 无关。
+  - **实现要点**（详见 `docker/README.md` 与 Dockerfile 注释）：llvm-mingw 钉在 20230320（最后一个提供 ubuntu-18.04 包、宿主 glibc 要求 2.27 的版本）；archive 源必须带 security（基础镜像的 libc6 是 +deb10u3、main 里只有 +deb10u1）；容器内源码编 nasm 2.16（buster 的 2.14 编不了 FFmpeg 的 x86 汇编，只影响两个 amd64 目标）；老基线下 glfw 只编 X11 后端（`build.sh` 新增 `SIP_PHONE_GLFW_X11=1` 开关，libwayland 1.16 编不了 glfw 3.4 的 Wayland 后端）——与项目「Linux 固定走 X11/Xwayland」的既有口径一致。
 
 ### 修复
 
