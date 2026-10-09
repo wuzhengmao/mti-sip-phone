@@ -1,0 +1,8 @@
+# 行尾约定（2026-10-09 起）：
+#   *.bat 必须 CRLF——cmd 按 ANSI/GBK 代码页解析 .bat，LF 行尾遇到 UTF-8 中文
+#   注释会让行边界错位（行首 1-2 个字符被吃掉，表现为 'et'/'ho'/'ramFiles'
+#   这类怪错误；release.bat 的故障即此）。仓库开启 core.autocrlf=input 时
+#   checkout 不会转换，必须靠这里的 eol=crlf。
+#   shell 脚本与其余文本统一 LF。
+*.bat text eol=crlf
+*.sh  text eol=lf

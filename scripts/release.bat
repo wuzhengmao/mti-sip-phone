@@ -1,14 +1,14 @@
 @echo off
-rem 一键发布入口（Windows）。实际逻辑在 release.sh，需要 git-bash：git 安装时自带。
+rem һ��������ڣ�Windows����ʵ���߼��� release.sh����Ҫ git-bash��git ��װʱ�Դ���
 rem
-rem 用法：
-rem   scripts\release.bat                  -> 正式版（SIP_PHONE_RELEASE=1 编译，版本如 1.0.5）
-rem   scripts\release.bat --pre            -> 预发布版（版本 1.0.5-rc，站点标记为预发布）
-rem   scripts\release.bat --pre --dry-run  -> 只编译打包，不上传
-rem   scripts\release.bat --no-build       -> 用 dist/ 里已有产物打包
+rem �÷���
+rem   scripts\release.bat                  -> ��ʽ�棨SIP_PHONE_RELEASE=1 ���룬�汾�� 1.0.5��
+rem   scripts\release.bat --pre            -> Ԥ�����棨�汾 1.0.5-rc��վ����ΪԤ������
+rem   scripts\release.bat --pre --dry-run  -> ֻ�����������ϴ�
+rem   scripts\release.bat --no-build       -> �� dist/ �����в�����
 rem
-rem 配置在 release\release.conf（站点地址 / 应用 ID / 上传令牌 / 归档目录）。
-rem 参数原样透传给 release.sh，含空格的参数请自带引号。
+rem ������ release\release.conf��վ���ַ / Ӧ�� ID / �ϴ����� / �鵵Ŀ¼����
+rem ����ԭ��͸���� release.sh�����ո�Ĳ������Դ����š�
 setlocal
 
 set "BASH="
@@ -19,14 +19,20 @@ if not defined BASH for %%b in (bash.exe) do if not defined BASH set "BASH=%%~$P
 if not defined BASH goto :nobash
 
 set "SCRIPT=%~dp0release.sh"
-"%BASH%" -lc "exec \"$(cygpath -u '%SCRIPT%' 2>/dev/null || echo '%SCRIPT%')\" %*"
+rem NOTE: cmd does not treat \" as an escape -- the previous
+rem   "exec \"$(cygpath -u '%SCRIPT%' ...)\"" form broke the quoting (cmd saw
+rem   $(cygpath as a new command and || as its own operator) and never worked.
+rem Simple form: forward-slash path (bash accepts D:/...) inside single quotes.
+set "SCRIPT=%SCRIPT:\=/%"
+"%BASH%" -lc "exec '%SCRIPT%' %*"
 if errorlevel 1 goto :err
 exit /b 0
 
 :nobash
-echo 找不到 bash。请安装 Git for Windows（自带 git-bash），或把 bash.exe 放进 PATH。
+rem �����Ӣ�ģ�cmd �� ANSI/GBK ����ҳ�� .bat��UTF-8 ���Ļ���ʾ������
+echo bash.exe not found. Install Git for Windows (bundles git-bash) or put bash.exe on PATH.
 exit /b 1
 
 :err
-echo 发布失败。
+echo Release failed.
 exit /b 1
