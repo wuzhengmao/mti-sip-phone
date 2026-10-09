@@ -103,7 +103,9 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
   界面上确认**；网页可经 WS `system.setUpdateConfig` 写这份配置、用 `system.notifyUpdate`
   强制推送指定版本（联调/回滚，不受版本高低约束）。
 
-Windows 上一键只出 Windows 产物；Linux 产物需在 Linux 机器上 `./build.sh` 之后再发布。
+**发布用的产物统一用容器出**（`bash docker/build.sh`）：一个镜像一次产出全部 10 个产物
+（完整版 + 无 UI 版 × 5 平台），构建基线 Debian 10 / glibc 2.28（信创系统可用的下限），
+详见 [docker/README.md](docker/README.md)；`build.bat` / `build.sh` 留给本机开发自测。
 开发构建的版本号带 `-rc`，正式版发布时数字相同也会收到更新通知。
 
 ## 当前状态（开发中）
