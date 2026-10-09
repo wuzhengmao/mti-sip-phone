@@ -328,8 +328,15 @@ build_libvpx() {
         # CC/CXX/AR/LD 由 setup_toolchain 导出到环境。
         # 必须用 Windows 形式的绝对路径调用 configure（见 abspath 注释）。
         "$here/configure" "${cfg[@]}"
-        "$MAKE" -j"$JOBS" >/dev/null
-        "$MAKE" install >/dev/null
+        # make 的输出不能丢 /dev/null：失败时没有它根本查不出原因（踩过：
+        # windows-amd64 / linux-amd64 的构建失败，日志里只剩一句"构建失败"）。
+        # 全量写进源码目录的 .make.log，失败时打印末尾 30 行。
+        "$MAKE" -j"$JOBS" >"$here/.make.log" 2>&1 || {
+            echo "  make 失败，末尾 30 行（完整日志：$here/.make.log）："
+            tail -30 "$here/.make.log"
+            return 1
+        }
+        "$MAKE" install >>"$here/.make.log" 2>&1
     )
 }
 
@@ -392,8 +399,15 @@ build_ffmpeg() {
             $( [ -n "$STRIP" ] && echo --strip="$STRIP" ) \
             $( [ -n "$NM" ] && echo --nm="$NM" ) \
             $( [ -n "$WINDRES" ] && echo --windres="$WINDRES" )
-        "$MAKE" -j"$JOBS" >/dev/null
-        "$MAKE" install >/dev/null
+        # make 的输出不能丢 /dev/null：失败时没有它根本查不出原因（踩过：
+        # windows-amd64 / linux-amd64 的构建失败，日志里只剩一句"构建失败"）。
+        # 全量写进源码目录的 .make.log，失败时打印末尾 30 行。
+        "$MAKE" -j"$JOBS" >"$here/.make.log" 2>&1 || {
+            echo "  make 失败，末尾 30 行（完整日志：$here/.make.log）："
+            tail -30 "$here/.make.log"
+            return 1
+        }
+        "$MAKE" install >>"$here/.make.log" 2>&1
     )
 }
 

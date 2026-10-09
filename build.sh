@@ -395,6 +395,12 @@ step_label() {
 build_linux_native() {
     codec_setup "linux-${NATIVE_ARCH}"
     apply_variant
+    # SIP_PHONE_GLFW_X11=1：只编 glfw 的 X11 后端（不加 Wayland）。给老发行版基线用：
+    # Debian 10 的 libwayland 是 1.16，编不了 glfw 3.4 的 Wayland 后端（要 1.20+ 的
+    # WL_MARSHAL_FLAG_DESTROY）；本项目的 Linux 使用本来就固定走 X11/Xwayland
+    # （internal/ui/glfw_linux.go），只影响"纯 Wayland 且无 Xwayland"的环境。
+    # 容器构建（docker/build.sh）默认开；其他环境不加该变量即保持双后端。
+    if [ "${SIP_PHONE_GLFW_X11:-}" = "1" ]; then BUILD_TAGS="${BUILD_TAGS:+$BUILD_TAGS,}x11"; fi
     step_label "构建 $VAR_LABEL 本机版 $(out_name linux "${NATIVE_ARCH}" "")（${FEATURES}）..."
     printf '%s' "$CODEC_NOTES"
     go build $(tags_args) -ldflags "$LDFLAGS" -o "$(out_name linux "${NATIVE_ARCH}" "")" ./cmd/sip-phone
@@ -420,6 +426,8 @@ build_linux_cross() {
     fi
     codec_setup "linux-${CROSS_ARCH}"
     apply_variant
+    # 同 build_linux_native：SIP_PHONE_GLFW_X11=1 时只编 X11 后端（老发行版基线用）
+    if [ "${SIP_PHONE_GLFW_X11:-}" = "1" ]; then BUILD_TAGS="${BUILD_TAGS:+$BUILD_TAGS,}x11"; fi
     if [ -z "$CROSS_CXX" ] && { [ -n "$VIDEO_ON" ] || [ -n "$APM_ON" ]; }; then
         step_label "跳过 $VAR_LABEL linux/${CROSS_ARCH}：带视频或音频预处理需要 ${CROSS_TRIPLE}-g++"
         printf '%s' "$CODEC_NOTES"
