@@ -1,0 +1,10 @@
+// 图标资源（REQ-UI-042）：绿色话机 exe 文件图标。
+// 本文件不参与 Go 构建，仅供 windres 生成 *_windows_*.syso 用：
+//   x86_64-w64-mingw32-windres -F pe-x86-64 -i app.rc -o rsrc_windows_amd64.syso -O coff
+//   i686-w64-mingw32-windres     -F pe-i386   -i app.rc -o rsrc_windows_386.syso   -O coff
+// arm64 用 go-winres（纯 Go，Windows 上也能生成）：
+//   go run github.com/tc-hib/go-winres@latest make \
+//     --in cmd/sip-phone/winres.json --arch arm64 --out cmd/sip-phone/rsrc
+// 图标真相源是 internal/appicon 的绿色话机 SVG，先经 tools/gen-appicon
+// 生成 assets/app-icon.ico 再打进资源。
+IDI_APPICON ICON "assets/app-icon.ico"

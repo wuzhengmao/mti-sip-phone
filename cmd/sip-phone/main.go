@@ -3,6 +3,8 @@
 // 启动流程：
 //  1. 解析命令行（sip:// 协议拉起参数）
 //  2. 加载配置、初始化日志
+//     2.5 自安装（REQ-UPD-024）：不在固定数据目录时复制过去、生成桌面快捷方式
+//     并从固定目录重启（单实例锁之前，本进程不碰锁直接退出）
 //  3. 单实例：第二实例把参数转发给第一实例后退出
 //  4. 注册 sip:// 系统协议（幂等）
 //  5. 组装核心：事件总线 + SIP 电话层 + 音频 + GUI + WS 服务
@@ -28,6 +30,7 @@ import (
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
 	"mti-sip-phone/internal/protocol"
+	"mti-sip-phone/internal/selfinstall"
 	"mti-sip-phone/internal/single"
 	"mti-sip-phone/internal/sip"
 	"mti-sip-phone/internal/updater"
@@ -106,6 +109,21 @@ func main() {
 		}
 	}
 
+	// 2.5 自安装（REQ-UPD-024）：首次从"临时位置"（下载目录等）运行时，把自身
+	// 复制到固定数据目录、在桌面生成指向副本的快捷方式，并从固定目录重启——
+	// 固定自更新的替换目标与自启/协议注册目标，避免下载产物被清理后程序
+	// "消失"。必须在单实例锁之前：本进程不碰锁直接退出，新进程正常拿锁，
+	// 没有转发竞态；复制/启动失败回退原地运行（不阻断启动）。
+	exePath, exeErr := os.Executable()
+	if exeErr != nil {
+		logx.Logger().Warn("无法获取可执行文件路径，跳过自安装检查", "err", exeErr)
+	} else if relocated, dst, err := selfinstall.Relocate(exePath, os.Args[1:]); err != nil {
+		logx.Logger().Warn("自安装失败，继续从当前位置运行", "err", err)
+	} else if relocated {
+		logx.Logger().Info("已复制到固定数据目录并重启", "src", exePath, "dst", dst)
+		os.Exit(0)
+	}
+
 	// 沙箱实例：首次启动（还没有配置文件）时按「8765 + 10×槽位」给 WS 端口一个
 	// 起点（槽位 1 → 8775、槽位 2 → 8785，被占用仍会自动 +1 并存入本实例自己的
 	// 配置），免得与主实例及其它槽位抢。已有配置（用户改过端口）时不覆盖。
@@ -144,10 +162,7 @@ func main() {
 	// 拉起新进程"统一放在退出收尾（spawnNewProcessIfRequested）——必须等
 	// WS/SIP 监听关闭、SIP 注销完成后再启动新进程，否则新进程会把被占用的
 	// WS 端口 +1 写回配置，并与旧进程重复注册。
-	// 可执行文件路径：协议/自启注册、自动更新与重启共用（先取到，
-	// 重启回调与退出收尾都要用）
-	exePath, exeErr := os.Executable()
-
+	// exePath 在上方自安装步骤已取到（协议/自启注册、自动更新与重启共用）。
 	var restartRequested atomic.Bool
 	restart := func() error {
 		restartRequested.Store(true)

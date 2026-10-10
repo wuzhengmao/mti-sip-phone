@@ -9,9 +9,7 @@ import (
 	"image/png"
 	"strings"
 
-	"github.com/fyne-io/oksvg"
-	"github.com/srwiley/rasterx"
-
+	"mti-sip-phone/internal/appicon"
 	"mti-sip-phone/internal/logx"
 )
 
@@ -42,35 +40,9 @@ func loadIcon(svg string, colorHex string) []byte {
 	return data
 }
 
-// rasterizeSVG 把 SVG 渲染成 iconSize×iconSize 的位图。
+// rasterizeSVG 把 SVG 渲染成 iconSize×iconSize 的位图（共用 appicon.Rasterize）。
 func rasterizeSVG(svg string) (image.Image, error) {
-	icon, err := oksvg.ReadIconStream(strings.NewReader(svg))
-	if err != nil {
-		return nil, err
-	}
-	// 视图框（0 0 24 24，正方形）等比缩放到目标方框：SetTarget 会把 viewBox
-	// 映射到给定矩形，正方形之间不会变形。
-	icon.SetTarget(0, 0, iconSize, iconSize)
-
-	img := image.NewRGBA(image.Rect(0, 0, iconSize, iconSize))
-	scanner := rasterx.NewScannerGV(iconSize, iconSize, img, img.Bounds())
-	raster := rasterx.NewDasher(iconSize, iconSize, scanner)
-	if err := drawSVG(icon, raster); err != nil {
-		return nil, err
-	}
-	return img, nil
-}
-
-// drawSVG 渲染并兜住渲染器内部的 panic（第三方 SVG 解析/绘制对畸形输入会
-// panic，Fyne 侧同样做了这层保护）。
-func drawSVG(icon *oksvg.SvgIcon, raster *rasterx.Dasher) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = errors.New("渲染 SVG 时崩溃")
-		}
-	}()
-	icon.Draw(raster, 1)
-	return nil
+	return appicon.Rasterize(svg, iconSize)
 }
 
 // fallbackIcon 兜底图标：纯色实心圆（渲染失败时至少让托盘有条目可点）。

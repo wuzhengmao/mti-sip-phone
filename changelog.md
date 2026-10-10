@@ -6,6 +6,17 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
+## [1.0.17] - 待发布
+
+### 新增
+
+- **Windows 可执行文件图标（绿色话机）**（REQ-UI-042）：此前 Windows 产物没有 exe 文件图标，资源管理器里显示 Go 默认图标。现在构建时自动嵌入绿色话机图标（与托盘/窗口同一份 SVG 真相源 `internal/appicon.PhoneGreenSVG()` 光栅化生成，一次性产出 `assets/app-icon.ico` 与 `cmd/sip-phone/rsrc_windows_{amd64,386,arm64}.syso` 提交进仓库）——完整版、无 UI 版、控制台版三个 Windows 产物全部生效，**构建脚本零改动**（Go 自动链接包目录下与目标匹配的 `.syso`）；改图标时用 `tools/gen-appicon` 重新生成 ico、再用 go-winres 重新生成 syso。
+- **自安装到固定数据目录**（REQ-UPD-024）：首次从"临时位置"（下载目录等）运行时，程序把自身复制到固定目录、**在桌面与应用菜单生成指向副本的快捷方式「MTI 软电话」**（Windows 经 PowerShell WScript.Shell 生成 .lnk；Linux 写 .desktop——**桌面与应用菜单（`~/.local/share/applications`）各一份**（GNOME 默认关闭桌面图标、本地化桌面目录可能对不上，菜单入口最可靠）；**桌面目录按 `xdg-user-dir`/`~/.config/user-dirs.dirs` 解析**（本地化目录如「~/桌面」也能命中），**ELF 二进制不能内嵌图标**，所以把绿色话机 256px PNG（与托盘同一真相源，光栅化统一提到 `appicon.Rasterize` 供 tray/图标工具/自安装共用）写到程序旁由 .desktop 的 `Icon=` 引用，桌面那份尽力 `gio set metadata::trusted true`（GNOME 43+ 未标记的桌面快捷方式双击不执行、图标显示成通用齿轮）；快捷方式失败只告警不阻断），并从固定目录重启——Windows 是 `%APPDATA%\mti-sip-phone`（与配置目录同一处）、Linux 是 `~/.local/share/mti-sip-phone`，之后自更新替换、开机自启、sip:// 协议注册、更新后重启都围绕这个固定位置，不再受"下载产物被清理"影响。行为细节：已在该目录则直接运行（不复制）；复制/启动失败**回退原地运行**（绝不因此启动失败）；`go run` 的临时 exe 与 `SIP_PHONE_NO_RELOCATE=1` 环境变量跳过（开发逃生口）；复制保留原文件名（完整版与无 UI 版互不覆盖）。检查点在**单实例锁之前**——旧进程不碰锁直接退出、新进程正常拿锁，与自更新重启的竞态口径一致。多实例沙箱各槽位共用同一个 exe 位置，不受影响。
+
+### 修复
+
+- **Linux 应用菜单里出现一个显示为 "mti-sip-phone" 的重复条目**（用户实测）：那是 sip:// 协议的**处理器 .desktop**（`~/.local/share/applications/mti-sip-phone.desktop`，负责「网页里点 sip:// 链接拉起软电话」），它没写 `NoDisplay=true`，于是和自安装写的「MTI 软电话」一起混进应用菜单。现在补上 `NoDisplay`（scheme 处理器按惯例不进菜单；协议注册每次启动重写该文件，下次启动菜单里就只剩「MTI 软电话」）。
+
 ## [1.0.16] - 2026-10-09
 
 ### 新增
