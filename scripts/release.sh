@@ -159,7 +159,10 @@ esac
 
 # ---------- 版本 ----------
 
-VERSION_BASE="$(sed -n 's/^var Version = "\(.*\)"$/\1/p' "$ROOT/internal/core/buildinfo.go")"
+# 注意行尾：Windows 检出下 buildinfo.go 是 CRLF，sed 的 "$" 锚点会被行尾的
+# \r 挡住（表现为"解析不到版本号"），所以末尾用 .* 吸收 \r（build.bat 的
+# findstr 没有这个问题）。
+VERSION_BASE="$(sed -n 's/^var Version = "\([^"]*\)".*$/\1/p' "$ROOT/internal/core/buildinfo.go")"
 if [ -z "$VERSION_BASE" ]; then
     echo "无法从 internal/core/buildinfo.go 解析基础版本号" >&2
     exit 1

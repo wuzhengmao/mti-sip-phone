@@ -40,7 +40,8 @@ LDFLAGS="-s -w -X mti-sip-phone/internal/core.BuildTime=${BUILD_TS}"
 # 开发构建一律带 -rc（非正式版）：正式版发布时数字相同（1.0.5 vs 1.0.5-rc）
 # 也要能通知更新——预发布低于同号正式版的比较规则见 internal/updater/version.go。
 # 正式构建：SIP_PHONE_RELEASE=1 ./build.sh（发布脚本 scripts/release.sh 会设置）。
-VERSION_BASE="$(sed -n 's/^var Version = "\(.*\)"$/\1/p' internal/core/buildinfo.go)"
+# 行尾宽容：Windows/WSL 检出下可能是 CRLF，末尾 .* 吸收 \r（同 release.sh）
+VERSION_BASE="$(sed -n 's/^var Version = "\([^"]*\)".*$/\1/p' internal/core/buildinfo.go)"
 if [ -z "$VERSION_BASE" ]; then
     echo "无法从 internal/core/buildinfo.go 解析基础版本号" >&2
     exit 1

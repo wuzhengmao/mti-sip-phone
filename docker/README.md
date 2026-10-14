@@ -68,6 +68,18 @@ bash docker/build.sh
 产物出在仓库 `dist/`，第三方静态库在 `third_party/`（都在宿主仓库里，持久化）。
 Go 的模块与构建缓存用容器命名卷（`mti-sip-phone-gomod` / `-gocache`），第二次起快很多。
 
+**Windows 上不用手动进 git-bash**：仓库根目录的 `docker\build.bat` 是等价的入口，
+参数与 build.sh 一致、原样透传（内部自己找 git-bash），在 cmd / PowerShell 里直接：
+
+```bat
+docker\build.bat --libs    rem 首次：编第三方静态库
+docker\build.bat           rem 日常：出全部 10 个产物
+```
+
+前置：Docker Desktop 已启动，且「Settings → Resources → File sharing」允许本仓库所在盘。
+（`.bat` 里的注释刻意用英文——cmd 按 ANSI/GBK 代码页解析批处理，UTF-8 中文注释行会被
+拆碎成乱码命令片段。）
+
 其它命令：
 
 ```bash

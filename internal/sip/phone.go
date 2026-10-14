@@ -150,7 +150,7 @@ func (p *Phone) nowClock() time.Time {
 // noteHeartbeat 记录一条服务端 OPTIONS 探测，并从相邻间隔学习探测周期
 // （REQ-ACC-021）：累计 hbMinHeartbeats 条心跳（即 4 个间隔样本）后取**平均**
 // 作为间隔；样本不足不武装（免得拿不准的间隔误判）。时钟回拨不学习；间隔突增
-//（> 3× 见过的最小间隔）视为探测中断后重启，样本清零重新学习；亚秒级重发
+// （> 3× 见过的最小间隔）视为探测中断后重启，样本清零重新学习；亚秒级重发
 // 视为重复探测，只更新时刻不记样本。
 func (p *Phone) noteHeartbeat() {
 	now := p.nowClock()
@@ -196,7 +196,7 @@ func (p *Phone) noteHeartbeat() {
 
 // heartbeatOverdue 是否已超过 hbOverdueFactor 个心跳周期没收到探测
 // （REQ-ACC-021）：只在「已观测到心跳且间隔已知」时成立，成立后**复位**
-//（等下一次心跳重新武装），避免服务端彻底不再探测时反复触发重新注册。
+// （等下一次心跳重新武装），避免服务端彻底不再探测时反复触发重新注册。
 // 服务器不发 OPTIONS（不支持 optchk）时从未观测到心跳，这里恒为 false。
 func (p *Phone) heartbeatOverdue(now time.Time) bool {
 	p.hbMu.Lock()
@@ -1836,8 +1836,9 @@ func (p *Phone) handleReInvite(req *sip.Request, tx sip.ServerTransaction) {
 func (p *Phone) handleIncomingCancel(req *sip.Request, tx sip.ServerTransaction) {
 	res := sip.NewResponseFromRequest(req, 200, "OK", nil)
 	_ = tx.Respond(res)
-	// 找到对应通话并终止（按 Call-ID 匹配）
-	target := p.matchByCallID(req.CallID().Value())
+	// 找到对应通话并终止（按 Call-ID 匹配，带失配降级——漏删会让会话
+	// 残留在 p.calls 里，卡死单通话限制）
+	target := p.matchForTeardown(req.CallID().Value(), "CANCEL")
 	if target != nil && !target.established {
 		p.cleanupCall(target.id, "remote_cancel")
 	}
@@ -1850,7 +1851,7 @@ func (p *Phone) handleRemoteBye(req *sip.Request, tx sip.ServerTransaction) {
 		_ = tx.Respond(res)
 	}
 
-	target := p.matchByCallID(req.CallID().Value())
+	target := p.matchForTeardown(req.CallID().Value(), "BYE")
 	if target != nil {
 		p.cleanupCall(target.id, "remote_hangup")
 	}
@@ -1867,22 +1868,75 @@ func (p *Phone) getCall(callID string) *callSession {
 	return p.calls[callID]
 }
 
-// matchByCallID 按 SIP Call-ID 匹配会话：呼入用 dialogS、呼出用 dialogC
+// matchByCallID 按 SIP Call-ID 精确匹配会话：呼入用 dialogS、呼出用 dialogC
 // （此前仅匹配 dialogS，呼出通话的对端 BYE 被忽略——bug 修复）。
 func (p *Phone) matchByCallID(callID string) *callSession {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, cs := range p.calls {
-		var csCallID string
-		if cs.dialogS != nil && cs.dialogS.InviteRequest != nil {
-			csCallID = cs.dialogS.InviteRequest.CallID().Value()
-		} else if cs.dialogC != nil && cs.dialogC.InviteRequest != nil {
-			csCallID = cs.dialogC.InviteRequest.CallID().Value()
-		}
-		if csCallID != "" && csCallID == callID {
+		if csCallID := p.callIDOfLocked(cs); csCallID != "" && csCallID == callID {
 			return cs
 		}
 	}
+	return nil
+}
+
+// callIDOfLocked 取会话的 SIP Call-ID（呼入用 dialogS、呼出用 dialogC；
+// dialog 未记录 INVITE 时返回空串）。调用方须持有 p.mu。
+func (p *Phone) callIDOfLocked(cs *callSession) string {
+	if cs.dialogS != nil && cs.dialogS.InviteRequest != nil {
+		return cs.dialogS.InviteRequest.CallID().Value()
+	}
+	if cs.dialogC != nil && cs.dialogC.InviteRequest != nil {
+		return cs.dialogC.InviteRequest.CallID().Value()
+	}
+	return ""
+}
+
+// matchForTeardown 匹配「对端结束通话」类请求（BYE / CANCEL）对应的会话。
+// 与 matchByCallID 的区别：失配时不直接放弃，而是按序降级，尽量堵住
+// "对端已挂断、本端会话却残留在 p.calls 里"的漏删（会话残留会卡死单通话
+// 限制：新来电 486、新呼出被拒、界面停在通话中、媒体泄漏）：
+//  1. Call-ID 精确匹配；
+//  2. **大小写不敏感**再匹配——中间设备规范化 Call-ID 大小写是失配的最
+//     常见原因（RFC 3261 里 Call-ID 大小写敏感，但实测有设备改写；单通话
+//     限制下不存在"仅大小写不同的两个并发会话"，此降级是安全的）；
+//  3. p.calls 里**只有一条**会话且它的 Call-ID 取不到（dialog 未记录
+//     INVITE 的边角）——按它处理，否则它永远无人清理。
+//
+// 仍然失配时返回 nil 并打 WARN 日志（带收到的 Call-ID 与当前所有会话的
+// Call-ID，便于定位失配原因）：**宁可不删，也不误删别的通话**——迟到的
+// 旧 BYE 与新通话并存时，兜底删除会把新通话误杀。
+func (p *Phone) matchForTeardown(callID, kind string) *callSession {
+	if cs := p.matchByCallID(callID); cs != nil {
+		return cs
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var (
+		foldMatch *callSession
+		single    *callSession
+		ids       []string
+	)
+	for _, cs := range p.calls {
+		csCallID := p.callIDOfLocked(cs)
+		ids = append(ids, fmt.Sprintf("%s=%q", cs.id, csCallID))
+		if csCallID != "" && strings.EqualFold(csCallID, callID) {
+			foldMatch = cs
+		}
+		single = cs
+	}
+	if foldMatch != nil {
+		logx.Logger().Warn("对端请求的 Call-ID 与本地记录大小写不一致，按同一通话处理",
+			"kind", kind, "peerCallID", callID, "calls", ids)
+		return foldMatch
+	}
+	if len(p.calls) == 1 && p.callIDOfLocked(single) == "" {
+		logx.Logger().Warn("对端请求无 Call-ID 可匹配，且仅有一条未记录 Call-ID 的会话，按它处理",
+			"kind", kind, "peerCallID", callID, "target", single.id)
+		return single
+	}
+	logx.Logger().Warn("对端请求无匹配会话，忽略", "kind", kind, "peerCallID", callID, "calls", ids)
 	return nil
 }
 
@@ -1987,7 +2041,7 @@ func (p *Phone) declaredIP() string {
 }
 
 // applyDeclaredIP 把配置的声明 IP 应用到**已经建好的** sipgo Client 上
-//（Via 的 sent-by）。Contact 与 SDP 走 localHost()，不用在这里管。
+// （Via 的 sent-by）。Contact 与 SDP 走 localHost()，不用在这里管。
 // 账户变更（Register）时调用，因此保存配置即生效，不必重启。
 func (p *Phone) applyDeclaredIP(acc config.Account) {
 	setClientHost(p.client, config.NormalizePublicIP(acc.PublicIP))

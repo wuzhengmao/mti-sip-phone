@@ -6,6 +6,16 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
+## [1.0.18] - 待发布
+
+### 新增
+
+- **`docker/build.bat`（Windows 一键容器构建入口）**：cmd / PowerShell 里直接跑，参数与 `docker/build.sh` 一致、原样透传（内部自动找 git-bash，写法与 `scripts/release.bat` 同款）——`docker\build.bat --libs`（首次编第三方库）/ 无参数（出全部 10 个产物）/ `--build-image` / `--shell`。`.bat` 注释刻意用英文：cmd 按 ANSI/GBK 代码页解析批处理，UTF-8 中文注释行会被拆碎成乱码命令片段（实测）；中文说明都在 `docker/README.md` 与 build.sh。另修复 `release.sh` / `build.sh` 的版本号解析在 Windows 检出（CRLF 行尾）下失效的问题——sed 的 `"$` 锚点被行尾 `\r` 挡住，末尾改 `.*$` 吸收。
+
+### 修复
+
+- **对端挂断（BYE / CANCEL）按 Call-ID 匹配失配会漏删会话**（用户集成测试反应话机不稳定）：`handleRemoteBye` / `handleIncomingCancel` 原是按 Call-ID **精确**匹配，匹配不上就静默返回——会话残留在 `p.calls` 里，卡死单通话限制（新来电 486、新呼出被拒、界面停在通话中、媒体泄漏）。现在这两处走新的 `matchForTeardown`：先精确匹配，失配时**大小写不敏感再匹配**（中间设备规范化 Call-ID 大小写是最常见失配源；单通话限制下该降级安全），再不行只在「p.calls 里唯一会话且它的 Call-ID 取不到（dialog 未记录 INVITE）」时兜底按它处理；**其余失配宁可不删也不误删**（迟到的旧 BYE 与新通话并存时兜底删除会误杀新通话），但打 WARN 日志带双方 Call-ID 便于定位真正失配原因。回归测试：大小写翻转的 BYE 能正常结束通话、失配兜底三态。
+
 ## [1.0.17] - 2026-10-14
 
 ### 新增
