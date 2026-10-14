@@ -89,6 +89,7 @@
 | `system.setLogConfig` | `{ "level": "debug", "dir": "", "file": true, "console": false, "sipTrace": false }` | 生效后的日志配置 | 修改日志配置（字段可选）：级别与 SIP 信令记录**立即生效**，写文件/控制台**重启后生效**；级别非 debug/info/warn/error 返回 `invalid_params`。注：`console`（把日志另写一份到 stderr）**桌面与网页界面都不提供**（GUI 子系统构建没有控制台，看不出效果），只有控制台版/终端里跑时才有意义；界面不传它，配置值保持不变 |
 | `system.setWSPort` | `{ "port": 8801 }` | `{ "port": 8801, "actualPort": 8765, "restartRequired": true }` | 修改本地 WS 端口（**重启后生效**）；`actualPort` 是当前进程实际监听的端口（启动时被占用会自动 +1）。配合 `system.restart` |
 | `system.setAutoStart` | `{ "enabled": true }` | `{ "enabled": true }` | 开/关开机自启（立即注册/移除系统项）。沙箱实例（`-instance N`）不支持，返回 `config_unavailable` |
+| `system.setUnregisterOnDisconnect` | `{ "enabled": true }` | `{ "enabled": true }` | **WS 断开自动取消注册**（REQ-WS-020）：应用级开关，默认关、不持久化（SDK 的 `unregisterOnDisconnect` 参数每次连上后下发，最后一次设置生效）。开启后，**所有** WS 连接断开并超过 3 秒仍未回来 → 自动取消 SIP 注册（`system.setAccount` 的 enabled 语义，等同关闭「启用账户」）；**呼叫/振铃/通话中**自动**排队**，等话务结束再注销；等待期间有连接回来（重连）→ **取消**排队任务，并恢复已被自动取消的注册（重新注册）。页面刷新/瞬时断网因 3 秒延迟窗口不触发 |
 | `system.restart` | `{}` | `{ "restarting": true }` | 重启软电话程序。⚠️ **先回响应再重启**：resolve 之后进程随时退出、WS 断开 |
 | `system.checkUpdateNow` | `{}` | `{ "skipped": false, "upToDate": true, "latestVersion": "", "notified": false, "reason": "", "text": "已是最新版本", "currentVersion": "1.0.15" }` | 立即检查一次更新站点（不等下一个周期，20 秒超时） |
 | `update.status` | `{}` | 更新状态对象（同 `system.update` 事件负载） | 查询更新状态（页面一般用事件，这里供初始化） |

@@ -28,7 +28,7 @@ window.SipApp = window.SipApp || {};
   const sdk = new SipPhoneSDK({
     autoReconnect: true,
     // 首次连接失败时可用 sip:// 协议拉起软电话（与测试页同一行为）
-    schemaUri: App.schemaUri || undefined,
+    sipUri: App.sipUri || undefined,
   });
 
   /** on 订阅事件（'*' 收全部业务事件）。 */

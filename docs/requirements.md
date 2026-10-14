@@ -96,7 +96,7 @@
 | REQ-UI-022 | 开机自动启动：配置项默认启用，Windows（HKCU Run 注册表）与 Linux（XDG autostart）环境系统启动时自动运行；启动时默认隐藏主窗体仅显示托盘；通话结束后仅当主窗体是被通话自动隐藏时恢复显示 | P0 | 已完成 |
 | REQ-UI-039 | 呼出回铃音：接收 SIP 服务器下发的 183 早期媒体并播放（不本地生成回铃音） | P0 | 已完成 |
 | REQ-WS-011 | 本地 WS 监听端口可配置（默认 8765），被占用时自动 +1 选择空闲端口并保存 | P0 | 已完成 |
-| REQ-WS-012 | 网页接入无需 token 鉴权（仅回环监听保证安全）；SDK 支持 options.schemaUri——首次 WS 连接失败时自动通过系统协议拉起软电话，仅一次 | P0 | 已完成 |
+| REQ-WS-012 | 网页接入无需 token 鉴权（仅回环监听保证安全）；SDK 支持 options.sipUri——首次 WS 连接失败时自动通过系统协议拉起软电话，仅一次（**1.0.17 修订**：`schemaUri` 改名为 `sipUri` 并扩展"连上后按 URI 注册信息登录"，见 REQ-SDK-007） | P0 | 已完成 |
 
 ### 4.3 媒体与音频（MEDIA）
 
@@ -150,6 +150,7 @@
 | REQ-UI-036 | **通信录 CSV 一键导入导出**：顶栏「导出」「导入」按钮（系统文件对话框，Windows 走原生 IFileOpenDialog/IFileSaveDialog，Linux 走 zenity/kdialog/yad，都没有时回退 Fyne 内置对话框）。导出为**标准 CSV**：表头 `号码,名称,备注,常用`，RFC 4180 转义，**UTF-8 带 BOM**（中文 Windows 上 Excel 双击打开不乱码），常用列写「是/否」。导入**按号码去重**：已存在的条目只覆盖号码/名称/备注，**常用标志只增不减**（本地已标常用就保持，本地没标而 CSV 标了则变成常用）；不存在的整条新增（常用取 CSV 值）。解析容忍 BOM、缺表头（按列序解析）、表头列序不同、列数不足/多余、空行与不规范引号，`常用` 列接受 是/否/1/0/true/false/yes/no；没有号码或整行解析失败的行计入「跳过」并在结果里提示。导入完成后提示「新增 N 条、覆盖 M 条、跳过 K 行」 | P1 | 已完成 |
 | REQ-UI-040 | **通话面板拖动条与位置记忆**：面板**顶部居中一条 50% 宽、2px 高的细线**（距顶边约 4px；深色主题用深灰、浅色主题用浅灰）作为窗口的“抓手”——**鼠标移到这条线上变成“可移动”光标**（四向箭头；Fyne 标准光标没有 move 这一种，用自绘位图实现），**按住拖动即可移动窗口**（Windows 用屏幕绝对光标 + `SetWindowPos` 跟随；Linux/X11 用 `XQueryPointer` + `XMoveWindow`）。拖动结束记录位置并**持久化**（`ui.callPanel`），下次弹出（含退出重启后）固定在该位置；**没移动过时沿用原默认摆放**（工作区右下角 + 多实例按槽位整列左移），移动过后默认摆放不再覆盖。坐标存物理像素；恢复时若保存位置已不在当前屏幕范围内（拔屏/换分辨率）则回退默认摆放，**但不清配置值**（屏幕回来还能用）。抓手区域只有细线那一小条（比细线略高、便于抓取，不伸进第一行内容），**不实现 Tappable/Hoverable**，面板上的按钮点击、名称备注悬停、音量滚轮与从前完全一致；面板**没有锁**（随时可拖） | P1 | 已完成 |
 | REQ-UI-037 | **通信录联动显示**：命中通信录时，**通话记录行**与**通话面板**都在**号码右边**显示通信录名称（未命中沿用原行为：SIP 显示名优先、其次号码；通话记录行仍是「显示名（号码）」），**常用联系人在名称右边再加金色 ★**；**名称上鼠标悬停**以提示框显示该联系人的备注（无备注不弹）。视频窗口标题与未接来电通知同样优先用通信录名称（通知正文仍保留号码）。悬停提示是**窗口内容里的顶层图层**（自绘圆角矩形 + 文本，不含 Hoverable/Tappable）：不能用 `widget.PopUp`/`canvas.Overlays()`——画布上一旦有 overlay，Fyne 的指针命中测试就**只查 overlay 层、不再回落内容层**，被提示控件会立刻收到 MouseOut（提示闪烁），做成非 Hoverable 则整个界面在提示期间收不到指针事件 | P1 | 已完成 |
+| REQ-UI-042 | **Windows 可执行文件图标**：Windows 产物（完整版/无 UI 版/控制台版，amd64 与 386）带**绿色话机**文件图标（资源管理器/任务栏显示，与托盘/窗口同一份 SVG 真相源 `internal/appicon.PhoneGreenSVG()` 经 `tools/gen-appicon` 光栅化成多尺寸 ICO，再打成 `cmd/sip-phone/rsrc_windows_{amd64,386,arm64}.syso` 提交进仓库——Go 对 Windows 目标自动链接，**构建脚本零改动**） | P1 | 已完成 |
 ### 4.5 本地 WebSocket 接口（WS）
 
 > 核心场景：网页通过本机 WebSocket 连接软电话，控制拨号/接听/挂断，并接收振铃、挂断等事件。
@@ -172,6 +173,7 @@
 | REQ-WS-017 | **通话记录**（REQ-CALL-007 的网页路径）：`calllog.query`（`{remote?, limit?, offset?}`，limit 默认 50、上限 200）返回 `{records, total, hasMore}`，每条记录含 `callId/direction/remote/remoteName/startedAt/answeredAt/endedAt/hasVideo/missed/reason`，**时间戳一律毫秒整数、0 表示未发生**（不把 time.Time 零值序列化成 0001-01-01）；`calllog.delete`（`{callIds}`，空数组 = `invalid_params`）与 `calllog.clear` 返回 `{deleted}`；删除/清空后广播 `calllog.changed`（新增记录仍由 `call.terminated`/`call.failed` 驱动刷新）。数据库未接入时错误码 `calllog_unavailable` | P1 | 已完成 |
 | REQ-WS-018 | **通信录增删改查**：`contact.list`（`{query?}`，返回 `{count, total, contacts}`；给了 query 就在服务端**按拼音过滤**——音头/全拼/汉字/号码/备注/纯数字，与桌面通信录页共用 `internal/contactsearch`，结果按拼音排序）、`contact.save`（`{prevNumber?, number, name?, note?, starred?}`，号码重复/为空 → `invalid_params`）、`contact.delete`（`{numbers}`）、`contact.setStarred`（`{numbers, starred}`）、`contact.clear`。写入统一走 `core.App` 的 `mutateContacts`（"写存储 + 重建内存快照"整体串行），成功后广播 **`contact.changed`**（`{action, total}`）——桌面界面、网页、CSV/JSON 导入**所有写入路径都经这一处**，多标签与两端列表据此刷新 | P1 | 已完成 |
 | REQ-WS-019 | **配置读写**：`system.getConfig` 返回脱敏快照（账户 / 音频 / 视频 / 日志 / WS 端口（含实际监听端口）/ 自动更新 / 开机自启）；`system.setAccount`、`system.setAudioConfig`、`system.setVideoConfig`、`system.setLogConfig`、`system.setWSPort`、`system.setAutoStart` 逐个修改对应段落——**只改传入的字段**（可选字段一律指针，nil = 不改，与 `system.setUpdateConfig` 同款），校验失败回 `invalid_params` 且不落盘不改内存，成功即"改内存 → 落盘 → 广播 `system.config`"（`{section, values}`）。**密码只写不读**：快照只回 `passwordSet` 布尔，写入用 `password`（缺省 = 不改）或 `clearPassword`（显式清空）。生效时机与桌面口径一致：设备/总开关/日志级别/信令开关立即生效，采集参数与音频预处理从下一通电话生效，写文件/控制台与 WS 端口重启后生效。另：`system.restart` 重启程序、`call.setVideoPreview` 本地回显开关——**两者都是先回响应再动手**（重启/安装会终止本进程，先动手响应就发不出去） | P1 | 已完成 |
+| REQ-WS-020 | **WS 断开自动取消注册**：新增 `system.setUnregisterOnDisconnect`（`{enabled}`，**应用级开关、默认关、不持久化**——SDK 的 `unregisterOnDisconnect` 参数每次连上后下发，多页面同时连时最后一次设置生效）。开启后：**所有** WS 连接断开并**超过 3 秒**仍未回来（延迟确认窗口，页面刷新/瞬时断网不触发）→ 自动取消 SIP 注册（等同关闭「启用账户」）；**呼叫/振铃/通话中**自动**排队**，等话务结束再注销；等待期间有连接回来（重连）→ **取消**排队任务，并恢复已被自动取消的注册（重新注册）。实现见 `internal/wsapi/unreg.go`（连接计数 + 定时器 + 事件等待的状态机，有回归测试钉着四个阶段的完整流程） | P1 | 已完成 |
 
 ### 4.6 sip:// 协议（PROTO）
 
@@ -193,6 +195,7 @@
 | REQ-SDK-004 | SDK 支持 TypeScript 类型声明 | P1 | 已完成 |
 | REQ-SDK-005 | SDK 可脱离构建工具直接以 `<script>` 标签引用（浏览器原生可用） | P1 | 已完成 |
 | REQ-SDK-006 | **通信录**：通话对象（事件负载与 `system.getState` 的 `calls[]`）新增 `contact` 字段 `{name, note, starred}`（对端号码命中通信录时才有），页面据此在号码旁显示名称、★ 与备注提示；SDK 新增 `exportContacts()`（经 WS 取 CSV 文本）、`importContacts(csv)`（经 WS 导入文本）、`downloadContacts()`（一键下载为 CSV 文件，走 **HTTP** `/api/contacts.csv`）、`importContactsFromFile()` / `importContactsFile(file)`（选文件或按 File 对象导入，走 **HTTP** `/api/contacts/import`）——一键路径走 HTTP 是为了不受 WS 单条消息大小限制（REQ-CONTACT-004）；另有 **JSON 版** `exportContactsJSON()` / `importContactsJSON(list)`（REST `/api/contacts`，REQ-CONTACT-005）；文件选择取消以 `code='cancelled'` 拒绝 | P1 | 已完成 |
+| REQ-SDK-007 | **`sipUri` 参数与 `unregisterOnDisconnect` 参数**（构造参数，均可选）：① `sipUri`（原 `schemaUri` **改名并扩展**，sip:// 或 sips:// 链接）：保留"首次 WS 连接失败时用 URI 走系统协议拉起软电话（每页会话仅一次）"的既有行为；**新增**——每次 WS 连接成功后，解析 URI 的注册信息（账号/密码/服务器/端口/传输，口径与 `internal/protocol.ParseSipURL` 一致）经 `system.setAccount` 登录 SIP 服务器（`enabled:true`），**与软电话现有注册相同时自动忽略**（比较服务器/端口/传输/账号/认证 ID；密码只写不读，URI 带密码而软电话没设过密码时视为不同）；解析失败只记控制台错误。② `unregisterOnDisconnect`（默认 `false`）：为 `true` 时每次连上后经 `system.setUnregisterOnDisconnect` 下发断线自动注销开关（行为见 REQ-WS-020） | P1 | 已完成 |
 
 ### 4.8 网页控制台（WEB）
 
@@ -258,6 +261,7 @@
 | REQ-UPD-022 | **sip:// 拉起的 updatesite 参数**：`sip://账号@服务器?updatesite=https://…` 拉起时把更新站点写进**本实例**的更新配置（只改 URL，应用 ID/周期/预览版保持原值）；**省略 = 不改配置**；非法站点（非 http/https）只记告警日志、不中断账户拉起。写入走 `SetUpdateConfig` 全套（校验/落盘/立即检查/广播同步桌面与网页）。诊断页生成拉起链接时按当前配置里的更新站点**自动附加** `updatesite` 参数（百分号编码，无输入框），配置变化（含其它网页保存）后缓存即时刷新 | P1 | 已完成 |
 | REQ-UPD-023 | **网页配置页「使用主站点」按钮**：自动更新卡片「更新站点」标签旁新增小按钮，点击把官方站点填进输入框、**不自动保存**（与桌面版一致）。官方地址单一真相源为 `config.PrimaryUpdateSite`（桌面/网页共用），网页经 `system.state.updatePrimarySite` 下发、**不硬编码** | P1 | 已完成 |
 | REQ-UPD-019 | **SDK 只保留强制推送**：SDK 移除全部站点查询能力（`checkUpdate`/`listReleases`/`setUpdateSource`/定时器/`update.check` 事件与相关构造参数），只保留 `notifyUpdate(info)`——**恒为强制推送**（不受版本高低与预览版约束），供页面手动推送/联调；「有没有新版本」由软电话自己查询 | P1 | 已完成 |
+| REQ-UPD-024 | **自安装到固定数据目录**：首次从"临时位置"（下载目录等）运行时，程序把自身复制到固定数据目录（Windows `%APPDATA%\mti-sip-phone`——与配置目录同一处；Linux `~/.local/share/mti-sip-phone`）、**生成指向副本的快捷方式「MTI 软电话」**（Windows 桌面 .lnk / Linux 桌面与应用菜单各一份 .desktop，失败只告警），再从固定目录重启。Linux 侧细节：**ELF 二进制不能内嵌图标**，把绿色话机 256px PNG 写到程序旁、由 .desktop 的 `Icon=` 引用；**桌面目录按 `xdg-user-dir`/`~/.config/user-dirs.dirs` 解析**（本地化目录如「~/桌面」也能命中，取不到只跳过桌面那份）；桌面那份尽力 `gio set metadata::trusted true`（GNOME 43+ 未标记的桌面快捷方式双击不执行、图标显示成通用齿轮，gio 缺失静默忽略）；**应用菜单入口不受桌面图标开关影响**（GNOME 默认关闭桌面图标）——自更新替换、开机自启、sip:// 协议注册、更新后重启全部围绕这个固定位置，不受"下载产物被清理"影响。行为细节：**已在固定目录则直接运行不复制**；**复制/启动失败回退原地运行**（绝不因此启动失败）；`go run` 的临时 exe 与 `SIP_PHONE_NO_RELOCATE=1` 环境变量跳过（开发逃生口）；复制**保留原文件名**（完整版与无 UI 版互不覆盖）；检查点在**单实例锁之前**（旧进程不碰锁直接退出、新进程正常拿锁，无转发竞态）；多实例沙箱各槽位共用同一个 exe 位置 | P1 | 已完成 |
 
 ### 4.11 非功能需求（NFR）
 

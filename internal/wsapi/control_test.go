@@ -41,6 +41,13 @@ func (f *fakeAudio) PreprocessSupported() bool            { return f.preprocess 
 // newControlServer 在基础测试服务上再接入通话记录、通信录、音频与重启回调，
 // 并返回一条已连上的 WS 连接（与线上路径完全一致：真实 HTTP 服务 + 真实 WS）。
 func newControlServer(t *testing.T) (*websocket.Conn, *core.App, *fakeAudio) {
+	conn, app, fa, _ := newControlServerURL(t)
+	return conn, app, fa
+}
+
+// newControlServerURL 同 newControlServer，额外返回测试服务器的 URL
+// （断线重连类测试要再连一次）。
+func newControlServerURL(t *testing.T) (*websocket.Conn, *core.App, *fakeAudio, string) {
 	t.Helper()
 	cfg := config.Default()
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
@@ -76,7 +83,7 @@ func newControlServer(t *testing.T) (*websocket.Conn, *core.App, *fakeAudio) {
 	srv := New(app)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return dialWS(t, ts.URL), app, fa
+	return dialWS(t, ts.URL), app, fa, ts.URL
 }
 
 // request 发一条请求并等它的响应（跳过穿插的事件）。

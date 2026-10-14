@@ -161,13 +161,17 @@ func registerLinux(exePath string) error {
 	}
 
 	desktop := filepath.Join(appsDir, "mti-sip-phone.desktop")
+	// NoDisplay=true：这是 sip:// / sips:// 的**协议处理器**，只负责「网页里点
+	// 链接拉起软电话」，不该出现在应用菜单里（菜单入口是自安装写的
+	// 「MTI 软电话」，见 internal/selfinstall）——不隐藏的话菜单里会出现一个
+	// 名字叫 "mti-sip-phone" 的重复条目（用户实测反馈）。
 	content := fmt.Sprintf(`[Desktop Entry]
 Type=Application
 Name=mti-sip-phone
 Comment=SIP 软电话
 Exec=%s %%u
 Terminal=false
-Categories=Network;Telephony;
+NoDisplay=true
 MimeType=x-scheme-handler/%s;x-scheme-handler/%s;
 `, exePath, Scheme, SchemeSips)
 	if err := os.WriteFile(desktop, []byte(content), 0o755); err != nil {

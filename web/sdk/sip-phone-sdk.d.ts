@@ -7,11 +7,19 @@ declare class SipPhoneSDK {
     /** 软电话 WS 地址，默认 ws://127.0.0.1:8765/ws */
     url?: string;
     /**
-     * 拉起软电话的系统协议 URI（如 sip://账号:密码@服务器；sips:// 表示走 TLS，见 REQ-ACC-006）。
-     * 设置后：首次 WS 连接失败时自动通过该 URI 拉起软电话，
-     * 之后失败不再自动拉起（每页会话仅一次）。
+     * sip:// 或 sips:// 链接（如 sip://账号:密码@服务器；sips:// 表示走 TLS，
+     * 见 REQ-ACC-006）。设置后有两重作用（REQ-SDK-007）：
+     * 1. 首次 WS 连接失败时自动通过该 URI 拉起软电话（每页会话仅一次）；
+     * 2. 每次 WS 连接成功后，以 URI 里的注册信息登录 SIP 服务器
+     *    （与软电话现有注册相同时自动忽略，不打断通话）。
      */
-    schemaUri?: string;
+    sipUri?: string;
+    /**
+     * WS 断开时自动取消 SIP 注册、重新连上后恢复注册（REQ-WS-020），默认 false。
+     * 软电话侧按"所有连接断开后延迟确认"执行：呼叫/振铃/通话中自动排队
+     * 等话务结束再注销，等待期间重连则取消排队任务。
+     */
+    unregisterOnDisconnect?: boolean;
     /** 断线自动重连，默认 true */
     autoReconnect?: boolean;
     /** 重连间隔毫秒，默认 3000 */

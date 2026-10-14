@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x64 / arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.15**（2026-10-07 定版并合并 master）：新增**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）**与**网页控制台（五个页面，取代原测试页，REQ-WEB-001~004）**，补齐 26 个 WS 方法（通话记录 / 通信录增删改查 / 配置读写 / 设备枚举 / 网页触发更新，REQ-WS-016~019 + REQ-UPD-020/021），拨号框边打边查通信录；另新增「允许远程连接」开关与沙箱端口 `8765+10×槽位`。当前开发版本 **1.0.16**（未定版）：sip:// 拉起与生成支持 `updatesite` 参数、网页配置页「使用主站点」按钮。
+当前版本 **1.0.15**（2026-10-07 定版并合并 master）：新增**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）**与**网页控制台（五个页面，取代原测试页，REQ-WEB-001~004）**，补齐 26 个 WS 方法（通话记录 / 通信录增删改查 / 配置读写 / 设备枚举 / 网页触发更新，REQ-WS-016~019 + REQ-UPD-020/021），拨号框边打边查通信录；另新增「允许远程连接」开关与沙箱端口 `8765+10×槽位`。当前版本 **1.0.17**（2026-10-14 定版并合并 master）：新增 **Windows exe 文件图标（绿色话机，REQ-UI-042）**、**自安装到固定数据目录与桌面快捷方式「MTI 软电话」（REQ-UPD-024）**、**SDK `sipUri` 连上即登录与 `unregisterOnDisconnect` 断线自动注销（REQ-SDK-007 / REQ-WS-020）**；另修复 Linux 应用菜单里 sip:// 协议处理器的重复条目（补 NoDisplay）。
 
 <details>
 <summary>1.0.14 已完成内容（点击展开）</summary>
@@ -48,6 +48,12 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x
 #   纯 Go 自检（不需要 CGO）：GOOS=linux CGO_ENABLED=0 go build -tags "noui noaudio" ./cmd/sip-phone
 # 版本号：脚本从 internal/core/buildinfo.go 读基础版本，**开发构建自动加 -rc**（如 1.0.11-rc），
 # 正式构建用 SIP_PHONE_RELEASE=1（发布脚本会设）；不经脚本的 go build/go run 是基础版本号。
+#
+# **Windows exe 文件图标（REQ-UI-042）**：由 cmd/sip-phone/rsrc_windows_{amd64,386,arm64}.syso
+# 提供（Go 对 Windows 目标自动链接，构建脚本零改动；非 Windows 构建不受影响）。改图标时：
+#   go run ./tools/gen-appicon   # internal/appicon 的绿色话机 SVG → 多尺寸 assets/app-icon.ico
+# 再按 cmd/sip-phone/app.rc 头注释里的命令用 windres（amd64/386）与 go-winres（arm64，
+# 配置在 cmd/sip-phone/winres.json）重新生成 syso 并提交。
 # Windows 一键构建（自动探测 WinLibs gcc 作为 CGO 工具链），产物输出到 dist/：
 #   dist/sip-phone-windows-amd64.exe          托盘版（GUI 子系统无控制台，CGO，静态）
 #   dist/sip-phone-console.exe                控制台版（-headless 无界面模式/命令行调试，静态）
@@ -227,6 +233,15 @@ internal/
   ui/folderdlg_other.go    其他平台回退（用 Fyne 内置对话框）
   protocol/   sip:// 协议解析与系统协议注册（Windows 注册表 / Linux .desktop）
   single/     单实例（命名互斥体/flock）+ 第二实例参数转发（随机 token）
+  selfinstall/ 自安装（REQ-UPD-024）：启动早期（单实例锁之前）把自身复制到固定
+              数据目录（Windows %APPDATA%\mti-sip-phone、Linux
+              ~/.local/share/mti-sip-phone）+ 快捷方式（Windows 桌面 .lnk；
+              Linux 桌面与应用菜单各一份 .desktop——GNOME 默认关闭桌面图标，
+              菜单入口最可靠）+ 从固定目录重启；失败回退原地运行。Linux 侧：
+              ELF 不能内嵌图标，.desktop 的 Icon 引用写到程序旁的 icon.png
+              （appicon.Rasterize 光栅化）；桌面目录按 xdg-user-dir/
+              user-dirs.dirs 解析（本地化目录如「~/桌面」），并尽力
+              gio set metadata::trusted true
   autostart/  开机自启（Windows HKCU Run / Linux XDG autostart，其他平台 no-op）
 web/          网页控制台（**内嵌进二进制**，改完必须重新构建 + 重启才生效）
   index.html  控制台外壳（单页 + hash 路由 #/call #/history #/contacts #/settings）
@@ -240,6 +255,7 @@ release/      发布到更新站点的配置与元数据：release.conf + app.js
               release-no-ui.conf + app-no-ui.json（仅托盘无 UI 版；发布脚本默认两个应用一起发，
               --only no-ui / --no-ui 只发这一个）、
               icon.svg（两个应用各写一次）；app.json 经站点 metadata 接口整份替换
+assets/       exe 文件图标中间产物 app-icon.ico（tools/gen-appicon 生成，见下）
 scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）、固定路径测试运行器
               （test.sh，防火墙只弹一次）与一键发布（release.sh/.bat）
 docs/         design.md（架构设计：分层与依赖、各模块职责、关键决策、目录地图——新同学先看这份）、
@@ -423,6 +439,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **Git 工作流**：开发在分支上进行（工作分支 dev，master 为收口分支）；**会话中修改的代码不得自动提交**——提交与 push 必须经用户人工确认后执行，且**不自动合并到 master**（合并 master 需用户明确指示）。
 - **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**重启只针对"本来就在跑的那几个"**：先 `Get-CimInstance Win32_Process … | Select CommandLine` **记录下当前实例（含 `-instance N` / `sip://…` 之类的启动参数）**，kill 之后**按原参数把这一组拉起来**——不要无条件启动 3 个实例（用户没开的别替他开）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
 - **简单的界面改动（文案、占位提示、字段增删）不用自动截图确认**——用户自己会看（2026-10-06 明确要求："这些简单的 ui 改动，不用每次都自动点击截图确认"）。合成鼠标截图那套探针（`D:\cache\temp\guiprobe\probe.ps1`）只在**布局/交互类改动**（新页面、自定义布局、定位、滚轮）或**用户报障需要复现**时才用。
+- **自安装（REQ-UPD-024）**：程序从非固定目录（dist/、下载目录等）启动时会先把自己复制到固定数据目录（Windows `%APPDATA%\mti-sip-phone`、Linux `~/.local/share/mti-sip-phone`）、在桌面生成快捷方式，再从那里重启——重启工作流里记录的进程 CommandLine 会指向新位置，属预期；开发调试想原地运行就设 `SIP_PHONE_NO_RELOCATE=1`（`go run` 的临时 exe 自动跳过）。固定目录里的 exe 就是自更新的替换目标，别手删。
 - 版本 1.0.11 不自动升版；开发过程的变更记入 changelog.md 当前开发版本的段落（标题日期写「待发布」），封版时整理该段并改为实际发布日期。
 - 弹窗按钮文案「确定/取消」；**弹窗的 parent 必须是当前可见的窗口**——Fyne 把对话框画在父窗口的画布上，主窗体隐藏到托盘时弹在主窗体上用户根本看不见。默认走 `a.dialogParent()`（主窗体不可见且通话记录窗口开着就用它），从记录窗口发起的用 `showXxxIn(a.historyW, …)`；**永远不要传 nil**（dialog 的 parent 为 nil 直接 panic）。
 - **通话记录（REQ-CALL-007）的写入口径**：开始/接通/结束三个时刻在 `core.App` 里**直接入队**（不订阅事件总线——总线容量 64、满即丢，通话记录不能建立在会丢事件的东西上），且**先写记录再 `publishCall`**（界面收到 `call.terminated` 会立刻查库刷新，顺序反了就查不到新记录）。同一通话重复上报结束的幂等由存储层的 `ended_at=0` 条件兜住，**不要**在核心层再加"是否首次结束"的状态。库里时间戳 0 表示"未接通/进行中"（0 与 `time.Time{}` 的互转只在 `internal/calllog` 的 `toMillis/fromMillis` 里做，别把 1970 年漏到界面）。

@@ -52,9 +52,17 @@
     /**
      * @param {Object} options
      * @param {string} [options.url]        软电话 WS 地址，默认 ws://127.0.0.1:8765/ws
-     * @param {string} [options.schemaUri]  拉起软电话的系统协议 URI（如 sip://账号:密码@服务器）。
-     *                                      设置后：首次 WS 连接失败时自动通过该 URI 拉起软电话，
-     *                                      之后失败不再自动拉起（每页会话仅一次）
+     * @param {string} [options.sipUri]     sip:// 或 sips:// 链接（如 sip://账号:密码@服务器）。
+     *                                      设置后有两重作用（REQ-SDK-007）：
+     *                                      1. **连不上就拉起**：首次 WS 连接失败时自动通过该 URI
+     *                                         拉起软电话（之后失败不再自动拉起，每页会话仅一次）；
+     *                                      2. **连上就登录**：每次 WS 连接成功后，以 URI 里的
+     *                                         注册信息登录 SIP 服务器（与软电话现有注册相同时
+     *                                         自动忽略，不会打断通话）。
+     * @param {boolean} [options.unregisterOnDisconnect] WS 断开时自动取消 SIP 注册、重新连上后
+     *                                      恢复注册（REQ-WS-020）。默认 false。软电话侧按"所有
+     *                                      连接断开后延迟确认"执行：呼叫/振铃/通话中自动**排队**
+     *                                      等话务结束再注销，等待期间重连则**取消**排队任务
      * @param {boolean} [options.autoReconnect] 断线自动重连，默认 true
      * @param {number} [options.reconnectDelay] 重连间隔毫秒，默认 3000
      * @param {string} [options.updateUrl]  更新站点根地址（REQ-UPD-018）。
@@ -67,7 +75,8 @@
     constructor(options) {
       options = options || {};
       this.url = options.url || DEFAULT_WS_URL();
-      this.schemaUri = options.schemaUri || '';
+      this.sipUri = options.sipUri || '';
+      this.unregisterOnDisconnect = !!options.unregisterOnDisconnect;
       this.autoReconnect = options.autoReconnect !== false;
       this.reconnectDelay = options.reconnectDelay || 3000;
 
@@ -106,6 +115,8 @@
       this.on('connected', () => this._restoreVideoSubscription());
       // 业务前端在构造参数里给了更新配置 → 连上后写入软电话（REQ-UPD-018）
       this.on('connected', () => this._applyUpdateConfigOnConnect());
+      // 连上后的注册策略：断线自动注销开关下发 + sipUri 登录（REQ-SDK-007/REQ-WS-020）
+      this.on('connected', () => this._onConnectedPolicy());
     }
 
     /** 是否已连接 */
@@ -153,11 +164,11 @@
           this._pending.forEach((p) => p.reject(new Error('连接已断开')));
           this._pending.clear();
           this._emit('disconnected', {});
-          // 首次连接失败（从未成功连接过）且配置了 schemaUri：
+          // 首次连接失败（从未成功连接过）且配置了 sipUri：
           // 自动通过系统协议拉起软电话（仅此一次）
-          if (!this._closed && !this._everConnected && !this._launchAttempted && this.schemaUri) {
+          if (!this._closed && !this._everConnected && !this._launchAttempted && this.sipUri) {
             this._launchAttempted = true;
-            launchSchemaUri(this.schemaUri);
+            launchProtocolUri(this.sipUri);
           }
           if (!this._closed && this.autoReconnect) {
             setTimeout(() => this.connect().catch(() => {}), this.reconnectDelay);
@@ -885,6 +896,72 @@
     }
 
     /**
+     * 内部：连上后的注册策略（REQ-SDK-007 / REQ-WS-020）。
+     *   - 把 unregisterOnDisconnect 的期望下发到软电话（应用级开关，默认关、
+     *     不持久化，SDK 每次连上重发）；软电话侧按"**所有**连接断开后延迟
+     *     确认"执行：呼叫/振铃/通话中自动排队等话务结束、等待期间重连即取消；
+     *   - 配置了 sipUri 时，以 URI 里的注册信息登录（与现有注册相同则忽略）。
+     */
+    _onConnectedPolicy() {
+      this._request('system.setUnregisterOnDisconnect', { enabled: this.unregisterOnDisconnect })
+        .catch(() => {});
+      if (this.sipUri) {
+        this._applySipUri().catch((e) => {
+          console.error('[sip-phone-sdk] sipUri 注册应用失败', e);
+        });
+      }
+    }
+
+    /** 内部：解析 sipUri 并按需应用注册信息（与现有注册相同则忽略）。 */
+    async _applySipUri() {
+      const acc = parseSipUri(this.sipUri);
+      if (!acc) {
+        console.error('[sip-phone-sdk] sipUri 无法解析（应为 sip:// 或 sips:// 链接）', this.sipUri);
+        return;
+      }
+      let cur = null;
+      try {
+        const cfg = await this.getConfig();
+        cur = cfg && cfg.account;
+      } catch (e) {
+        // 拿不到当前配置就按"不同"处理，直接应用
+      }
+      if (this._sameRegistration(cur, acc)) {
+        return; // 与现有注册相同：忽略
+      }
+      const patch = {
+        enabled: true,
+        server: acc.host,
+        port: acc.port,
+        transport: acc.transport,
+        account: acc.account,
+        authUser: acc.account
+      };
+      if (acc.password) {
+        patch.password = acc.password;
+      }
+      await this.setAccount(patch);
+    }
+
+    /** 内部：现有注册与 sipUri 是否"相同"（相同则忽略，不打断现有注册）。 */
+    _sameRegistration(cur, acc) {
+      if (!cur || !cur.enabled) {
+        return false; // 账户被关掉不算"相同"（要按 URI 恢复登录）
+      }
+      if (cur.server !== acc.host || cur.port !== acc.port || cur.transport !== acc.transport) {
+        return false;
+      }
+      if (cur.account !== acc.account || cur.authUser !== acc.account) {
+        return false;
+      }
+      // 密码是只写的、拿不到值：URI 带密码而软电话没设过密码 → 视为不同
+      if (acc.password && !cur.passwordSet) {
+        return false;
+      }
+      return true;
+    }
+
+    /**
      * 订阅视频画面（REQ-VIDEO-009）。**SDK 自己把画面渲染到传入的 <video>**，
      * 页面不必处理 video.frame、也不用建渲染器。
      *
@@ -1424,7 +1501,7 @@
    * 通过隐藏 iframe 触发系统协议 URI（拉起软电话），不导航当前页面。
    * 浏览器会弹出协议确认提示（首次）。
    */
-  function launchSchemaUri(uri) {
+  function launchProtocolUri(uri) {
     try {
       var iframe = document.createElement('iframe');
       iframe.style.display = 'none';
@@ -1438,6 +1515,46 @@
     } catch (e) {
       // 拉起失败不影响 SDK 自身逻辑
     }
+  }
+
+  /**
+   * parseSipUri 解析 sip:// 或 sips:// 链接的注册信息（与软电话侧
+   * internal/protocol.ParseSipURL 同一口径）：账号/密码取 userinfo，
+   * 服务器取 host，端口缺省 5060（sips 为 5061），传输 sips:// 前缀即 tls
+   * （优先于 ?transport=），否则取 ?transport=、再缺省 udp。
+   * 返回 null 表示不是合法的 sip/sips 链接。
+   */
+  function parseSipUri(uri) {
+    let u;
+    try {
+      u = new URL(String(uri).trim());
+    } catch (e) {
+      return null;
+    }
+    if (u.protocol !== 'sip:' && u.protocol !== 'sips:') {
+      return null;
+    }
+    if (!u.hostname) {
+      return null;
+    }
+    const safeDecode = function (s) {
+      try {
+        return decodeURIComponent(s);
+      } catch (e) {
+        return s;
+      }
+    };
+    const acc = {
+      host: u.hostname,
+      port: u.port ? Number(u.port) : (u.protocol === 'sips:' ? 5061 : 5060),
+      account: safeDecode(u.username || ''),
+      password: safeDecode(u.password || ''),
+      transport: u.protocol === 'sips:' ? 'tls' : (u.searchParams.get('transport') || 'udp').toLowerCase()
+    };
+    if (!acc.account) {
+      return null;
+    }
+    return acc;
   }
 
   global.SipPhoneSDK = SipPhoneSDK;
