@@ -86,21 +86,22 @@ const (
 	MethodContactClear       = "contact.clear"      // 清空通信录
 	MethodContactChangedPush = "contact.changed"    // 事件：通信录变更（所有写入路径）
 
-	MethodGetConfig      = "system.getConfig"      // 配置快照（脱敏，REQ-WS-019）
-	MethodSetAccount     = "system.setAccount"     // 修改 SIP 账户
-	MethodAudioDevices   = "audio.devices"         // 枚举音频设备
-	MethodSetAudioConfig = "system.setAudioConfig" // 修改音频配置（设备 + 预处理）
-	MethodVideoDevices   = "video.devices"         // 枚举摄像头
-	MethodSetVideoConfig = "system.setVideoConfig" // 修改视频配置
-	MethodSetLogConfig   = "system.setLogConfig"   // 修改日志配置
-	MethodSetWSPort      = "system.setWSPort"      // 修改本地 WS 端口（重启生效）
-	MethodSetAutoStart   = "system.setAutoStart"   // 开机自启开关
-	MethodRestart        = "system.restart"        // 重启程序（网页确认后）
-	MethodCheckUpdateNow = "system.checkUpdateNow" // 立即检查更新（REQ-UPD-020）
-	MethodUpdateStart    = "update.start"          // 开始下载更新
-	MethodUpdateCancel   = "update.cancel"         // 取消下载
-	MethodUpdateApply    = "update.apply"          // 安装并重启
-	MethodUpdateStatus   = "update.status"         // 更新状态快照
+	MethodGetConfig                 = "system.getConfig"                 // 配置快照（脱敏，REQ-WS-019）
+	MethodSetAccount                = "system.setAccount"                // 修改 SIP 账户
+	MethodAudioDevices              = "audio.devices"                    // 枚举音频设备
+	MethodSetAudioConfig            = "system.setAudioConfig"            // 修改音频配置（设备 + 预处理）
+	MethodVideoDevices              = "video.devices"                    // 枚举摄像头
+	MethodSetVideoConfig            = "system.setVideoConfig"            // 修改视频配置
+	MethodSetLogConfig              = "system.setLogConfig"              // 修改日志配置
+	MethodSetWSPort                 = "system.setWSPort"                 // 修改本地 WS 端口（重启生效）
+	MethodSetAutoStart              = "system.setAutoStart"              // 开机自启开关
+	MethodSetUnregisterOnDisconnect = "system.setUnregisterOnDisconnect" // WS 断开自动取消注册（REQ-WS-020）
+	MethodRestart                   = "system.restart"                   // 重启程序（网页确认后）
+	MethodCheckUpdateNow            = "system.checkUpdateNow"            // 立即检查更新（REQ-UPD-020）
+	MethodUpdateStart               = "update.start"                     // 开始下载更新
+	MethodUpdateCancel              = "update.cancel"                    // 取消下载
+	MethodUpdateApply               = "update.apply"                     // 安装并重启
+	MethodUpdateStatus              = "update.status"                    // 更新状态快照
 )
 
 // 事件名。

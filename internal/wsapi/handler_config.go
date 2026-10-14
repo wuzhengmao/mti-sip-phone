@@ -191,6 +191,20 @@ func (s *Server) dispatchConfig(c *wsConn, msg Message) (Message, bool) {
 		}
 		return okMessage(msg.ID, map[string]any{"enabled": on}), true
 
+	case MethodSetUnregisterOnDisconnect:
+		// REQ-WS-020：WS 断开自动取消注册——应用级开关，默认关、不持久化
+		// （SDK 的 unregisterOnDisconnect 参数每次连上后下发，最后一次设置生效）。
+		// 行为见 unregGuard：所有连接断开后延迟确认执行；通话中排队、
+		// 重连即取消排队并恢复注册。
+		var p struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := json.Unmarshal(msg.Params, &p); err != nil || p.Enabled == nil {
+			return errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 enabled")), true
+		}
+		s.unreg.setOn(*p.Enabled)
+		return okMessage(msg.ID, map[string]any{"enabled": *p.Enabled}), true
+
 	case MethodRestart:
 		// **先回响应再重启**：重启会取消 ctx、关掉 WS 服务，先重启的话这个响应
 		// 就发不出去，网页只看到"连接断开"、不知道到底成没成。

@@ -48,6 +48,8 @@ func FindFreeWSPort(start int, allowRemote bool) int {
 type Server struct {
 	app   *core.App
 	video *videoHub // 网页视频订阅中枢（REQ-VIDEO-009）
+	// unreg 「WS 断开自动取消注册」状态机（REQ-WS-020，见 unreg.go）
+	unreg *unregGuard
 	// enum 设备枚举的单飞 + 短缓存（音频/摄像头，见 handler_config.go）
 	enum enumGuard
 	// port 当前进程实际监听的端口（启动时可能因占用自动 +1，
@@ -68,7 +70,7 @@ func (s *Server) Port() int { return int(s.port.Load()) }
 
 // New 创建服务。视频中枢同时注册为 core.App 的视频帧附加订阅者。
 func New(app *core.App) *Server {
-	return &Server{app: app, video: newVideoHub(app)}
+	return &Server{app: app, video: newVideoHub(app), unreg: newUnregGuard(app)}
 }
 
 // Handler 返回 HTTP 处理器（供测试与内嵌使用）。

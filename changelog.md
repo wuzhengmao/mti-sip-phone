@@ -6,12 +6,13 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
-## [1.0.17] - 待发布
+## [1.0.17] - 2026-10-14
 
 ### 新增
 
 - **Windows 可执行文件图标（绿色话机）**（REQ-UI-042）：此前 Windows 产物没有 exe 文件图标，资源管理器里显示 Go 默认图标。现在构建时自动嵌入绿色话机图标（与托盘/窗口同一份 SVG 真相源 `internal/appicon.PhoneGreenSVG()` 光栅化生成，一次性产出 `assets/app-icon.ico` 与 `cmd/sip-phone/rsrc_windows_{amd64,386,arm64}.syso` 提交进仓库）——完整版、无 UI 版、控制台版三个 Windows 产物全部生效，**构建脚本零改动**（Go 自动链接包目录下与目标匹配的 `.syso`）；改图标时用 `tools/gen-appicon` 重新生成 ico、再用 go-winres 重新生成 syso。
 - **自安装到固定数据目录**（REQ-UPD-024）：首次从"临时位置"（下载目录等）运行时，程序把自身复制到固定目录、**在桌面与应用菜单生成指向副本的快捷方式「MTI 软电话」**（Windows 经 PowerShell WScript.Shell 生成 .lnk；Linux 写 .desktop——**桌面与应用菜单（`~/.local/share/applications`）各一份**（GNOME 默认关闭桌面图标、本地化桌面目录可能对不上，菜单入口最可靠）；**桌面目录按 `xdg-user-dir`/`~/.config/user-dirs.dirs` 解析**（本地化目录如「~/桌面」也能命中），**ELF 二进制不能内嵌图标**，所以把绿色话机 256px PNG（与托盘同一真相源，光栅化统一提到 `appicon.Rasterize` 供 tray/图标工具/自安装共用）写到程序旁由 .desktop 的 `Icon=` 引用，桌面那份尽力 `gio set metadata::trusted true`（GNOME 43+ 未标记的桌面快捷方式双击不执行、图标显示成通用齿轮）；快捷方式失败只告警不阻断），并从固定目录重启——Windows 是 `%APPDATA%\mti-sip-phone`（与配置目录同一处）、Linux 是 `~/.local/share/mti-sip-phone`，之后自更新替换、开机自启、sip:// 协议注册、更新后重启都围绕这个固定位置，不再受"下载产物被清理"影响。行为细节：已在该目录则直接运行（不复制）；复制/启动失败**回退原地运行**（绝不因此启动失败）；`go run` 的临时 exe 与 `SIP_PHONE_NO_RELOCATE=1` 环境变量跳过（开发逃生口）；复制保留原文件名（完整版与无 UI 版互不覆盖）。检查点在**单实例锁之前**——旧进程不碰锁直接退出、新进程正常拿锁，与自更新重启的竞态口径一致。多实例沙箱各槽位共用同一个 exe 位置，不受影响。
+- **SDK `sipUri` / `unregisterOnDisconnect` 参数与 WS 断线自动注销**（REQ-SDK-007 / REQ-WS-020）：① SDK 构造参数 `schemaUri` **改名 `sipUri` 并扩展**——保留"首次连不上时经系统协议拉起软电话（每页一次）"的既有行为，**新增**"每次 WS 连接成功后按 URI 里的注册信息登录 SIP 服务器"（解析口径与 `internal/protocol.ParseSipURL` 一致；与软电话现有注册相同（服务器/端口/传输/账号/认证 ID）时自动忽略，不打断通话）。② 新增构造参数 `unregisterOnDisconnect`（默认 false）与 WS 方法 **`system.setUnregisterOnDisconnect`**：开启后**所有** WS 连接断开并超过 3 秒仍未回来（延迟确认窗口，页面刷新/瞬时断网不触发）→ 自动取消 SIP 注册；**呼叫/振铃/通话中**自动排队、等话务结束再注销；**等待期间重连即取消排队**，并恢复已被自动取消的注册。实现见 `internal/wsapi/unreg.go`（连接计数 + 定时器 + 事件等待的状态机，回归测试钉着四个阶段的完整流程）。
 
 ### 修复
 

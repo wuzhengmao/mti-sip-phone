@@ -96,7 +96,7 @@
 | REQ-UI-022 | 开机自动启动：配置项默认启用，Windows（HKCU Run 注册表）与 Linux（XDG autostart）环境系统启动时自动运行；启动时默认隐藏主窗体仅显示托盘；通话结束后仅当主窗体是被通话自动隐藏时恢复显示 | P0 | 已完成 |
 | REQ-UI-039 | 呼出回铃音：接收 SIP 服务器下发的 183 早期媒体并播放（不本地生成回铃音） | P0 | 已完成 |
 | REQ-WS-011 | 本地 WS 监听端口可配置（默认 8765），被占用时自动 +1 选择空闲端口并保存 | P0 | 已完成 |
-| REQ-WS-012 | 网页接入无需 token 鉴权（仅回环监听保证安全）；SDK 支持 options.schemaUri——首次 WS 连接失败时自动通过系统协议拉起软电话，仅一次 | P0 | 已完成 |
+| REQ-WS-012 | 网页接入无需 token 鉴权（仅回环监听保证安全）；SDK 支持 options.sipUri——首次 WS 连接失败时自动通过系统协议拉起软电话，仅一次（**1.0.17 修订**：`schemaUri` 改名为 `sipUri` 并扩展"连上后按 URI 注册信息登录"，见 REQ-SDK-007） | P0 | 已完成 |
 
 ### 4.3 媒体与音频（MEDIA）
 
@@ -173,6 +173,7 @@
 | REQ-WS-017 | **通话记录**（REQ-CALL-007 的网页路径）：`calllog.query`（`{remote?, limit?, offset?}`，limit 默认 50、上限 200）返回 `{records, total, hasMore}`，每条记录含 `callId/direction/remote/remoteName/startedAt/answeredAt/endedAt/hasVideo/missed/reason`，**时间戳一律毫秒整数、0 表示未发生**（不把 time.Time 零值序列化成 0001-01-01）；`calllog.delete`（`{callIds}`，空数组 = `invalid_params`）与 `calllog.clear` 返回 `{deleted}`；删除/清空后广播 `calllog.changed`（新增记录仍由 `call.terminated`/`call.failed` 驱动刷新）。数据库未接入时错误码 `calllog_unavailable` | P1 | 已完成 |
 | REQ-WS-018 | **通信录增删改查**：`contact.list`（`{query?}`，返回 `{count, total, contacts}`；给了 query 就在服务端**按拼音过滤**——音头/全拼/汉字/号码/备注/纯数字，与桌面通信录页共用 `internal/contactsearch`，结果按拼音排序）、`contact.save`（`{prevNumber?, number, name?, note?, starred?}`，号码重复/为空 → `invalid_params`）、`contact.delete`（`{numbers}`）、`contact.setStarred`（`{numbers, starred}`）、`contact.clear`。写入统一走 `core.App` 的 `mutateContacts`（"写存储 + 重建内存快照"整体串行），成功后广播 **`contact.changed`**（`{action, total}`）——桌面界面、网页、CSV/JSON 导入**所有写入路径都经这一处**，多标签与两端列表据此刷新 | P1 | 已完成 |
 | REQ-WS-019 | **配置读写**：`system.getConfig` 返回脱敏快照（账户 / 音频 / 视频 / 日志 / WS 端口（含实际监听端口）/ 自动更新 / 开机自启）；`system.setAccount`、`system.setAudioConfig`、`system.setVideoConfig`、`system.setLogConfig`、`system.setWSPort`、`system.setAutoStart` 逐个修改对应段落——**只改传入的字段**（可选字段一律指针，nil = 不改，与 `system.setUpdateConfig` 同款），校验失败回 `invalid_params` 且不落盘不改内存，成功即"改内存 → 落盘 → 广播 `system.config`"（`{section, values}`）。**密码只写不读**：快照只回 `passwordSet` 布尔，写入用 `password`（缺省 = 不改）或 `clearPassword`（显式清空）。生效时机与桌面口径一致：设备/总开关/日志级别/信令开关立即生效，采集参数与音频预处理从下一通电话生效，写文件/控制台与 WS 端口重启后生效。另：`system.restart` 重启程序、`call.setVideoPreview` 本地回显开关——**两者都是先回响应再动手**（重启/安装会终止本进程，先动手响应就发不出去） | P1 | 已完成 |
+| REQ-WS-020 | **WS 断开自动取消注册**：新增 `system.setUnregisterOnDisconnect`（`{enabled}`，**应用级开关、默认关、不持久化**——SDK 的 `unregisterOnDisconnect` 参数每次连上后下发，多页面同时连时最后一次设置生效）。开启后：**所有** WS 连接断开并**超过 3 秒**仍未回来（延迟确认窗口，页面刷新/瞬时断网不触发）→ 自动取消 SIP 注册（等同关闭「启用账户」）；**呼叫/振铃/通话中**自动**排队**，等话务结束再注销；等待期间有连接回来（重连）→ **取消**排队任务，并恢复已被自动取消的注册（重新注册）。实现见 `internal/wsapi/unreg.go`（连接计数 + 定时器 + 事件等待的状态机，有回归测试钉着四个阶段的完整流程） | P1 | 已完成 |
 
 ### 4.6 sip:// 协议（PROTO）
 
@@ -194,6 +195,7 @@
 | REQ-SDK-004 | SDK 支持 TypeScript 类型声明 | P1 | 已完成 |
 | REQ-SDK-005 | SDK 可脱离构建工具直接以 `<script>` 标签引用（浏览器原生可用） | P1 | 已完成 |
 | REQ-SDK-006 | **通信录**：通话对象（事件负载与 `system.getState` 的 `calls[]`）新增 `contact` 字段 `{name, note, starred}`（对端号码命中通信录时才有），页面据此在号码旁显示名称、★ 与备注提示；SDK 新增 `exportContacts()`（经 WS 取 CSV 文本）、`importContacts(csv)`（经 WS 导入文本）、`downloadContacts()`（一键下载为 CSV 文件，走 **HTTP** `/api/contacts.csv`）、`importContactsFromFile()` / `importContactsFile(file)`（选文件或按 File 对象导入，走 **HTTP** `/api/contacts/import`）——一键路径走 HTTP 是为了不受 WS 单条消息大小限制（REQ-CONTACT-004）；另有 **JSON 版** `exportContactsJSON()` / `importContactsJSON(list)`（REST `/api/contacts`，REQ-CONTACT-005）；文件选择取消以 `code='cancelled'` 拒绝 | P1 | 已完成 |
+| REQ-SDK-007 | **`sipUri` 参数与 `unregisterOnDisconnect` 参数**（构造参数，均可选）：① `sipUri`（原 `schemaUri` **改名并扩展**，sip:// 或 sips:// 链接）：保留"首次 WS 连接失败时用 URI 走系统协议拉起软电话（每页会话仅一次）"的既有行为；**新增**——每次 WS 连接成功后，解析 URI 的注册信息（账号/密码/服务器/端口/传输，口径与 `internal/protocol.ParseSipURL` 一致）经 `system.setAccount` 登录 SIP 服务器（`enabled:true`），**与软电话现有注册相同时自动忽略**（比较服务器/端口/传输/账号/认证 ID；密码只写不读，URI 带密码而软电话没设过密码时视为不同）；解析失败只记控制台错误。② `unregisterOnDisconnect`（默认 `false`）：为 `true` 时每次连上后经 `system.setUnregisterOnDisconnect` 下发断线自动注销开关（行为见 REQ-WS-020） | P1 | 已完成 |
 
 ### 4.8 网页控制台（WEB）
 

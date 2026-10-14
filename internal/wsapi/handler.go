@@ -34,6 +34,10 @@ func (s *Server) serveConn(ctx context.Context, conn *websocket.Conn) {
 	c := &wsConn{id: s.video.nextID.Add(1), conn: conn, ctx: connCtx}
 	// 连接断开：注销视频订阅（并通知核心层恢复视频窗口显示）
 	defer s.video.Unsubscribe(c)
+	// 「WS 断开自动取消注册」（REQ-WS-020）：登记/注销连接计数。
+	// 必须在读循环之前登记：全部连接断开后按策略自动注销 SIP 注册。
+	s.unreg.connOpened()
+	defer s.unreg.connClosed()
 
 	// 事件转发：订阅总线，事件 → 客户端
 	sub := s.app.Bus().Subscribe()
