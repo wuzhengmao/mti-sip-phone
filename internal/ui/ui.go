@@ -26,6 +26,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"fyne.io/systray"
@@ -386,6 +387,32 @@ func (a *App) buildMainWindow() {
 	w.CenterOnScreen()
 	// 固定窗口尺寸：切换设置页（内容多）时窗口不被撑大
 	w.SetFixedSize(true)
+	// 跨屏 DPI 修复（多显示器缩放不同时，用户实测）：窗口在缩放不同的显示器间
+	// 移动时 Fyne（2.8.1）的 canvas scale 会变化（实测 200%↔150% 屏 → 2.0↔1.5），
+	// 但**固定尺寸窗口的物理尺寸与画布重排不同步**——内容整体偏移（现象：移到
+	// 另一块屏后内容挤在窗口下半部）。**注意 `Settings().Scale()` 在"自动"模式
+	// 下恒为 0**（真实缩放在 `Canvas().Scale()`，也没有变化通知可监听），所以
+	// 这里每秒轻量轮询 canvas scale：**首轮无条件重设一次**（纠正"窗口创建早于
+	// scale 检测"导致的初始物理尺寸错误），之后只在真正变化时重设——先解固定
+	// 再重设，逼 Fyne 按新 scale 重算窗口物理尺寸与画布布局。
+	go func() {
+		first := true
+		var last float32
+		for {
+			time.Sleep(time.Second)
+			fyne.Do(func() {
+				s := w.Canvas().Scale()
+				if !first && s == last {
+					return
+				}
+				first = false
+				last = s
+				w.SetFixedSize(false)
+				w.Resize(fyne.NewSize(320, 620))
+				w.SetFixedSize(true)
+			})
+		}
+	}()
 
 	// 主窗体任意位置按键输入（无需聚焦输入框，REQ-UI-024）：
 	// 数字/星号/井号直接输入拨号框，退格删除末尾字符。
@@ -478,9 +505,17 @@ func (a *App) buildDialPage() {
 		theme.NewColoredResource(IconContacts, theme.ColorNameForeground), a.showContacts)
 	a.contactsBtn.Importance = widget.LowImportance
 
-	// 顶栏：圆点+状态靠左，通话记录+通信录+设置按钮靠右，自动接听按钮居中
-	topBar := container.NewBorder(nil, nil, statusRow,
-		container.NewHBox(a.historyBtn, a.contactsBtn, a.settingsBtn),
+	// 顶栏：圆点+状态靠左，通话记录+通信录+设置按钮靠右，自动接听按钮居中。
+	// 右侧三个图标按钮的内边距（用户要求，先后试过 2px、定为 6px）：视觉空隙
+	// 几乎全部来自按钮自身的 SizeNameInnerPadding——本项目主题为拨号盘大按键
+	// 把它提到 12，**光调容器间距几乎看不出变化**（实测）。这里用**局部主题
+	// 覆盖**只把这三个按钮的 InnerPadding 压到 6，容器间距用 0；全局主题
+	// （拨号盘等）不受影响。
+	iconBtns := container.NewThemeOverride(
+		container.New(layout.NewCustomPaddedHBoxLayout(0),
+			a.historyBtn, a.contactsBtn, a.settingsBtn),
+		compactIconButtonsTheme{pad: 6})
+	topBar := container.NewBorder(nil, nil, statusRow, iconBtns,
 		container.NewCenter(a.autoAnswerBtn))
 
 	// ---- 号码输入框：可下拉（最近 5 次呼叫号码，去重）----

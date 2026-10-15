@@ -340,3 +340,39 @@ func (l offsetLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	o.Resize(m)
 	o.Move(fyne.NewPos((size.Width-m.Width)/2+l.dx, l.dy))
 }
+
+// compactIconButtonsTheme 只覆盖按钮内边距的**局部主题**。Fyne 标准按钮的
+// 视觉空隙几乎全部来自 SizeNameInnerPadding——本项目主题为拨号盘大按键把它
+// 提到 12，两个相邻的图标按钮间隙因此 ≈24px+，光调容器间距几乎看不出变化
+// （用户实测反馈）。顶栏三个图标按钮用 container.NewThemeOverride 套上本
+// 主题把内边距压小，全局主题不受影响。
+//
+// **所有档位都动态委托给"当前全局主题"**（不是创建时捕获）：本项目在弹窗
+// 显示期间会临时切到默认主题（withDialogTheme）、关闭后切回 dialTheme——
+// 捕获式包装会让按钮的颜色/字体停在旧主题上。Settings().Theme() 取的是
+// 应用全局主题（不含本 override），不会递归。
+type compactIconButtonsTheme struct{ pad float32 }
+
+func (t compactIconButtonsTheme) current() fyne.Theme {
+	return fyne.CurrentApp().Settings().Theme()
+}
+
+func (t compactIconButtonsTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
+	return t.current().Color(n, v)
+}
+
+func (t compactIconButtonsTheme) Font(s fyne.TextStyle) fyne.Resource {
+	return t.current().Font(s)
+}
+
+func (t compactIconButtonsTheme) Icon(n fyne.ThemeIconName) fyne.Resource {
+	return t.current().Icon(n)
+}
+
+// Size 仅覆盖 InnerPadding，其余尺寸档位原样委托。
+func (t compactIconButtonsTheme) Size(name fyne.ThemeSizeName) float32 {
+	if name == theme.SizeNameInnerPadding {
+		return t.pad
+	}
+	return t.current().Size(name)
+}

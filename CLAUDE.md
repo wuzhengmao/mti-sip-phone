@@ -140,6 +140,12 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
   5 个平台：Windows x64/x86/ARM64 + Linux 本机与对侧架构，**不做 CI 矩阵**）；Windows 上的
   `build.bat` 仅供本机开发自测（只能出 Windows 产物）。
   产物 mtime 早于本次构建开始的会被跳过（防止把上次的旧二进制当新版本发出去）。
+  **⚠️ 本机 `build.bat` 与"容器编的 third_party"互斥**：容器里 windows 目标的 C/C++ 库
+  实际由 **llvm-mingw（clang + libc++）** 编译——llvm-mingw 的 bin 里提供了
+  `x86_64-w64-mingw32-gcc` 别名，`build.sh`/`build-libs` 的 `command -v` 探测命中的就是它
+  （容器内编库与链接同为 clang，自洽）；而本机 WinLibs 是 **libstdc++**——链接容器产库必炸
+  （`undefined reference to std::__1::…`，_1 就是 libc++ 的命名空间）。**本机跑过
+  `docker/build.sh --libs` 之后，本机只能跑测试，构建一律走容器**（`docker\build.bat`）。
 
 **交叉编译说明**：fyne 的 OpenGL 绑定依赖 CGO，需要**目标平台**的 gcc 工具链。
 
