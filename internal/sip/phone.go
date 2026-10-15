@@ -473,6 +473,44 @@ func (p *Phone) setupHandlers() {
 // Register 发起注册（阻塞直到第一次注册结果确定，后续续注册在后台进行）。
 func (p *Phone) Register(ctx context.Context, acc config.Account) error {
 	p.mu.Lock()
+	prev := p.acc                 // 换账号时要先给旧账号发 expires=0（见下）
+	hadLoop := p.regCancel != nil // 之前注册过（首启与沙箱空白配置没有旧注册）
+	switchAcc := hadLoop && !sameRegistrar(prev, acc)
+	p.mu.Unlock()
+
+	// 换账号（REQ-ACC-011 修订）：**先给旧账号发 expires=0 的 REGISTER**
+	// 让它立即过期，再注册新账号——否则旧账号在服务端的绑定要等自然过期
+	// （默认 300 秒）才消失，这段时间打旧号码仍会送到本机。
+	//
+	// 顺序与口径（都不许随意调换）：
+	//   - 只在"确实换了账号"时发（服务器/端口/账号/认证 ID/传输任一不同）；
+	//     纯改密码、改显示名、改 STUN 等的重注册**不打扰服务端**；
+	//   - **先停旧注册循环**（p.regCancel），否则它可能在注销之后又续注册一次；
+	//   - **在 p.acc 仍是旧账号时发注销**：Contact 由 contactFor(prev)+
+	//     localHost() 算出，必须与注册时的 Contact 一致——服务端按 Contact URI
+	//     匹配删除绑定，地址对不上旧绑定就删不掉（静默取消循环后 p.acc 未变）；
+	//   - **静默路径**（sendRegisterOpts 的 silent）：不发注册状态、不记心跳
+	//     对端——普通路径会让界面闪一下"未注册"、还会污染心跳判定；
+	//   - **尽力而为**：最多等 2 秒，超时/失败只记日志，绝不阻断新账号注册。
+	if switchAcc {
+		p.mu.Lock()
+		if p.regCancel != nil {
+			p.regCancel()
+			p.regCancel = nil
+		}
+		p.mu.Unlock()
+		unregCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		if _, err := p.sendRegisterOpts(unregCtx, prev, 0, sendRegisterOpts{silent: true}); err != nil {
+			logx.Logger().Warn("旧账号注销失败（旧绑定将等待自然过期）",
+				"account", prev.Account, "server", prev.Server, "err", err)
+		} else {
+			logx.Logger().Info("旧账号已注销（expires=0）",
+				"account", prev.Account, "server", prev.Server)
+		}
+		cancel()
+	}
+
+	p.mu.Lock()
 	p.acc = acc
 	// STUN 未启用时清空旧公网地址：否则用户关掉 STUN 重新注册后，
 	// Contact 仍会带上一次探测到的公网地址（localHost 无条件优先 publicIP）。
@@ -1140,8 +1178,41 @@ func (p *Phone) doRegister(ctx context.Context, acc config.Account) (int, error)
 }
 
 // sendRegister 发送 REGISTER，expires=0 表示注销。成功返回服务端 expires。
+// 走完整路径（发布注册状态、记录心跳对端）。
 func (p *Phone) sendRegister(ctx context.Context, acc config.Account, expires int) (int, error) {
-	p.sink.OnRegisterState(core.RegRegistering, "")
+	return p.sendRegisterOpts(ctx, acc, expires, sendRegisterOpts{})
+}
+
+// sendRegisterOpts REGISTER 的可选行为：
+//   - silent：**不发注册状态、不通知心跳对端**——换账号时给旧账号发
+//     expires=0 注销用（见 Register）：复用普通路径会让界面闪一下"未注册"、
+//     还会把旧的注册服务器地址记进心跳判定（REQ-ACC-021）。
+type sendRegisterOpts struct {
+	silent bool
+}
+
+// sameRegistrar 两个账户配置是否指向**同一个注册身份**（服务器/端口/传输/
+// 账号/认证 ID 都相同）。换账号判定用它：纯改密码、显示名、STUN、域名等
+// 重注册不打扰服务端。
+func sameRegistrar(a, b config.Account) bool {
+	authA, authB := a.AuthUser, b.AuthUser
+	if authA == "" {
+		authA = a.Account
+	}
+	if authB == "" {
+		authB = b.Account
+	}
+	return a.Server == b.Server && a.Port == b.Port &&
+		config.NormalizeTransport(a.Transport) == config.NormalizeTransport(b.Transport) &&
+		a.Account == b.Account && authA == authB
+}
+
+// sendRegisterOpts 发送 REGISTER（可静默），expires=0 表示注销。
+// 成功返回服务端 expires。
+func (p *Phone) sendRegisterOpts(ctx context.Context, acc config.Account, expires int, opts sendRegisterOpts) (int, error) {
+	if !opts.silent {
+		p.sink.OnRegisterState(core.RegRegistering, "")
+	}
 
 	// 域名（REQ-ACC-022）：配了域名就用它做 URI 里的域（AOR 归属），
 	// 端口只在用服务器地址时才写（域名不带端口，报文照样发到 Server:Port）。
@@ -1220,22 +1291,10 @@ func (p *Phone) sendRegister(ctx context.Context, acc config.Account, expires in
 		}
 		switch res.StatusCode {
 		case 200:
-			p.noteRegisterPeer(res.Source()) // 记注册服务器地址（心跳只统计它发来的探测）
-			// 解析服务端 expires
-			exp := expires
-			if eh := res.GetHeader("Expires"); eh != nil {
-				if v, err := strconv.Atoi(eh.Value()); err == nil && v > 0 {
-					exp = v
-				}
+			if !opts.silent {
+				p.noteRegisterPeer(res.Source()) // 记注册服务器地址（心跳只统计它发来的探测）
 			}
-			if ch := res.Contact(); ch != nil && ch.Params != nil {
-				if v, ok := ch.Params.Get("expires"); ok {
-					if vi, err := strconv.Atoi(v); err == nil && vi > 0 {
-						exp = vi
-					}
-				}
-			}
-			return exp, nil
+			return parseRegisterExpires(res, expires), nil
 		case 401, 407:
 			if attempt >= 2 {
 				return 0, fmt.Errorf("认证失败：连续 3 次未通过")
@@ -1245,8 +1304,12 @@ func (p *Phone) sendRegister(ctx context.Context, acc config.Account, expires in
 				return 0, fmt.Errorf("认证请求失败: %w", err)
 			}
 			if res2.StatusCode == 200 {
-				p.noteRegisterPeer(res2.Source())
-				return expires, nil
+				if !opts.silent {
+					p.noteRegisterPeer(res2.Source())
+				}
+				// 认证路径同样解析服务端 expires（此前一律回退传入值：
+				// 配置 Expires=0 时 registerLoop 会算出 0 秒续注册周期而无限重发）
+				return parseRegisterExpires(res2, expires), nil
 			}
 			return 0, fmt.Errorf("注册被拒绝: %d %s", res2.StatusCode, res2.Reason)
 		default:
@@ -1254,6 +1317,25 @@ func (p *Phone) sendRegister(ctx context.Context, acc config.Account, expires in
 		}
 	}
 	return 0, fmt.Errorf("注册未完成")
+}
+
+// parseRegisterExpires 从 REGISTER 的 200 响应里解析服务端给的 expires
+// （Expires 头优先，其次 Contact 的 expires 参数），都没有时回退 fallback。
+func parseRegisterExpires(res *sip.Response, fallback int) int {
+	exp := fallback
+	if eh := res.GetHeader("Expires"); eh != nil {
+		if v, err := strconv.Atoi(eh.Value()); err == nil && v > 0 {
+			exp = v
+		}
+	}
+	if ch := res.Contact(); ch != nil && ch.Params != nil {
+		if v, ok := ch.Params.Get("expires"); ok {
+			if vi, err := strconv.Atoi(v); err == nil && vi > 0 {
+				exp = vi
+			}
+		}
+	}
+	return exp
 }
 
 // readResponse 读取事务的下一个最终响应（跳过 1xx）。
