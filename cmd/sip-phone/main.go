@@ -289,19 +289,24 @@ func main() {
 	// TLS（REQ-ACC-006）：自签证书与密钥放实例自己的数据目录（多实例各一份）；
 	// 只在传输方式为 tls 时才生成/启动 TLS 监听（见 Phone.Register）
 	phone.SetTLSDir(filepath.Join(cfgDir, "tls"))
-	// 监听本地 SIP 端口（呼入通道）：UDP 与 TCP 各起监听
-	localPort := sip.FindFreeSIPPort()
-	listenAddr := fmt.Sprintf("0.0.0.0:%d", localPort)
-	go func() {
-		if err := phone.ListenAndServe(ctx, "udp", listenAddr); err != nil && ctx.Err() == nil {
-			logx.Logger().Error("UDP SIP 监听失败", "err", err)
-		}
-	}()
-	go func() {
-		if err := phone.ListenAndServe(ctx, "tcp", listenAddr); err != nil && ctx.Err() == nil {
-			logx.Logger().Error("TCP SIP 监听失败", "err", err)
-		}
-	}()
+	// 监听本地 SIP 端口（呼入通道）：UDP 与 TCP 各起监听。
+	// **探测即绑定**（BindSIPListenerPair 返回已占用的 listener）：多实例几乎
+	// 同时启动时不会出现"各自探测到同一空闲端口、后绑定者失败"的 TOCTOU 竞态。
+	udpLn, tcpLn, _, lnErr := sip.BindSIPListenerPair()
+	if lnErr != nil {
+		logx.Logger().Error("本地 SIP 监听端口不可用，呼入不可用（呼出不受影响）", "err", lnErr)
+	} else {
+		go func() {
+			if err := phone.ServeUDP(ctx, udpLn); err != nil && ctx.Err() == nil {
+				logx.Logger().Error("UDP SIP 监听失败", "err", err)
+			}
+		}()
+		go func() {
+			if err := phone.ServeTCP(ctx, tcpLn); err != nil && ctx.Err() == nil {
+				logx.Logger().Error("TCP SIP 监听失败", "err", err)
+			}
+		}()
+	}
 	tel := core.Telephony(phone)
 	defer phone.Close()
 	// 按配置预选音频设备（仅记录选择，音频流在通话时按选择启动）

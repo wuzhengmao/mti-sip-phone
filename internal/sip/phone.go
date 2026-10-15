@@ -378,18 +378,51 @@ func NewPhone(sink core.EventSink, audioMgr *audio.Manager, useRPort bool) (*Pho
 // ListenAndServe 监听本地 SIP 端口（呼入通道）。addr 如 "0.0.0.0:5060"，
 // network 为 udp / tcp。监听端口被记录用于 Contact 头构造。
 // 应分别对 UDP 与 TCP 调用（各起一个 goroutine）。
+//
+// 生产路径请用 **ServeUDP / ServeTCP**（配 port.go 的 BindSIPListenerPair，
+// 探测即占用、无 TOCTOU 窗口）；本方法保留给测试/手工场景（内部自己绑定）。
 func (p *Phone) ListenAndServe(ctx context.Context, network, addr string) error {
 	if _, portStr, err := net.SplitHostPort(addr); err == nil {
 		if port, err := strconv.Atoi(portStr); err == nil {
-			p.mu.Lock()
-			if p.localPort == 0 {
-				p.localPort = port
-				logx.Logger().Info("本地 SIP 监听端口", "network", network, "port", port)
-			}
-			p.mu.Unlock()
+			p.noteLocalPort(network, port)
 		}
 	}
 	return p.server.ListenAndServe(ctx, network, addr)
+}
+
+// ServeUDP / ServeTCP 用**已绑定**的 listener 起本地 SIP 服务（配 port.go 的
+// BindSIPListenerPair / BindFreeTCPPort——探测即占用，消除"探测→释放→再绑定"
+// 的 TOCTOU 窗口：多实例几乎同时启动时，旧的探测式选端口可能两组都探测到同
+// 一空闲端口、后绑定者失败）。ctx 结束时关闭 listener 退出（与 sipgo 自身
+// ListenAndServe 的 watchContext 行为一致）。
+func (p *Phone) ServeUDP(ctx context.Context, ln net.PacketConn) error {
+	if a, ok := ln.LocalAddr().(*net.UDPAddr); ok {
+		p.noteLocalPort("udp", a.Port)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	defer stop()
+	return p.server.ServeUDP(ln)
+}
+
+// ServeTCP 同 ServeUDP（TCP 监听；端口记录只在首个监听生效——UDP/TCP 同号）。
+func (p *Phone) ServeTCP(ctx context.Context, ln net.Listener) error {
+	if a, ok := ln.Addr().(*net.TCPAddr); ok {
+		p.noteLocalPort("tcp", a.Port)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	defer stop()
+	return p.server.ServeTCP(ln)
+}
+
+// noteLocalPort 记录本地 SIP 监听端口（仅首个生效：UDP 与 TCP 监听同号，
+// Contact 构造读 p.localPort；TLS 监听端口是独立的 p.localTLSPort）。
+func (p *Phone) noteLocalPort(network string, port int) {
+	p.mu.Lock()
+	if p.localPort == 0 {
+		p.localPort = port
+		logx.Logger().Info("本地 SIP 监听端口", "network", network, "port", port)
+	}
+	p.mu.Unlock()
 }
 
 // contactFor 构造当前账户传输方式对应的 Contact 地址：

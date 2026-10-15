@@ -201,26 +201,8 @@ func TestPeerDTMFPT(t *testing.T) {
 	}
 }
 
-// TestBindRTPRTCPEvenPort RFC 3550 约定：RTP 用偶数值端口、RTCP = RTP + 1
-// （服务端/网关按此配对，奇数 RTP 会被判为不规范）。
-func TestBindRTPRTCPEvenPort(t *testing.T) {
-	for i := 0; i < 10; i++ {
-		c1, c2, err := bindRTPRTCP("127.0.0.1")
-		if err != nil {
-			t.Fatalf("绑定 RTP/RTCP 端口对失败: %v", err)
-		}
-		p1 := c1.LocalAddr().(*net.UDPAddr).Port
-		p2 := c2.LocalAddr().(*net.UDPAddr).Port
-		_ = c1.Close()
-		_ = c2.Close()
-		if p1%2 != 0 {
-			t.Fatalf("RTP 端口必须为偶数，实际 %d", p1)
-		}
-		if p2 != p1+1 {
-			t.Fatalf("RTCP 端口应为 RTP+1，实际 %d（RTP %d）", p2, p1)
-		}
-	}
-}
+// bindRTPRTCP 的端口对不变量（偶数 / RTCP=RTP+1 / 通配占用形态）已由
+// bindport_test.go 的 TestBindRTPRTCPInvariant 覆盖（含撞号防护的结构性断言）。
 
 // rms 信号均方根（能量比较用，避免逐样本比对编解码时延）。
 func rms(pcm []int16) float64 {

@@ -132,7 +132,7 @@ func NewVideoEngine(localIP string) (*VideoEngine, error) {
 	if !video.Supported() {
 		return nil, ErrVideoUnsupported
 	}
-	conn, rtcpConn, err := bindRTPRTCP(localIP)
+	conn, rtcpConn, err := bindRTPRTCP()
 	if err != nil {
 		return nil, err
 	}
@@ -650,8 +650,10 @@ func (v *VideoEngine) rtcpOnFeedback(pkt rtcp.Packet) {
 
 // RTCP 加解密（SRTP，REQ-MEDIA-009）：视频的 PLI/FIR 也走 RTCP，
 // 加密启用后必须走 SRTCP，否则请求根本到不了对端（画面一直黑）。
-func (v *VideoEngine) rtcpProtect(pkt []byte) []byte           { return protectRTCPPkt(&v.crypto, pkt) }
-func (v *VideoEngine) rtcpUnprotect(pkt []byte) ([]byte, bool) { return unprotectRTCPPkt(&v.crypto, pkt) }
+func (v *VideoEngine) rtcpProtect(pkt []byte) []byte { return protectRTCPPkt(&v.crypto, pkt) }
+func (v *VideoEngine) rtcpUnprotect(pkt []byte) ([]byte, bool) {
+	return unprotectRTCPPkt(&v.crypto, pkt)
+}
 
 // --- 收发 ---
 
