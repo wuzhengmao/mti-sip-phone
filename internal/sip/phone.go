@@ -1469,6 +1469,22 @@ func (p *Phone) outgoingFlow(ctx context.Context, cs *callSession, acc config.Ac
 			p.cleanupCall(cs.id, "failed")
 		}
 	}()
+	// 拦下 sipgo 在取消竞态下的已知 panic（v1.6.0 内部 bug）：WaitAnswer 收到
+	// ctx 取消 → inviteCancel 里 `s.Do(cancelReq)`：Do 的 `<-tx.Done()` 分支
+	// 返回 `(nil, tx.Err())`，而 `ClientTx.Terminate()` 是**先 close(done)、
+	// 后设 fsmErr**——窗口里 tx.Err() == nil，于是返回 (nil, nil)，inviteCancel
+	// 的 `if err != nil` 不成立、直接在 `res.StatusCode` 上 nil 解引用。
+	//
+	// 信令 goroutine 的 panic 会让**整个进程**退出（托盘版是 GUI 子系统，
+	// 无控制台、崩溃现场只落在 stderr——表现为"软电话凭空消失"，集成测试
+	// 就撞到过）。这里兜住并走既有的失败清理（上面的 defer 会执行）。
+	// 注意 defer 顺序：本 defer 注册在后、先执行（recover 停住 panic），
+	// 上面那个 defer 随后做 cleanupCall。
+	defer func() {
+		if r := recover(); r != nil {
+			logx.Logger().Error("呼出流程异常已拦截（按呼叫失败处理）", "callId", cs.id, "panic", r)
+		}
+	}()
 
 	authUser := acc.AuthUser
 	if authUser == "" {

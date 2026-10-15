@@ -277,6 +277,17 @@ func bindRTPRTCP(ip string) (*net.UDPConn, *net.UDPConn, error) {
 			_ = c1.Close()
 			continue // 奇数端口不合 RFC 3550 约定（>=65535 也无从再取 +1），重选
 		}
+		// ⚠️ 撞号防护（真机/测试 flakiness 的真因）：媒体 socket 绑**具体 IP**
+		// （localIP），而 sipgo 的信令出站 UDP socket 绑**通配（0.0.0.0）**——
+		// Windows 允许「0.0.0.0:P」与「具体IP:P」共存，内核随机端口可能让两者
+		// **撞号**；此时对端回给出站 socket 的响应（dst=具体IP:P）会被"绑定更
+		// 具体"的媒体 socket 吸走，出站永远收不到（表现为收不到 180/405 等，
+		// 信令静默"只出不进"）。所以绑好后校验该端口在通配地址上仍空闲：
+		// 被通配 socket 占用（试绑失败）就换端口。
+		if !wildcardPortFree(port) || !wildcardPortFree(port+1) {
+			_ = c1.Close()
+			continue
+		}
 		c2, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ipAddr, Port: port + 1})
 		if err != nil {
 			_ = c1.Close()
@@ -285,6 +296,18 @@ func bindRTPRTCP(ip string) (*net.UDPConn, *net.UDPConn, error) {
 		return c1, c2, nil
 	}
 	return nil, nil, fmt.Errorf("绑定 RTP/RTCP 端口对失败（RTP 需为偶数端口）")
+}
+
+// wildcardPortFree 该 UDP 端口在通配地址（0.0.0.0）上是否可绑（空闲）。
+// 被任何通配 socket 占用即返回 false——媒体选端口时用它避开"信令出站 socket
+// 已占的通配端口"（见 bindRTPRTCP 的撞号防护说明）。
+func wildcardPortFree(port int) bool {
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 // LocalPort 本地 RTP 端口（用于 SDP）。
@@ -760,7 +783,7 @@ func (e *Engine) rtpTimestamp() uint32 {
 
 // --- rtcpEndpoint 实现（音频）---
 
-func (e *Engine) rtcpSSRC() uint32  { return e.ssrc }
+func (e *Engine) rtcpSSRC() uint32    { return e.ssrc }
 func (e *Engine) rtcpRTPTime() uint32 { return e.rtpTimestamp() }
 
 func (e *Engine) rtcpTxStats() (packets, bytes uint64) {
@@ -778,8 +801,8 @@ func (e *Engine) rtcpRecvState() (uint16, uint32, uint64, bool) {
 func (e *Engine) rtcpOnFeedback(rtcp.Packet) {}
 
 // RTCP 加解密（SRTP，REQ-MEDIA-009）。
-func (e *Engine) rtcpProtect(pkt []byte) []byte            { return protectRTCPPkt(&e.crypto, pkt) }
-func (e *Engine) rtcpUnprotect(pkt []byte) ([]byte, bool)  { return unprotectRTCPPkt(&e.crypto, pkt) }
+func (e *Engine) rtcpProtect(pkt []byte) []byte           { return protectRTCPPkt(&e.crypto, pkt) }
+func (e *Engine) rtcpUnprotect(pkt []byte) ([]byte, bool) { return unprotectRTCPPkt(&e.crypto, pkt) }
 
 // SendDTMF 发送一个 DTMF 音（RFC 2833 telephone-event，负载类型 101）。
 // 异步发送：起始包（M=1）→ 持续包 → 结束包（E=1），总时长约 200ms。
