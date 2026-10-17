@@ -368,6 +368,26 @@
     }
 
     /**
+     * 登录账号（REQ-ACC-024，与托盘菜单的「登录账号」一致）：启用账户并
+     * 立即向服务器注册。注册结果经 `register.state` 事件回显（本方法只返回
+     * "已接受"，不等待网络结果）。
+     * @returns {Promise<{enabled: boolean, state: string}>}
+     */
+    register() {
+      return this._request('system.register', {});
+    }
+
+    /**
+     * 退出账号（REQ-ACC-024，与托盘菜单的「退出账号」一致）：发 expires=0
+     * 注销、停止注册周期，并禁用账户——之后启动或断线重连都不会自动注册，
+     * 直到再次 register() 或用 sip:// 拉起。
+     * @returns {Promise<{enabled: boolean, state: string}>}
+     */
+    unregister() {
+      return this._request('system.unregister', {});
+    }
+
+    /**
      * 查询软电话当前状态（注册状态、通话列表等）。
      * 返回值含 version / os / arch（前端据此到业务平台查询对应架构的
      * 最新版本，见 notifyUpdate）与 autoAnswer（自动接听开关当前状态）。

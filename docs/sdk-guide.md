@@ -184,6 +184,8 @@ await sdk.connect();
 | --- | --- |
 | `getState()` | 状态快照：版本/平台、注册状态、通话列表（含音频/视频/通信录字段）、更新状态、自动接听开关、`noUI`（是否仅托盘无 UI 版）、`instance`（实例槽位） |
 | `setAutoAnswer(enabled)` | 自动接听开关（与软电话界面按钮**共用一份状态**，变更广播 `system.autoAnswer`） |
+| `register()` | **登录账号**（REQ-ACC-024）：启用账户并立即注册；结果经 `register.state` 事件回显。与托盘菜单「登录账号」一致 |
+| `unregister()` | **退出账号**（REQ-ACC-024）：发 expires=0、停注册周期并禁用账户（之后启动/重连不再自动注册，直到 `register()` 或 sip:// 拉起） |
 | `setUpdateConfig(cfg)` | 写入软电话的**自动更新配置**（站点 URL / 应用 ID / 周期 / 预览版）。**软电话据此自己定时查询**更新站点 |
 | `notifyUpdate(info)` | **强制推送**某个版本（联调用）：软电话弹提示，**由用户在软电话界面上确认后**才下载重启 |
 

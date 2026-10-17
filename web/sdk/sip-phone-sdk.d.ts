@@ -106,6 +106,18 @@ declare class SipPhoneSDK {
   setAutoAnswer(enabled: boolean): Promise<{ enabled: boolean }>;
 
   /**
+   * 登录账号（REQ-ACC-024）：启用账户并立即注册。
+   * 结果经 `register.state` 事件回显。
+   */
+  register(): Promise<{ enabled: boolean; state: string }>;
+
+  /**
+   * 退出账号（REQ-ACC-024）：发 expires=0、停止注册周期并禁用账户
+   * （启动/重连都不会自动恢复，直到再次 register 或 sip:// 拉起）。
+   */
+  unregister(): Promise<{ enabled: boolean; state: string }>;
+
+  /**
    * 导出通信录为 CSV 文本（表头「号码,名称,备注,常用」，带 UTF-8 BOM）。
    * 网页端不做增删改查，只提供一键导入/导出。
    */

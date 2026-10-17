@@ -193,6 +193,12 @@ func (a *App) UpdateAccount(acc config.Account) error {
 	if a.tel == nil {
 		return nil
 	}
+	// 注销条件（REQ-ACC-024）：账户未启用 / 缺字段——两者都走注销（发
+	// expires=0、停注册周期）。**「启用账户」同时也是"是否注册"的总开关**：
+	// 托盘菜单「退出账号」把它置 false（注销 + 停周期）、「登录账号」置回 true
+	// （立即注册），服务端 NOTIFY 注销同样置 false；WS 断线自动注销（REQ-WS-020）
+	// 用的也是它——重连恢复时若此时为 false 就不会偷偷注册回来。sip:// 拉起在
+	// handleLaunchArgs 里强制置 true（显式要求注册）。
 	if !acc.Enabled || acc.Server == "" || acc.Account == "" {
 		a.setRegister(RegUnregistered, "")
 		a.bus.Publish("register.state", map[string]any{
@@ -227,6 +233,8 @@ func (a *App) Start(ctx context.Context) {
 		return
 	}
 	acc := a.cfg.Account
+	// 启动注册：**只由「启用账户」控制**（REQ-ACC-024——取消勾选即"退出账号"，
+	// 启动不注册；托盘菜单「登录账号」置回 true 并立即注册；sip:// 拉起强制启用）。
 	if acc.Enabled && acc.Server != "" && acc.Account != "" {
 		go func() {
 			if err := a.tel.Register(ctx, acc); err != nil {
@@ -823,6 +831,120 @@ func (a *App) OnRegisterState(state RegisterState, reason string) {
 		"account": a.cfg.Account.Account,
 		"reason":  reason,
 	})
+}
+
+// OnRemoteCommand 处理服务端 NOTIFY 控制指令（REQ-ACC-025，协议见
+// docs/cti-sip-phone-protocol.md）。由 sip 层的 NOTIFY handler 在独立
+// goroutine 里调用（不阻塞信令事务；200 OK 已在 handler 内发出）。
+//
+// **视频能力一律"静默降级"**：withVideo=true 但话机未开启视频功能
+// （VideoUsable：构建支持 + 配置总开关）或呼入本身不含视频（Call.HasVideo）
+// 时，改为纯音频拨号/接听，只记一条 Info 日志，不报错、不中断指令。
+func (a *App) OnRemoteCommand(cmd RemoteCommand) {
+	logx.Logger().Info("收到服务端控制指令", "kind", cmd.Kind,
+		"dest", cmd.DestNo, "withVideo", cmd.WithVideo, "reason", cmd.Reason)
+	switch cmd.Kind {
+	case "unregister":
+		// 坐席登出通知注销（与托盘「退出账号」一致：禁用账户并立即注销）
+		logx.Logger().Warn("服务端要求注销（MSP_UNREGISTER），退出账号并停止注册周期",
+			"reason", cmd.Reason, "agent", cmd.Agent)
+		if err := a.SetRegistered(false); err != nil {
+			logx.Logger().Warn("按服务端通知注销失败", "reason", cmd.Reason, "err", err)
+		}
+
+	case "dial":
+		if strings.TrimSpace(cmd.DestNo) == "" {
+			logx.Logger().Warn("服务端拨号指令缺少 destNo，忽略")
+			return
+		}
+		video := cmd.WithVideo && a.VideoUsable()
+		if cmd.WithVideo && !video {
+			logx.Logger().Info("服务端要求视频呼叫，但视频功能不可用，降级为纯音频呼叫",
+				"dest", cmd.DestNo)
+		}
+		var (
+			callID string
+			err    error
+		)
+		if video {
+			callID, err = a.DialVideo(context.Background(), cmd.DestNo)
+		} else {
+			callID, err = a.Dial(context.Background(), cmd.DestNo)
+		}
+		if err != nil {
+			logx.Logger().Warn("服务端拨号失败", "dest", cmd.DestNo, "video", video, "err", err)
+			return
+		}
+		logx.Logger().Info("服务端拨号已发起", "dest", cmd.DestNo, "video", video, "callId", callID)
+
+	case "answer":
+		c := a.ringingIncomingCall()
+		if c == nil {
+			logx.Logger().Warn("服务端接听指令：当前没有等待接听的来电，忽略")
+			return
+		}
+		video := cmd.WithVideo && a.VideoUsable() && c.HasVideo
+		if cmd.WithVideo && !video {
+			logx.Logger().Info("服务端要求视频接听，但视频功能或本呼入视频不可用，降级为纯音频接听",
+				"callId", c.ID)
+		}
+		if err := a.AnswerOrVideo(c.ID, video); err != nil {
+			logx.Logger().Warn("服务端接听失败", "callId", c.ID, "video", video, "err", err)
+		}
+
+	case "hangup":
+		c := a.activeCall()
+		if c == nil {
+			logx.Logger().Warn("服务端挂断指令：当前没有进行中的通话，忽略")
+			return
+		}
+		if err := a.Hangup(c.ID); err != nil {
+			logx.Logger().Warn("服务端挂断失败", "callId", c.ID, "err", err)
+		}
+
+	case "autoanswer":
+		if cmd.AutoAnswer == nil {
+			logx.Logger().Warn("服务端自动接听指令缺少 autoAnswer，忽略")
+			return
+		}
+		if err := a.SetAutoAnswer(*cmd.AutoAnswer); err != nil {
+			logx.Logger().Warn("服务端设置自动接听失败", "enabled", *cmd.AutoAnswer, "err", err)
+		}
+
+	default:
+		logx.Logger().Warn("未知的服务端控制指令，忽略", "kind", cmd.Kind)
+	}
+}
+
+// AnswerOrVideo 按是否视频接听当前来电（NOTIFY 接听指令用）：video=true 走
+// 视频接听（未接通前可打开摄像头），否则普通接听（answer 里 m=video 0，
+// 不接受视频）。
+func (a *App) AnswerOrVideo(callID string, video bool) error {
+	if video {
+		return a.AnswerVideo(callID)
+	}
+	return a.Answer(callID)
+}
+
+// ringingIncomingCall 当前振铃中的**呼入**（服务端接听指令的目标）。
+// 单通话限制下最多一条；没有则返回 nil。
+func (a *App) ringingIncomingCall() *Call {
+	for _, c := range a.State().Calls {
+		if c.Direction == "incoming" && c.State == CallRinging {
+			return &c
+		}
+	}
+	return nil
+}
+
+// activeCall 当前进行中的通话（振铃或已接通，服务端挂断指令的目标）。
+func (a *App) activeCall() *Call {
+	for _, c := range a.State().Calls {
+		if c.State == CallRinging || c.State == CallEstablished {
+			return &c
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

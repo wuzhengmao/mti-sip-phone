@@ -5,6 +5,7 @@ package sip
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -497,6 +498,139 @@ func (p *Phone) setupHandlers() {
 			logx.Logger().Warn("ACK 匹配失败", "err", err)
 		}
 	})
+	// 服务端控制指令（REQ-ACC-025，协议见 docs/cti-sip-phone-protocol.md）：
+	// NOTIFY 携带 Event: MSP_*。**必须在 handler 内同步回 200**——sipgo 在
+	// handler 返回后 TerminateGracefully 会立即终止尚未产生最终响应的事务
+	// （可靠传输），且 UAC 重传会再次回调；200 发出后副作用异步执行。
+	p.server.OnNotify(func(req *sip.Request, tx sip.ServerTransaction) {
+		if tx != nil {
+			_ = tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
+		}
+		p.handleControlNotify(req)
+	})
+}
+
+// 私有控制协议（docs/cti-sip-phone-protocol.md）的 Event 头取值。
+const (
+	notifyEventDial       = "MSP_DIAL"
+	notifyEventAnswer     = "MSP_ANSWER"
+	notifyEventHangup     = "MSP_HANGUP"
+	notifyEventAutoAnswer = "MSP_SET_AUTOANSWER"
+	notifyEventUnregister = "MSP_UNREGISTER"
+)
+
+// handleControlNotify 处理服务端 NOTIFY 控制指令（REQ-ACC-025）：
+//   - Event 头大小写不敏感、可带 ;参数；只认协议定义的 5 个事件，其余忽略
+//     （200 已在 handler 内回过——协议允许未匹配时回 200）；
+//   - **来源校验**：只接受注册服务器发来的通知（regPeerIP 优先；未注册时用
+//     配置里的服务器地址解析比对；判断不了时放行并告警）——NOTIFY 是未认证
+//     请求，不做校验等于把"拨号/挂断/注销"暴露给任何能连到本端端口的人；
+//   - body 为 JSON（无参数事件为空）；解析失败或缺少必填参数只记日志忽略；
+//   - 解析后经 sink 异步交给核心层执行——**视频不可用时由核心层静默降级**
+//     为纯音频（是否视频以「话机开启视频功能」与「呼入含视频」为准）。
+func (p *Phone) handleControlNotify(req *sip.Request) {
+	ev := ""
+	for _, h := range req.Headers() {
+		if strings.EqualFold(h.Name(), "Event") {
+			ev = strings.TrimSpace(strings.SplitN(h.Value(), ";", 2)[0])
+		}
+	}
+	if ev == "" {
+		return
+	}
+	if !p.notifyFromServer(req.Source()) {
+		logx.Logger().Warn("收到非注册服务器发来的控制通知，已忽略", "event", ev, "source", req.Source())
+		return
+	}
+	var cmd core.RemoteCommand
+	switch {
+	case strings.EqualFold(ev, notifyEventDial):
+		var b struct {
+			DestNo    string `json:"destNo"`
+			WithVideo bool   `json:"withVideo"`
+		}
+		if err := json.Unmarshal(req.Body(), &b); err != nil {
+			logx.Logger().Warn("MSP_DIAL 正文不是合法 JSON，忽略", "err", err)
+			return
+		}
+		cmd = core.RemoteCommand{Kind: "dial", DestNo: b.DestNo, WithVideo: b.WithVideo}
+
+	case strings.EqualFold(ev, notifyEventAnswer):
+		var b struct {
+			WithVideo bool `json:"withVideo"`
+		}
+		if len(bytes.TrimSpace(req.Body())) > 0 {
+			if err := json.Unmarshal(req.Body(), &b); err != nil {
+				logx.Logger().Warn("MSP_ANSWER 正文不是合法 JSON，忽略", "err", err)
+				return
+			}
+		}
+		cmd = core.RemoteCommand{Kind: "answer", WithVideo: b.WithVideo}
+
+	case strings.EqualFold(ev, notifyEventHangup):
+		cmd = core.RemoteCommand{Kind: "hangup"}
+
+	case strings.EqualFold(ev, notifyEventAutoAnswer):
+		var b struct {
+			AutoAnswer *bool `json:"autoAnswer"`
+		}
+		if err := json.Unmarshal(req.Body(), &b); err != nil || b.AutoAnswer == nil {
+			logx.Logger().Warn("MSP_SET_AUTOANSWER 缺少 autoAnswer 参数，忽略", "err", err)
+			return
+		}
+		cmd = core.RemoteCommand{Kind: "autoanswer", AutoAnswer: b.AutoAnswer}
+
+	case strings.EqualFold(ev, notifyEventUnregister):
+		var b struct {
+			Reason string `json:"reason"`
+			Agent  string `json:"agent"`
+		}
+		if err := json.Unmarshal(req.Body(), &b); err != nil {
+			logx.Logger().Warn("MSP_UNREGISTER 正文不是合法 JSON，按空原因处理",
+				"err", err, "body", strings.TrimSpace(string(req.Body())))
+		}
+		cmd = core.RemoteCommand{Kind: "unregister", Reason: b.Reason, Agent: b.Agent}
+
+	default:
+		logx.Logger().Debug("入向 NOTIFY 不是已知控制事件，忽略", "event", ev)
+		return
+	}
+	go p.sink.OnRemoteCommand(cmd)
+}
+
+// notifyFromServer 判断 NOTIFY 的来源（"ip:port"）是否为注册服务器：
+// regPeerIP（最近一次 REGISTER 成功响应的来源）优先；否则解析配置里的
+// 服务器地址比对；解析不了（如域名在本机无解析）时放行并告警——此时无法
+// 判断，宁可让业务通知生效（服务端也可能经代理/多 IP 送达）。
+func (p *Phone) notifyFromServer(src string) bool {
+	srcHost, _, err := net.SplitHostPort(src)
+	if err != nil {
+		srcHost = src
+	}
+	srcHost = strings.Trim(srcHost, "[]")
+	if srcHost == "" {
+		return false
+	}
+	p.mu.Lock()
+	peer, server := p.regPeerIP, p.acc.Server
+	p.mu.Unlock()
+	if peer != "" {
+		return srcHost == peer
+	}
+	if server == "" {
+		return true
+	}
+	ips, err := net.LookupHost(server)
+	if err != nil {
+		logx.Logger().Warn("无法解析注册服务器地址，注销通知来源未校验", "server", server, "err", err)
+		return true
+	}
+	for _, ip := range ips {
+		if ip == srcHost {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

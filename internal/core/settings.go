@@ -227,6 +227,42 @@ type AccountPatch struct {
 	ClearPassword bool
 }
 
+// SetRegistered 登录/退出账号（REQ-ACC-024），供托盘菜单的
+// 「登录账号 / 退出账号」、网页注册徽章与 SDK 的 register()/unregister()、
+// 以及服务端 NOTIFY 注销共用——**共用「启用账户」这一个配置项**：
+//   - on=true（登录账号）：启用账户 → UpdateAccount → **立即注册**
+//     （已有注册循环时 sip.Phone.Register 会重启它，幂等）；
+//   - on=false（退出账号）：禁用账户 → UpdateAccount → **发 expires=0、停注册
+//     周期**；之后启动也不会自动注册（与配置页「启用账户」勾选是同一开关）。
+//
+// 注册/注销在后台进行（不阻塞调用方），结果经 register.state 事件回显；
+// 返回的是落盘错误。状态未变时直接返回（幂等，NOTIFY 重传不会重复注销）。
+func (a *App) SetRegistered(on bool) error {
+	a.mu.RLock()
+	acc := a.cfg.Account
+	a.mu.RUnlock()
+	if acc.Enabled == on {
+		return nil
+	}
+	acc.Enabled = on
+	if err := a.UpdateAccount(acc); err != nil {
+		return err
+	}
+	// 广播账户配置变化（与 PatchAccount 一致）：网页配置页的「启用账户」
+	// 勾选随之自动更新（桌面配置页在 register.state 事件里同步）。
+	a.bus.Publish("system.config", map[string]any{
+		"section": "account", "values": a.ConfigSnapshot().Account,
+	})
+	return nil
+}
+
+// AccountEnabled 当前「启用账户」配置（加锁读，供界面同步勾选状态）。
+func (a *App) AccountEnabled() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.Account.Enabled
+}
+
 // PatchAccount 按补丁改账户配置：校验 →（内存 + 落盘）→ 重新注册。
 // 校验失败返回 ErrConfigInvalid，且**不改任何东西**。
 func (a *App) PatchAccount(p AccountPatch) (AccountSnapshot, error) {

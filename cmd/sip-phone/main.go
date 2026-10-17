@@ -447,6 +447,8 @@ func handleLaunchArgs(app *core.App, cfg *config.Config, args []string, onDone f
 		// 更新账户配置并触发注册
 		newAcc := cfg.Account
 		newAcc.Enabled = true
+		// sip:// 拉起是**显式要求登录**（REQ-ACC-024）：强制启用账户（同时
+		// 持久化，下次启动也会自动注册），不受此前「退出账号」（禁用账户）影响。
 		newAcc.Server = acc.Server
 		newAcc.Port = acc.Port
 		newAcc.Transport = acc.Transport

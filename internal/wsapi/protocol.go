@@ -64,6 +64,8 @@ const (
 	MethodDTMF              = "call.dtmf"              // 发送 DTMF（RFC 4733，REQ-CALL-006）
 	MethodGetState          = "system.getState"        // 查询状态
 	MethodSetAutoAnswer     = "system.setAutoAnswer"   // 自动接听开关（桌面按钮与网页共用一份）
+	MethodRegister          = "system.register"        // 立即注册并恢复自动注册（REQ-ACC-024 / REQ-WS-021）
+	MethodUnregister        = "system.unregister"      // 取消注册、停止注册周期并关闭自动注册
 	MethodSetUpdateConfig   = "system.setUpdateConfig" // 自动更新配置（站点/应用 ID/周期/预览版，REQ-UPD-018）
 	MethodNotifyUpdate      = "system.notifyUpdate"    // 前端强制推送新版本
 	MethodVideoSubscribe    = "video.subscribe"        // 订阅视频画面（REQ-VIDEO-009）

@@ -117,6 +117,23 @@ type VideoSink interface {
 	OnVideoFrame(callID string, local bool, img *image.RGBA)
 }
 
+// RemoteCommand 服务端 NOTIFY 控制指令（REQ-ACC-025，协议见
+// docs/cti-sip-phone-protocol.md）。Kind 是事件名去掉 MSP_ 前缀的小写形式：
+//
+//	"dial"       MSP_DIAL         DestNo / WithVideo
+//	"answer"     MSP_ANSWER       WithVideo
+//	"hangup"     MSP_HANGUP       （无参数）
+//	"autoanswer" MSP_SET_AUTOANSWER AutoAnswer
+//	"unregister" MSP_UNREGISTER   Reason（Agent 为兼容可选的附加字段）
+type RemoteCommand struct {
+	Kind       string
+	DestNo     string // dial：被叫号码
+	WithVideo  bool   // dial / answer：是否要视频（不可用时静默降级为纯音频）
+	AutoAnswer *bool  // autoanswer：nil = 未指定（忽略）
+	Reason     string // unregister：注销原因（记日志）
+	Agent      string // unregister：可选的坐席号（协议未定义，兼容记录）
+}
+
 // EventSink 电话层向核心层上报事件的回调接口，由 App 实现。
 type EventSink interface {
 	// OnIncoming 呼入（收到 INVITE），进入振铃状态。
@@ -134,6 +151,10 @@ type EventSink interface {
 	OnFailed(callID, reason string)
 	// OnRegisterState 注册状态变化。
 	OnRegisterState(state RegisterState, reason string)
+	// OnRemoteCommand 服务端通过 NOTIFY 下发控制指令（REQ-ACC-025，协议见
+	// docs/cti-sip-phone-protocol.md）：拨号/接听/挂断/设置自动接听/注销。
+	// 由 sip 层的 NOTIFY handler 在独立 goroutine 里调用（不阻塞信令事务）。
+	OnRemoteCommand(cmd RemoteCommand)
 	// OnVideoState 视频状态变化（协商成功、开关切换、拿到对端分辨率）。
 	// 低频事件，走事件总线没问题；**视频帧不走这里**（见 VideoSink）。
 	OnVideoState(callID string, st VideoState)

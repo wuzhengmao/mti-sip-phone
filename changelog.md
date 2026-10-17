@@ -10,6 +10,10 @@
 
 ### 新增
 
+- **托盘菜单「登录账号 / 退出账号」+ 服务端注销通知 + SDK/控制台 register/unregister**（REQ-ACC-024 / REQ-WS-021 / REQ-SDK-008）：① 托盘右键菜单在「显示主界面」下面按**当前注册状态**动态显示——已注册/注册中为「**退出账号**」（发 expires=0、停注册周期，并**把「启用账户」置 false**，下次启动不再自动注册）、未注册/注册失败为「**登录账号**」（启用账户并立即注册）；**共用「启用账户」这一个配置项**（与配置页勾选、`system.setAccount` 是同一开关，不再另设「启动自动注册」）。② 支持服务端**注销通知**（私有控制协议的 `MSP_UNREGISTER`，见下 REQ-ACC-025）：校验来源为注册服务器（`regPeerIP` 优先）后，**记 Warn 日志、退出账号（取消注册、停周期、启用账户=false）**；来源不符/非本事件忽略。③ **SDK** 新增 `register()` / `unregister()`（= 登录/退出账号），WS 新增 `system.register` / `system.unregister`；网页顶栏**注册徽章可点击**（与托盘菜单行为一致）。④ sip:// 拉起仍强制启用账户并注册。WS 断线自动注销（REQ-WS-020）与这些动作共用同一配置项，手动退出后重连不会恢复注册。
+
+- **服务端私有控制协议**（REQ-ACC-025，协议见 `docs/cti-sip-phone-protocol.md`）：在 REQ-ACC-024 的注销通知之上，把整条「SIP NOTIFY `Event: MSP_*`」链路补全为 5 个事件——`MSP_DIAL`（远程拨号）、`MSP_ANSWER`（远程接听）、`MSP_HANGUP`（远程挂断）、`MSP_SET_AUTOANSWER`（远程改自动接听开关）、`MSP_UNREGISTER`（注销，即原 `mti-sip-unregister` 改按协议命名）。实现：NOTIFY handler 内先同步回 200 再异步执行（`handleControlNotify`）；只接受注册服务器来源（`regPeerIP` 优先，判断不了放行并告警）；REGISTER 的 `Allow` 头补 `NOTIFY`（否则 OpenSIPS `lookup("location","m")` 按方法过滤回 511）。**视频能力一律静默降级**：`withVideo=true` 但话机视频不可用（`VideoUsable()` = 构建支持 + 配置总开关）或呼入本身不含视频（`Call.HasVideo`）时，降级为纯音频拨号/接听，只记 Info 日志、不报错。新增 `core.RemoteCommand` + `EventSink.OnRemoteCommand`（`internal/core/telephony.go`），`core.App.OnRemoteCommand` 执行（含 `AnswerOrVideo`/`ringingIncomingCall`/`activeCall` 辅助）。
+
 - **`docker/build.bat`（Windows 一键容器构建入口）**：cmd / PowerShell 里直接跑，参数与 `docker/build.sh` 一致、原样透传（内部自动找 git-bash，写法与 `scripts/release.bat` 同款）——`docker\build.bat --libs`（首次编第三方库）/ 无参数（出全部 10 个产物）/ `--build-image` / `--shell`。`.bat` 注释刻意用英文：cmd 按 ANSI/GBK 代码页解析批处理，UTF-8 中文注释行会被拆碎成乱码命令片段（实测）；中文说明都在 `docker/README.md` 与 build.sh。另修复 `release.sh` / `build.sh` 的版本号解析在 Windows 检出（CRLF 行尾）下失效的问题——sed 的 `"$` 锚点被行尾 `\r` 挡住，末尾改 `.*$` 吸收。
 
 ### 修复

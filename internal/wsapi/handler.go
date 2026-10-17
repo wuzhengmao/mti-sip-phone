@@ -358,6 +358,23 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		}
 		resp = okMessage(msg.ID, map[string]any{"enabled": p.Enabled})
 
+	case MethodRegister, MethodUnregister:
+		// 登录 / 退出账号（REQ-ACC-024 / REQ-WS-021）：与托盘菜单一致——
+		// **共用「启用账户」这一个配置项**并落盘：
+		//   register   → 启用账户 → 立即发起注册；
+		//   unregister → 禁用账户 → 发 expires=0、停注册周期。
+		// 注册/注销在后台进行，结果经 register.state 事件回显（这里只回
+		// 已接受的配置状态，不等待网络结果）。
+		on := msg.Method == MethodRegister
+		if err := s.app.SetRegistered(on); err != nil {
+			resp = errMessage(msg.ID, codeOf(err), err)
+			break
+		}
+		resp = okMessage(msg.ID, map[string]any{
+			"enabled": on,
+			"state":   string(s.app.State().Register.State),
+		})
+
 	case MethodSetUpdateConfig:
 		// 自动更新配置（REQ-UPD-018）：网页可写入站点/应用 ID/周期/预览版，
 		// 软电话据此自己定时检查（配了站点才查）。字段**都是可选的**，

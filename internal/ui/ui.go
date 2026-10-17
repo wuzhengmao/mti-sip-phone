@@ -1467,14 +1467,37 @@ func (a *App) updateCallButton() {
 //   - SetSystemTrayIcon 直接操作底层 systray，在 systray 启动前调用会报
 //     "tray not ready yet" 且托盘不显示；启动后的状态切换（注册红/绿）
 //     通过 SetSystemTrayIcon 完成（此时 systray 已就绪）。
-func (a *App) buildTray() {
-	if a.desk == nil {
-		logx.Logger().Warn("当前驱动不支持系统托盘")
-		return
-	}
+//
+// trayMenu 托盘右键菜单（REQ-ACC-024）：显示主界面 / **登录账号或退出账号**
+// （按当前注册状态，位置在「显示主界面」下面）/ 分隔 / 退出。
+// **注册状态变化时重建**（updateTrayMenu），保证菜单项与状态一致。
+func (a *App) trayMenu() *fyne.Menu {
 	showMain := fyne.NewMenuItem("显示主界面", func() {
 		a.showMain()
 	})
+	// 已注册/注册中 → 「退出账号」：注销（发 expires=0）并停注册周期，
+	//   同时把「启用账户」置 false（下次启动不再自动注册）；
+	// 未注册/注册失败 → 「登录账号」：启用账户并立即注册。
+	// 动作可能阻塞（等 REGISTER 响应），放 goroutine，不卡 UI 线程。
+	registered := a.regState == "registered" || a.regState == "registering"
+	var accItem *fyne.MenuItem
+	if registered {
+		accItem = fyne.NewMenuItem("退出账号", func() {
+			go func() {
+				if err := a.core.SetRegistered(false); err != nil {
+					logx.Logger().Warn("退出账号失败", "err", err)
+				}
+			}()
+		})
+	} else {
+		accItem = fyne.NewMenuItem("登录账号", func() {
+			go func() {
+				if err := a.core.SetRegistered(true); err != nil {
+					logx.Logger().Warn("登录账号失败", "err", err)
+				}
+			}()
+		})
+	}
 	quit := fyne.NewMenuItem("退出", func() {
 		a.fyne.Quit()
 	})
@@ -1482,14 +1505,29 @@ func (a *App) buildTray() {
 	// 末尾自动补一个本地化的 Quit 项（driver_desktop.go 的
 	// addMissingQuitForMenu），托盘上会出现「退出」与「Quit」两项
 	markTrayQuit(quit)
-	menu := fyne.NewMenu("mti-sip-phone", showMain, fyne.NewMenuItemSeparator(), quit)
+	return fyne.NewMenu("mti-sip-phone", showMain, accItem, fyne.NewMenuItemSeparator(), quit)
+}
 
+// updateTrayMenu 按当前注册状态重建托盘菜单（Fyne 的 SetSystemTrayMenu
+// 可重复调用：首次会启动托盘并在就绪时应用，之后只刷新菜单项）。
+func (a *App) updateTrayMenu() {
+	if a.desk == nil {
+		return
+	}
+	a.desk.SetSystemTrayMenu(a.trayMenu())
+}
+
+func (a *App) buildTray() {
+	if a.desk == nil {
+		logx.Logger().Warn("当前驱动不支持系统托盘")
+		return
+	}
 	// 应用图标固定为绿色话机（用户要求：标准 app 图标是绿色话机，红色只作
 	// 异常提醒——那个由托盘图标承担）。各窗口另有自己的 SetIcon，这里同时是
 	// "没单独设图标的窗口"的默认值。
 	a.fyne.SetIcon(IconPhoneGreen)
 	// 单击托盘图标唤出主窗口（Fyne 托盘无原生双击事件，单击唤出）
-	a.desk.SetSystemTrayMenu(menu)
+	a.desk.SetSystemTrayMenu(a.trayMenu())
 	a.desk.SetSystemTrayWindow(a.mainW)
 	// 托盘图标显式按注册状态给一次（未注册红 / 已注册绿，REQ-UI-011）：
 	// Fyne 的托盘就绪回调只在"从未显式设置过托盘图标"时才退回应用图标，
@@ -1631,6 +1669,13 @@ func (a *App) onEvent(ev core.Event) {
 				a.regDot.setState(state)
 				a.setRegLabel(state) // 顶栏显示状态文字（不再显示本机号码）
 				a.updateTrayIcon()
+				// 托盘菜单按注册状态切换「登录账号 / 退出账号」（REQ-ACC-024）
+				a.updateTrayMenu()
+				// 「退出账号/登录账号」改的是「启用账户」（REQ-ACC-024）：配置页
+				// 的勾选随之同步（只动这一个勾选，表单其它未保存的输入不受影响）。
+				if a.accEnabled != nil {
+					a.accEnabled.SetChecked(a.core.AccountEnabled())
+				}
 				a.updateWindowTitle()
 			}
 		}

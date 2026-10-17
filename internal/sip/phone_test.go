@@ -18,10 +18,11 @@ import (
 
 // testSink 收集 Phone 上报的事件，供断言。
 type testSink struct {
-	mu     sync.Mutex
-	regs   []core.RegisterState
-	events []string
-	calls  []string
+	mu         sync.Mutex
+	regs       []core.RegisterState
+	events     []string
+	remoteCmds []core.RemoteCommand
+	calls      []string
 }
 
 func (s *testSink) OnIncoming(callID, remote, remoteName string, hasVideo bool) {
@@ -59,6 +60,37 @@ func (s *testSink) OnRegisterState(state core.RegisterState, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.regs = append(s.regs, state)
+}
+
+// OnRemoteCommand 记录服务端控制指令（REQ-ACC-025），供 NOTIFY 测试断言。
+func (s *testSink) OnRemoteCommand(cmd core.RemoteCommand) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.remoteCmds = append(s.remoteCmds, cmd)
+}
+
+// waitRemoteCmd 轮询等待满足条件的控制指令（NOTIFY 的副作用是异步的）。
+func (s *testSink) waitRemoteCmd(timeout time.Duration, pred func(core.RemoteCommand) bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		for _, c := range s.remoteCmds {
+			if pred(c) {
+				s.mu.Unlock()
+				return true
+			}
+		}
+		s.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// eventsSnapshot 事件列表快照（失败信息里带上现场）。
+func (s *testSink) eventsSnapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.events...)
 }
 
 func (s *testSink) hasEvent(prefix string) bool {

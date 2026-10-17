@@ -59,7 +59,10 @@ window.SipApp = window.SipApp || {};
     const info = map[st.register.state] || ['未注册', ''];
     reg.textContent = info[0];
     reg.className = 'badge ' + info[1];
-    reg.title = st.register.reason || '';
+    // 点击提示（REQ-ACC-024）：注册原因在前，动作提示在后（徽章可点击）
+    const actHint = st.register.state === 'registered' ? '点击退出账号'
+      : st.register.state === 'registering' ? '点击停止登录' : '点击登录账号';
+    reg.title = (st.register.reason ? st.register.reason + ' · ' : '') + actHint;
 
     const acct = st.register.account || '—';
     $('localAccount').textContent = acct;
@@ -129,6 +132,22 @@ window.SipApp = window.SipApp || {};
           card.scrollIntoView({ block: 'center', behavior: 'smooth' });
         }
       }, 80);
+    });
+    // 顶栏注册状态徽章可点击（REQ-ACC-024，与桌面托盘菜单的
+    // 「登录账号 / 退出账号」一致）：已注册/注册中 → 退出账号（发 expires=0、
+    // 停注册周期、启用账户=false）；未注册/注册失败 → 登录账号（启用并注册）。
+    // 结果经 register.state 事件回显（徽章/托盘/桌面同步）。
+    $('regBadge').style.cursor = 'pointer';
+    $('regBadge').addEventListener('click', function () {
+      if (!store.isConnected()) { return; } // 没连上时不做任何事（SDK 会重连）
+      const st = store.state.register.state;
+      const unregistering = (st === 'registered' || st === 'registering');
+      const p = unregistering ? store.sdk.unregister() : store.sdk.register();
+      p.then(function () {
+        App.ui.toast(unregistering ? '已退出账号' : '正在登录', 'ok');
+      }).catch(function (e) {
+        if (!App.util.isOfflineErr(e)) { App.ui.toast(e.message || '操作失败', 'err'); }
+      });
     });
     store.on('state', refreshTop);
     store.on('state', refreshUpdateBadge);   // 连上时状态快照里就带着更新状态
