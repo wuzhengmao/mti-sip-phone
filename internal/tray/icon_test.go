@@ -70,15 +70,18 @@ func TestTooltipText(t *testing.T) {
 	state.opts = Options{Title: "mti-sip-phone"}
 	state.detail = ""
 	state.registered = false
+	state.signedIn = false
+	state.accountItem = nil
 	state.mu.Unlock()
 	defer func() {
 		state.mu.Lock()
-		state.detail, state.registered = "", false
+		state.detail, state.registered, state.signedIn = "", false, false
+		state.accountItem = nil
 		state.mu.Unlock()
 	}()
 
 	// applyTooltip/applyIcon 在未就绪时只更新状态、不调 systray
-	SetState(true, " - 2999")
+	SetState("registered", " - 2999")
 	applyTooltip()
 	applyIcon()
 
@@ -88,13 +91,32 @@ func TestTooltipText(t *testing.T) {
 		t.Fatalf("提示文案 = %q，期望 %q", got, want)
 	}
 	// 注册状态变化只换图标颜色，文案不变（与桌面口径一致）
-	SetState(false, " - 2999")
+	SetState("unregistered", " - 2999")
 	if got := tooltipText(); got != want {
 		t.Fatalf("未注册时提示文案 = %q，期望 %q", got, want)
 	}
 	// 未配置账号时只有应用名
-	SetState(false, "")
+	SetState("unregistered", "")
 	if got := tooltipText(); got != "mti-sip-phone" {
 		t.Fatalf("未配置账号时提示文案 = %q", got)
+	}
+}
+
+// 菜单项标签与「已注册侧」判定（REQ-ACC-024）：registered 与 registering
+// 都显示「退出账号」（点它=退出），其余显示「登录账号」（点它=登录）。
+func TestAccountLabel(t *testing.T) {
+	cases := []struct {
+		regState string
+		want     string
+	}{
+		{"registered", "退出账号"},
+		{"registering", "退出账号"},
+		{"unregistered", "登录账号"},
+		{"failed", "登录账号"},
+	}
+	for _, tc := range cases {
+		if got := accountLabel(tc.regState == "registered" || tc.regState == "registering"); got != tc.want {
+			t.Fatalf("regState=%q 标签 = %q，期望 %q", tc.regState, got, tc.want)
+		}
 	}
 }

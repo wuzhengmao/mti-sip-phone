@@ -25,16 +25,12 @@ import (
 func runGUI(app *core.App, _ *audio.Manager, cfg *config.Config, _ string, ctx context.Context, _ func() error, _ int) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/", cfg.WS.Port)
 
-	// 托盘图标反映注册状态（REQ-UI-011）：先按核心状态快照置初值，
-	// 之后每次 register.state 事件刷新（口径与桌面版 setRegState 一致：
-	// 只有 registered 变绿，registering 保持原色）。
+	// 托盘图标反映注册状态（REQ-UI-011）+「登录账号/退出账号」菜单项
+	// （REQ-ACC-024）：先按核心状态快照置初值，之后每次 register.state 事件
+	// 刷新。托盘内部用 regState 决定图标颜色（只有 registered 变绿，
+	// registering 保持原色）与菜单项标签（registered/registering → 退出账号）。
 	applyReg := func(state string) {
-		switch state {
-		case string(core.RegRegistered):
-			tray.SetState(true, accountDetail(cfg))
-		case string(core.RegFailed), string(core.RegUnregistered):
-			tray.SetState(false, accountDetail(cfg))
-		}
+		tray.SetState(state, accountDetail(cfg))
 	}
 	snapshot := app.State()
 	applyReg(string(snapshot.Register.State))
@@ -76,6 +72,16 @@ func runGUI(app *core.App, _ *audio.Manager, cfg *config.Config, _ string, ctx c
 				// 托盘点不开浏览器时用户会以为"点了没反应"，日志是唯一线索
 				logx.Logger().Warn("打开浏览器失败", "url", url, "err", err)
 			}
+		},
+		// 「登录账号 / 退出账号」（REQ-ACC-024，与完整版托盘菜单一致）：signedIn
+		// 为当前是否在"已注册侧"，点击取反执行登录/退出。SetRegistered 会落盘 +
+		// 注册/注销（可能等网络响应），放 goroutine 不阻塞 systray 消息循环。
+		OnAccount: func(signedIn bool) {
+			go func() {
+				if err := app.SetRegistered(!signedIn); err != nil {
+					logx.Logger().Warn("登录/退出账号失败", "signedIn", signedIn, "err", err)
+				}
+			}()
 		},
 		OnQuit: func() {
 			// 菜单「退出」：结束消息循环，main 照常走退出收尾
