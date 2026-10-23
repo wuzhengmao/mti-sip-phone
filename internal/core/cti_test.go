@@ -87,6 +87,32 @@ func TestAgentModeBusy(t *testing.T) {
 	}
 }
 
+// TestAgentOnlineStatusSync AGENT_ONLINE 携带 status（协议 §16.1）：话机收到后
+// 与本地状态比对，不一致立即补发一次 MSP_HEARTBEAT，一致则不补发。
+func TestAgentOnlineStatusSync(t *testing.T) {
+	app, tel := newRegTestApp(t)
+
+	// 无通话时本地状态为 free；服务端上报 talking → 不一致，立即补发心跳
+	app.OnMSPEvent("agent_online", map[string]any{"agentMode": "normal", "status": "talking"})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if n, _, _, _, _ := tel.heartbeat(); n >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("AGENT_ONLINE 状态不一致应立即补发一次心跳")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 服务端上报 free 与本地一致 → 不再补发（心跳次数保持不变）
+	app.OnMSPEvent("agent_online", map[string]any{"agentMode": "normal", "status": "free"})
+	time.Sleep(200 * time.Millisecond) // 给可能的多发留出观察窗口
+	if n, _, _, _, _ := tel.heartbeat(); n != 1 {
+		t.Fatalf("状态一致时不应补发心跳，实际心跳 %d 次", n)
+	}
+}
+
 // TestAgentHeartbeat CTI 心跳（MSP_HEARTBEAT，协议 §10）：**注册成功就发**（与
 // 坐席模式无关，agentMode 如实上报），注销即停；首包立即发，之后按配置间隔
 // （默认 20s）；expires = 间隔 × 2.5 = 50s。

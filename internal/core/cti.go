@@ -184,6 +184,15 @@ func (a *App) OnMSPEvent(event string, body map[string]any) {
 			return
 		}
 		a.setAgentOnline(true, name, mode, busy)
+		// 服务端下发 status（其 phoneStatus）：与本地话务状态比对，不一致立即
+		// 补发一次 MSP_HEARTBEAT，让 CTI 侧尽快收敛到话机本地状态（协议 §16.1）。
+		if serverStatus := strOf(body, "status"); serverStatus != "" {
+			if localStatus := a.callStatus(); serverStatus != localStatus {
+				logx.Logger().Info("AGENT_ONLINE 状态与本地不一致，立即补发心跳",
+					"server", serverStatus, "local", localStatus)
+				go a.sendHeartbeatOnce()
+			}
+		}
 		return
 	case "agent_offline":
 		a.setAgentOnline(false, "", AgentModeNone, false)

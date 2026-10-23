@@ -255,6 +255,7 @@ CTI 处理：
 | 失败 | `{"seq":"<字符串>","action":"<动作>","success":false,"code":"<错误码>","message":"<错误信息>"}` |
 
 - `seq` 原样回显请求里的字符串序列号，用于话机把回执与请求对齐；`action` 一并回显便于排查。
+- `code` 为**错误码名称**（与 CTI 内部错误码枚举一致），如 `AGENT_NOT_IN_CALL`（坐席不在通话中）、`AGENT_NOT_IN_CONSULT`（坐席不在咨询中）、`TARGET_AGENT_IS_BUSY`（目标坐席正忙）等；话机按字符串原样展示/记录即可，无需识别具体取值。
 - `data`：仅带返回值的动作携带（目前为 `listAgents`），失败时不携带。示例：
   `{"seq":"7","action":"listAgents","success":true,"data":[{"agent":"2001","displayName":"张三","acd":"110:1","agentMode":"normal","agentStatus":"free"}]}`
 - 失败示例：坐席不在通话中时发起咨询 → `{"seq":"3","action":"consult","success":false,"code":"AGENT_NOT_IN_CALL","message":"坐席不在通话中"}`。
@@ -325,7 +326,7 @@ Content-Length: 109
 
 ### 14. 用途与能力协商
 
-通话过程中，CTI 在咨询、三方、监听、会议等复杂话务的各个状态节点，向**相关内部分机的话机**推送 `MSP_EVENT_*` 事件，话机据此变更通话面板显示，无需再轮询 CTI 接口。
+CTI 在通话生命周期与咨询、三方、监听、会议等话务的各个状态节点，向**相关内部分机的话机**推送 `MSP_EVENT_*` 事件，话机据此把本地通话与 CTI 话务对齐、变更通话面板显示，无需再轮询 CTI 接口。
 
 #### 14.1 能力协商（msp_support）
 
@@ -366,7 +367,7 @@ body 公共字段：
 ### 16. 事件定义
 
 > **名称字段约定**：事件中每个分机号码字段 `xxx` 都伴随一个 `xxxName`（如 `consulter`/`consulterName`）。
-> 例外：`MSP_EVENT_CONSULT_FINISHED`、`MSP_EVENT_CONSULT_FAILED` 不携带名称字段，话机沿用 `MSP_EVENT_CONSULT_STARTED` 中的 `xxxName`。
+> 例外：`MSP_EVENT_CONSULT_FINISHED`、`MSP_EVENT_CONSULT_FAILED`、`MSP_EVENT_CALL_FINISHED`、`MSP_EVENT_CALL_FAILED` 不携带名称字段，话机沿用对应 STARTED/INCOMING 事件中的 `xxxName`。
 > `xxxName` 取该坐席登录时登记的 `displayName`，**仅当该号码是已登录坐席时才有值**；外线号码、网关号码或未登录分机时该字段省略。话机应优先显示 `xxxName`，为空时回退显示号码。
 
 #### 16.1 坐席状态（agent online / offline）
@@ -375,12 +376,13 @@ body 公共字段：
 
 | 事件 | body | 话机动作 |
 |---|---|---|
-| `MSP_EVENT_AGENT_ONLINE` | `{"extension":"2001","displayName":"张三","agentMode":"normal","isBusy":false,"timestamp":N}` | 进入坐席状态，并同步坐席模式与置忙状态 |
+| `MSP_EVENT_AGENT_ONLINE` | `{"extension":"2001","displayName":"张三","agentMode":"normal","isBusy":false,"status":"free","timestamp":N}` | 进入坐席状态，并同步坐席模式、置忙与话机状态 |
 | `MSP_EVENT_AGENT_OFFLINE` | `{"extension":"2001","timestamp":N}` | 立即退出坐席状态 |
 
 - `displayName` 为坐席显示名（登录时指定），可能为空。
 - `agentMode`：`none` 未登录坐席 / `normal` 普通模式 / `dial_out` 外拨模式 / `monitor` 班长模式。
 - `isBusy`：是否置忙（boolean）。
+- `status`：CTI 侧的话机状态（字符串，同 §10 心跳 `status` 取值：`free` / `dialing` / `ringing` / `talking` / `holding`）。话机收到后应与本地状态比对，不一致时立即补发一次 `MSP_HEARTBEAT`（让 CTI 侧尽快收敛到话机本地状态）。
 - 话机收到 `MSP_EVENT_AGENT_ONLINE` 后进入**坐席状态**（通话面板可用），收到 `MSP_EVENT_AGENT_OFFLINE` 后退出。
 - 未进入坐席状态时，其他 `MSP_EVENT_*` 应忽略。
 - **坐席在线状态的保持改由话机心跳维持**（见 §10）：话机周期发送 `MSP_HEARTBEAT`，CTI 据此判定坐席在线状态（超时置 `OFFLINE`）并检测坐席状态一致性。
@@ -392,7 +394,28 @@ body 公共字段：
 - 同一分机可能多次收到 ONLINE，话机按幂等处理。
 - 若 CTI 判定该号码不是本机分机号，会推送 `MSP_UNSUPPORTED`，话机应退出坐席模式并停止发送 `MSP_HEARTBEAT`（见 §10/§13）。
 
-#### 16.2 咨询（consult）
+#### 16.2 通话生命周期（call lifecycle）
+
+CTI 在基础话务的各个状态节点推送通话生命周期事件，话机据此把本地通话与 CTI 话务（`callId`）对齐，并感知 CTI 侧的通话状态（尤其是振铃/接通之外的异常结束原因）。
+
+接收方：通话双方与接听坐席中的内部分机（`msp_support=true`）。
+
+| 事件 | body | 说明 |
+|---|---|---|
+| `MSP_EVENT_CALL_INCOMING` | `{"callId":"...","callerNo":"1381003","calledNo":"01108899","agent":"2001","agentName":"张三","timestamp":N}` | 外线呼入（分配给坐席 `agent`） |
+| `MSP_EVENT_CALL_STARTED` | `{"callId":"...","callerNo":"2001","callerName":"张三","calledNo":"1381003","timestamp":N}` | 外呼发起（拨号） |
+| `MSP_EVENT_CALL_RINGING` | 同 `CALL_STARTED` | 通话振铃 |
+| `MSP_EVENT_CALL_CONNECTED` | `{"callId":"...","callerNo":"2001","callerName":"张三","calledNo":"1381003","agent":"2001","agentName":"张三","timestamp":N}` | 通话接通 |
+| `MSP_EVENT_CALL_FINISHED` | `{"callId":"...","callerNo":"2001","calledNo":"1381003","agent":"2001","timestamp":N}` | 通话结束（已接通后结束） |
+| `MSP_EVENT_CALL_FAILED` | `{"callId":"...","callerNo":"2001","calledNo":"1381003","agent":"2001","reason":"refuse","timestamp":N}` | 通话未接通即失败 |
+
+- `callerNo`/`callerName`/`calledNo`/`calledName` 遵循 §16 名称字段约定；`agent`/`agentName` 为接听坐席（外呼时为空，省略）。呼入时 `callerNo` 为外线主叫、`calledNo` 为服务号码。
+- `MSP_EVENT_CALL_INCOMING` / `MSP_EVENT_CALL_CONNECTED` 携带 `agent`/`agentName`；`MSP_EVENT_CALL_STARTED` / `MSP_EVENT_CALL_RINGING` 不携带 `agent`/`agentName`。
+- `MSP_EVENT_CALL_FINISHED` / `MSP_EVENT_CALL_FAILED` 携带 `agent`（不携带 `agentName` 与其它名称字段），话机沿用 `CALL_STARTED`/`CALL_INCOMING` 中的名称。
+- `MSP_EVENT_CALL_FAILED.reason`：`cancel`（呼叫方中止呼叫）/ `refuse`（被叫方拒绝或未接）/ `takeover`（被代接）。
+- 已接通后结束走 `MSP_EVENT_CALL_FINISHED`；未接通即失败走 `MSP_EVENT_CALL_FAILED`。
+
+#### 16.3 咨询（consult）
 
 接收方（均要求 `msp_support=true`）：
 
@@ -406,16 +429,16 @@ body 公共字段：
 | `MSP_EVENT_CONSULT_STARTED` | `{"callId":"...","consulter":"2001","consulterName":"张三","consultee":"2002","consulteeName":"李四","callerNo":"2001","calledNo":"1381003","timestamp":N}` | 咨询方：新增咨询子通话（`dialing`）；非咨询方：隐藏「咨询/转移/会议」入口 |
 | `MSP_EVENT_CONSULT_RINGING` | 同上 | 咨询子通话状态改为 `ringing` |
 | `MSP_EVENT_CONSULT_CONNECTED` | 同上 | 咨询子通话状态改为 `talking` |
-| `MSP_EVENT_CONSULT_FINISHED` | `{"callId":"...","consulter":"2001","consultee":"2002","callerNo":"2001","calledNo":"1381003","success":true,"timestamp":N}` | 咨询方：移除咨询子通话、恢复双方通话；非咨询方：恢复「咨询/转移/会议」入口 |
-| `MSP_EVENT_CONSULT_FAILED` | `{"callId":"...","consulter":"2001","consultee":"2002","callerNo":"2001","calledNo":"1381003","reason":"refuse / fail","timestamp":N}` | 咨询方：移除咨询子通话、恢复双方通话；非咨询方：恢复「咨询/转移/会议」入口 |
+| `MSP_EVENT_CONSULT_FINISHED` | `{"callId":"...","consulter":"2001","consultee":"2002","callerNo":"2001","calledNo":"1381003","timestamp":N}` | 咨询方：移除咨询子通话、恢复双方通话；非咨询方：恢复「咨询/转移/会议」入口 |
+| `MSP_EVENT_CONSULT_FAILED` | `{"callId":"...","consulter":"2001","consultee":"2002","callerNo":"2001","calledNo":"1381003","reason":"refuse / cancel","timestamp":N}` | 咨询方：移除咨询子通话、恢复双方通话；非咨询方：恢复「咨询/转移/会议」入口 |
 | `MSP_EVENT_CONSULT_TRANSFER` | `{"callId":"<新话务ID>","callerNo":"1381003","calledNo":"2002","calledName":"李四","transferor":"2001","transferorName":"张三","timestamp":N}` | 被咨询方接管通话：清空面板并按新话务（`callerNo` ↔ `calledNo`）重建成 `talking` 状态 |
 
-- `success=true` 表示咨询已接通后结束（挂断/转移/三方前）；`success=false` 表示咨询未接通即结束（如发起方取消）。
-- `MSP_EVENT_CONSULT_FAILED` 用于被咨询方拒接/振铃失败等场景，`reason`：`refuse`（拒接）、`fail`（其它失败）。
+- `MSP_EVENT_CONSULT_FINISHED` 表示咨询已接通后结束（挂断/转移/三方前）；未接通即结束走 `MSP_EVENT_CONSULT_FAILED`。
+- `MSP_EVENT_CONSULT_FAILED` 用于咨询未接通即结束的场景，`reason`：`cancel`（咨询方中止呼叫）/ `refuse`（被咨询方拒绝或未接）。
 - `MSP_EVENT_CONSULT_STARTED` / `MSP_EVENT_CONSULT_FINISHED` / `MSP_EVENT_CONSULT_FAILED` 中的 `callerNo`/`calledNo` 是**原通话**的双方（不是咨询子通话的双方），供收到事件的话机识别当前这通电话的另一方。
-- `MSP_EVENT_CONSULT_TRANSFER` 仅在**咨询转接完成**时发送，且只发给转移后的坐席（被咨询方）：`callId` 是转移后新生成的话务 ID，`transferor` 为发起转移的咨询方。咨询方的 `MSP_EVENT_CONSULT_FINISHED`（`success=true`）仍然会收到。
+- `MSP_EVENT_CONSULT_TRANSFER` 仅在**咨询转接完成**时发送，且只发给转移后的坐席（被咨询方）：`callId` 是转移后新生成的话务 ID，`transferor` 为发起转移的咨询方。咨询方的 `MSP_EVENT_CONSULT_FINISHED` 仍然会收到。
 
-#### 16.3 三方通话（three-way）
+#### 16.4 三方通话（three-way）
 
 接收方：三方通话中的内部分机话机（主被叫、第三方）。
 
@@ -431,7 +454,7 @@ body 公共字段：
 - `MSP_EVENT_THREE_WAY_FINISHED` 的字段与 STARTED 不同：`callerNo`/`calledNo` 是**结束后的剩余两方**，`agent` 为该话务的接听坐席（可能为空、此时省略）。话机据此把当前三方（STARTED 里的 `firstParty`/`secondParty`/`thirdParty`）收敛为两方：**不在 `callerNo`、`calledNo`、`agent` 集合中的那一方即为被移除的一方**。
 - `MSP_EVENT_THREE_WAY_FINISHED` 只发给剩余的各方（被移除的一方不会收到）。
 
-#### 16.4 监听（monitor）
+#### 16.5 监听（monitor）
 
 接收方：仅班长（monitor）的话机（`msp_support=true`）。
 
@@ -443,7 +466,7 @@ body 公共字段：
 
 - `MSP_EVENT_MONITOR_STARTED` 的 `callerNo`/`callerName`/`calledNo`/`calledName` 是**被监听话务**的主被叫（不是班长与被监听坐席），遵循 §16 名称字段约定；`WHISPER`/`INTERCEPT` 不重复携带，话机沿用 STARTED 中的值。
 
-#### 16.5 会议（conference）
+#### 16.6 会议（conference）
 
 接收方：会议发起人（owner）与所有内部分机成员。
 
