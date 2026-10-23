@@ -953,10 +953,10 @@ func (a *App) applyVideoButton() {
 	}
 	if a.videoOn {
 		a.videoBtn.SetIcon(IconVideoOn)
-		a.videoBtn.SetBg(colorHoldBlue)
+		a.videoBtn.SetBg(colorHoldBlue) // 无底色样式：SetBg 即图标颜色
 	} else {
 		a.videoBtn.SetIcon(IconVideoOff)
-		a.videoBtn.SetBg(colorSwitchGray)
+		a.videoBtn.SetBg(colorDangerRed)
 	}
 	a.videoBtn.Refresh()
 }

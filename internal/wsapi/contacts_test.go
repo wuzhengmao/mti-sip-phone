@@ -186,7 +186,7 @@ func TestCallEventCarriesContact(t *testing.T) {
 	conn := dialWS(t, ts.URL)
 	waitEvent(t, conn, "system.state")
 
-	app.OnIncoming("c1", "sip:2999@10.168.4.40", "", false)
+	app.OnIncoming("c1", core.IncomingCall{Remote: "sip:2999@10.168.4.40"})
 	ev := waitEvent(t, conn, "call.incoming")
 	data, _ := ev.Data.(map[string]any)
 	call, _ := data["call"].(map[string]any)
@@ -199,7 +199,7 @@ func TestCallEventCarriesContact(t *testing.T) {
 	}
 
 	// 未命中通信录的通话不带 contact 字段（omitempty）
-	app.OnIncoming("c2", "2901", "", false)
+	app.OnIncoming("c2", core.IncomingCall{Remote: "2901"})
 	ev = waitEvent(t, conn, "call.incoming")
 	data, _ = ev.Data.(map[string]any)
 	call, _ = data["call"].(map[string]any)

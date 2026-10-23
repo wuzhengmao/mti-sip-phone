@@ -78,9 +78,9 @@ func TestHistoryStatusTextNotAnsweredIsNotConnected(t *testing.T) {
 	}
 }
 
-// TestHistoryDirectionResources 方向图标：话机是主体、箭头表方向（↗/↙）、
-// 摄像头标记表视频通话，颜色都表示结果（绿=已接通、红=未接通）。
-func TestHistoryDirectionResources(t *testing.T) {
+// TestHistoryDirectionResource 方向图标：呼入/呼出 × 语音/视频；已接通=白、
+// 未接通=红。
+func TestHistoryDirectionResource(t *testing.T) {
 	mk := func(dir string, video, answered bool) core.CallRecord {
 		r := core.CallRecord{CallID: "c", Direction: dir, HasVideo: video}
 		if answered {
@@ -89,23 +89,21 @@ func TestHistoryDirectionResources(t *testing.T) {
 		return r
 	}
 	cases := []struct {
-		rec          core.CallRecord
-		phone, arrow fyne.Resource
+		rec  core.CallRecord
+		want fyne.Resource
 	}{
-		{mk("incoming", false, true), IconPhoneGreen, IconArrowInGreen},
-		{mk("incoming", false, false), IconPhoneRed, IconArrowInRed},
-		{mk("outgoing", false, true), IconPhoneGreen, IconArrowOutGreen},
-		{mk("outgoing", false, false), IconPhoneRed, IconArrowOutRed},
-		// 视频通话在方向图标上不体现（第一行号码右边另有摄像头标记）
-		{mk("incoming", true, true), IconPhoneGreen, IconArrowInGreen},
-		{mk("incoming", true, false), IconPhoneRed, IconArrowInRed},
-		{mk("outgoing", true, true), IconPhoneGreen, IconArrowOutGreen},
-		{mk("outgoing", true, false), IconPhoneRed, IconArrowOutRed},
+		{mk("incoming", false, true), IconCallIn},
+		{mk("incoming", false, false), IconCallInRed},
+		{mk("outgoing", false, true), IconCallOut},
+		{mk("outgoing", false, false), IconCallOutRed},
+		{mk("incoming", true, true), IconVideoIn},
+		{mk("incoming", true, false), IconVideoInRed},
+		{mk("outgoing", true, true), IconVideoOut},
+		{mk("outgoing", true, false), IconVideoOutRed},
 	}
 	for i, c := range cases {
-		phone, arrow := historyDirectionResources(c.rec)
-		if phone != c.phone || arrow != c.arrow {
-			t.Fatalf("第 %d 种组合图标不对：%v/%v", i, phone.Name(), arrow.Name())
+		if got := historyDirectionResource(c.rec); got != c.want {
+			t.Fatalf("第 %d 种组合图标不对：%v，期望 %v", i, got.Name(), c.want.Name())
 		}
 	}
 }
@@ -164,6 +162,22 @@ func TestHistoryTimeText(t *testing.T) {
 	}
 }
 
+// TestHistoryDisplayPrefersDisplayName 通话记录展示名称：座席显示名
+// （display_name，座席列表直接呼出时记录）优先于 SIP 显示名；没有通信录时
+// 用「名称（号码）」格式（有通信录时号码在前，见 historyDisplay）。
+func TestHistoryDisplayPrefersDisplayName(t *testing.T) {
+	a := &App{}
+	r := core.CallRecord{Remote: "2901", RemoteName: "SIP名", DisplayName: "测试1"}
+	if got, _, _ := a.historyDisplay(r); got != "测试1（2901）" {
+		t.Fatalf("应优先显示座席显示名，实际 %q", got)
+	}
+	r.DisplayName = ""
+	if got, _, _ := a.historyDisplay(r); got != "SIP名（2901）" {
+		t.Fatalf("没有座席显示名时应回退 SIP 显示名，实际 %q", got)
+	}
+}
+
+// TestHistoryWhoText 对端展示名：「显示名（号码）」，只有其一或相同时用其一。
 func TestHistoryWhoText(t *testing.T) {
 	r := core.CallRecord{Remote: "1002", RemoteName: "张三"}
 	if got := historyWhoText(r); got != "张三（1002）" {

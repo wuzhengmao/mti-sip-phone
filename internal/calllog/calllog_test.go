@@ -1,6 +1,7 @@
 package calllog
 
 import (
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -305,5 +306,60 @@ func TestTruncateUntrustedText(t *testing.T) {
 	rec := queryAll(t, s, "").Records[0]
 	if len([]rune(rec.Remote)) != maxTextLen {
 		t.Fatalf("超长号码应截断到 %d 个字符，得到 %d", maxTextLen, len([]rune(rec.Remote)))
+	}
+}
+
+// TestDisplayNameRoundTrip 座席显示名落库并原样查回（REQ-CALL-007 补充）：
+// 通话记录展示名称时优先用它，其次才回退通信录。
+func TestDisplayNameRoundTrip(t *testing.T) {
+	s, _ := openTest(t)
+	s.Start(core.CallRecord{CallID: "c1", Direction: "outgoing", Remote: "2901",
+		DisplayName: "测试1", StartedAt: time.Now()})
+	rec := queryAll(t, s, "").Records[0]
+	if rec.DisplayName != "测试1" {
+		t.Fatalf("display_name 应原样查回，得到 %q", rec.DisplayName)
+	}
+}
+
+// TestLegacySchemaGetsDisplayNameColumn 旧库（user_version=1，没有 display_name）
+// 打开时自动补列：旧记录 displayName 为空，新写入可正常保存。
+func TestLegacySchemaGetsDisplayNameColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "call-log.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("建旧库失败: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE call_log (
+		call_id TEXT PRIMARY KEY, direction TEXT NOT NULL, remote TEXT NOT NULL,
+		remote_name TEXT NOT NULL DEFAULT '', started_at INTEGER NOT NULL,
+		answered_at INTEGER NOT NULL DEFAULT 0, ended_at INTEGER NOT NULL DEFAULT 0,
+		has_video INTEGER NOT NULL DEFAULT 0, missed INTEGER NOT NULL DEFAULT 0,
+		reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+		INSERT INTO call_log (call_id, direction, remote, started_at, created_at)
+		VALUES ('old', 'outgoing', '1001', 1, 1);`); err != nil {
+		db.Close()
+		t.Fatalf("建旧表失败: %v", err)
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("打开旧库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if rec := queryAll(t, s, "").Records[0]; rec.CallID != "old" || rec.DisplayName != "" {
+		t.Fatalf("旧记录应保留且 displayName 为空，得到 %+v", rec)
+	}
+	s.Start(core.CallRecord{CallID: "new", Direction: "outgoing", Remote: "2002",
+		DisplayName: "李四", StartedAt: time.Now()})
+	page := queryAll(t, s, "")
+	var got string
+	for _, r := range page.Records {
+		if r.CallID == "new" {
+			got = r.DisplayName
+		}
+	}
+	if got != "李四" {
+		t.Fatalf("补列后新记录应能保存 display_name，得到 %q", got)
 	}
 }

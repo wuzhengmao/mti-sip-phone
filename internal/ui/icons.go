@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -98,11 +97,13 @@ var (
 	// IconVideoOff 摄像头关：红色斜线（浅灰底上清晰可见）。
 	IconVideoOff = fyne.NewStaticResource("video-off.svg", []byte(videoIconSVG("#e53935", true)))
 	// IconVideoCall 主窗体视频呼叫按钮（绿底黑图标，与呼叫按钮同色系）。
-	IconVideoCall = fyne.NewStaticResource("video-call.svg", []byte(videoIconSVG("#1a1a1a", false)))
+	// IconVideoCallWhite 白色视频呼叫图标：主窗体视频呼叫按钮（蓝底白图标）。
+	IconVideoCallWhite = newIconPNG("video-out")
+	IconVideoCall      = fyne.NewStaticResource("video-call.svg", []byte(videoIconSVG("#1a1a1a", false)))
 	// IconVideoGreen 视频窗口图标（绿色摄像头；不继承应用的红色话机图标）。
 	IconVideoGreen = fyne.NewStaticResource("video-green.svg", []byte(videoIconSVG("#43a047", false)))
 	// IconVideoAnswer 来电「视频接听」按钮（绿底白图标）。
-	IconVideoAnswer = fyne.NewStaticResource("video-answer.svg", []byte(videoIconSVG("#ffffff", false)))
+	IconVideoAnswer = newIconPNG("video-in")
 
 	// IconRotate 画面旋转（视频窗口工具栏：远端画面 / 本地回显各一个按钮）。
 	IconRotate = fyne.NewStaticResource("rotate.svg", []byte(rotateIconSVG("#ffffff")))
@@ -115,22 +116,27 @@ var (
 	IconLockClosed = fyne.NewStaticResource("lock.svg", []byte(lockIconSVG("#ffffff")))
 	IconLockOpen   = fyne.NewStaticResource("unlock.svg", []byte(unlockIconSVG("#ffffff")))
 
-	// IconPhoneRed 未注册状态托盘图标（红色话机）。
-	IconPhoneRed = fyne.NewStaticResource("phone-red.svg", []byte(appicon.PhoneSVG(appicon.ColorRed)))
-	// IconPhoneGreen 已注册状态托盘图标（绿色话机）。
-	IconPhoneGreen = fyne.NewStaticResource("phone-green.svg", []byte(appicon.PhoneSVG(appicon.ColorGreen)))
+	// IconPhoneRed 未注册 / 注册中托盘图标（红色话机，PNG：iconfont 原始渲染）。
+	IconPhoneRed = fyne.NewStaticResource("phone-red.png", appicon.PhoneRedPNG())
+	// IconPhoneGreen 已注册且坐席空闲（绿色话机，PNG：iconfont 原始渲染）。
+	IconPhoneGreen = fyne.NewStaticResource("phone-green.png", appicon.PhoneGreenPNG())
+	// IconPhoneYellow 已注册且坐席置忙（黄色话机，由绿图按 alpha 现着色）。
+	IconPhoneYellow = fyne.NewStaticResource("phone-yellow.png", appicon.PhoneYellowPNG())
 	// IconPhoneBlack 黑色话机（接听按钮图标，前景色黑色）。
 	IconPhoneBlack = fyne.NewStaticResource("phone-black.svg", []byte(appicon.PhoneSVG("#1a1a1a")))
-	// IconPhoneWhite 白色话机（接听按钮：绿底白图标，REQ-UI-023 修订）。
-	IconPhoneWhite = fyne.NewStaticResource("phone-white.svg", []byte(appicon.PhoneSVG("#ffffff")))
+	// IconPhoneWhite 振铃「接听」按钮（电话呼入，白色）。
+	IconPhoneWhite = newIconPNG("phone-in")
+	// IconPhoneCallWhite 主窗体「呼叫」按钮、通信录/通话记录行的呼叫按钮（电话呼出，白色）。
+	IconPhoneCallWhite = newIconPNG("phone-out")
 	// IconMicOn 麦克风开：白色前景（配蓝色底 HighImportance）。
 	IconMicOn = fyne.NewStaticResource("mic-on.svg", []byte(micIconSVG("#ffffff", false)))
-	// IconMicOff 麦克风关：红色斜线（浅灰底上清晰可见）。
-	IconMicOff = fyne.NewStaticResource("mic-off.svg", []byte(micIconSVG("#e53935", true)))
+	// IconMicOff 麦克风禁用：**同一字形 + 斜杠**（位置与开状态完全一致，
+	// 颜色由无底色按钮按强调色（红）着色）。
+	IconMicOff = withSlash(IconMicOn)
 	// IconSpeakerOn 扬声器开：白色前景（配蓝色底 HighImportance）。
 	IconSpeakerOn = fyne.NewStaticResource("speaker-on.svg", []byte(speakerIconSVG("#ffffff", false)))
-	// IconSpeakerOff 扬声器关：红色（浅灰底上清晰可见）。
-	IconSpeakerOff = fyne.NewStaticResource("speaker-off.svg", []byte(speakerIconSVG("#e53935", true)))
+	// IconSpeakerOff 扬声器禁用：同一字形 + 斜杠。
+	IconSpeakerOff = withSlash(IconSpeakerOn)
 	// IconPlayWhite 白色播放三角（呼叫按钮：绿底白图标）。
 	IconPlayWhite = fyne.NewStaticResource("play-white.svg", []byte(mediaIconSVG("#ffffff", "play")))
 	// IconPlayBlack 黑色播放三角（主窗体呼叫按钮：与按钮文字颜色一致，REQ-UI-024 修订）。
@@ -146,21 +152,91 @@ var (
 	// 两个图元分开出图、由 ui_history.go 叠放合成（不能用 SVG 的 <g transform>）：
 	// 话机为主体，箭头贴右上角（↗ 呼出 / ↙ 呼入）。颜色表示结果：
 	// 绿=已接通、红=未接通。
-	// IconVideoMark 视频通话标记（第一行号码右边的小摄像头）：这里给的填充色
-	// 会被 theme.NewColoredResource 换成主题前景色，与行内文字同色。
-	IconVideoMark = fyne.NewStaticResource("video-mark.svg", []byte(videoIconSVG("#1a1a1a", false)))
 	// IconStar 常用联系人标记（金色五角星）：通信录行、通话记录行与通话面板
 	// 上跟在名称后面（REQ-UI-032/037）。
 	IconStar = fyne.NewStaticResource("star.svg", []byte(starIconSVG("#fbc02d")))
-	// IconContacts 通信录入口按钮（顶栏，颜色同其它主题图标）。
-	IconContacts = fyne.NewStaticResource("contacts.svg", []byte(contactsIconSVG("#b3b3b3")))
+	// IconContacts 通信录入口按钮；IconHistory 通话记录入口按钮。
+	// 加留白让图形与 Fyne 内置的设置齿轮视觉大小一致（PNG 图形铺满画布显大）。
+	IconContacts = newIconPNGPadded("contacts", 0.8)
+	IconHistory  = newIconPNGPadded("history", 0.8)
 
-	// IconArrowOutGreen/Red 呼出箭头（↗）；IconArrowInGreen/Red 呼入箭头（↙）。
-	IconArrowOutGreen = fyne.NewStaticResource("arrow-out-green.svg", []byte(arrowIconSVG("#43a047", false)))
-	IconArrowOutRed   = fyne.NewStaticResource("arrow-out-red.svg", []byte(arrowIconSVG("#e53935", false)))
-	IconArrowInGreen  = fyne.NewStaticResource("arrow-in-green.svg", []byte(arrowIconSVG("#43a047", true)))
-	IconArrowInRed    = fyne.NewStaticResource("arrow-in-red.svg", []byte(arrowIconSVG("#e53935", true)))
+	// IconCallIn/Out、IconVideoIn/Out 通话记录方向图标（白色 PNG）：呼入/呼出 ×
+	// 语音/视频，方向由图形本身表达。已接通 = 白，未接通 = 红（Red 后缀版本）。
+	IconCallIn      = newIconPNG("phone-in")
+	IconCallOut     = newIconPNG("phone-out")
+	IconVideoIn     = newIconPNG("video-in")
+	IconVideoOut    = newIconPNG("video-out")
+	IconCallInRed   = newIconPNGTinted("phone-in", colorDangerRed)
+	IconCallOutRed  = newIconPNGTinted("phone-out", colorDangerRed)
+	IconVideoInRed  = newIconPNGTinted("video-in", colorDangerRed)
+	IconVideoOutRed = newIconPNGTinted("video-out", colorDangerRed)
+
+	// IconHangup 强制挂断 / 移除成员：**圆圈里一个减号**（程序生成的白色图标，
+	// 无底色按钮按强调色着色）。原挂断话机图标不再使用（用户要求换图形）。
+	IconHangup = newCircleMinusIcon()
+
+	// ---- CTI 话务按钮图标（REQ-ACC-026，iconfont 导出的白色 PNG）----
+	IconCTIConsult         = newIconPNG("consult")
+	IconCTIConsultTransfer = newIconPNG("consult-transfer")
+	// 三方图标原图有效区域偏小（宽扁），裁剪后按画布铺满，视觉大小向其它图标看齐
+	IconCTIThreeWay        = newIconPNGFit("threeway", 0.02)
+	IconCTITransfer        = newIconPNG("transfer")
+	IconCTIConference      = newIconPNG("conference")
+	IconCTIVideoConference = newIconPNG("conference-video")
+	IconCTIMonitor         = newIconPNG("monitor")
+	// IconCTITakeover 代接（icons/代接.png，用户提供）：在线座席行上代接振铃中的坐席。
+	IconCTITakeover  = newIconPNG("takeover")
+	IconCTIWhisper   = newIconPNG("whisper")
+	IconCTIIntercept = newIconPNG("intercept")
+	IconCTIIntervene = newIconPNG("intervene")
+	IconCTIAddMember = newIconPNG("add-member")
+	// IconHost 会议 owner 标记（蓝色主持人图标）。
+	IconHost = newIconPNG("host")
+	// IconCTIExitConference 退出会议（也用作「结束咨询」——两者都是"离开当前话务"）。
+	IconCTIExitConference = newIconPNG("exit-conference")
+	// IconCTIEndConference 结束会议（owner）。
+	IconCTIEndConference = newIconPNG("end-conference")
+
+	// 会控开关（白图标，可配任意底色）：静音 / 禁听 / 禁视频。
+	// 未生效时用**不带斜杠**的普通图标（灰），生效时换成带斜杠的版本（红）。
+	IconCTIMic        = fyne.NewStaticResource("cti-mic.svg", []byte(micIconSVG("#ffffff", false)))
+	IconCTISpeaker    = fyne.NewStaticResource("cti-speaker.svg", []byte(speakerIconSVG("#ffffff", false)))
+	IconCTIVideo      = fyne.NewStaticResource("cti-video.svg", []byte(videoIconSVG("#ffffff", false)))
+	IconCTIMicOff     = fyne.NewStaticResource("cti-mic-off.svg", []byte(micIconSVG("#ffffff", true)))
+	IconCTISpeakerOff = fyne.NewStaticResource("cti-speaker-off.svg", []byte(speakerIconSVG("#ffffff", true)))
+	IconCTIVideoOff   = fyne.NewStaticResource("cti-video-off.svg", []byte(videoIconSVG("#ffffff", true)))
+
+	// IconAgentSeat 坐席模式按钮（icons/座席.png，用户提供）：白图，按状态
+	// 染成绿色（空闲）或黄色（置忙）；非坐席模式（agentMode=none）时隐藏。
+	IconAgentSeat = newIconPNG("agent-seat")
+	// IconAgentRoster 在线座席入口（icons/座位表.png，用户提供）：坐席模式下
+	// 显示在坐席状态按钮右侧，点击打开在线座席页。
+	IconAgentRoster = newIconPNG("agent-roster")
+	// IconArrowRight 右箭头（监听面板表示"主叫 → 被叫"，用矢量图标不用字符）。
+	IconArrowRight = fyne.NewStaticResource("arrow-right.svg", []byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<path fill="#ffffff" d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11H4z"/>
+</svg>`))
+	// IconAutoAnswerOn 自动接听按钮（icons/自动接听开启.png，用户提供）：
+	// 顶栏图形按钮，开启时染绿、关闭时置灰，悬停给文字提示。
+	IconAutoAnswerOn = newIconPNG("auto-answer")
 )
+
+// withSlash 在白色图标上叠一条"禁用斜杠"：取同一个字形（位置不跳），把斜杠
+// path 追加进 SVG——我们的图标都是简单的 `<svg><path fill="#…" d="…"/></svg>`，
+// 染色时 fill 会被一起替换。
+func withSlash(res fyne.Resource) fyne.Resource {
+	if res == nil {
+		return res
+	}
+	content := string(res.Content())
+	i := strings.LastIndex(content, "</svg>")
+	if i < 0 {
+		return res
+	}
+	const slash = `<path fill="#ffffff" d="M4.2 1.8 L6 0 L22.2 16.2 L20.4 18 Z"/>`
+	out := content[:i] + slash + content[i:]
+	return fyne.NewStaticResource("slash-"+res.Name(), []byte(out))
+}
 
 // starIconSVG 常用联系人标记（REQ-UI-032）：实心五角星。
 //
@@ -171,57 +247,6 @@ func starIconSVG(color string) string {
 	path := `M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z`
 	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
 <path fill="` + color + `" d="` + path + `"/>
-</svg>`
-}
-
-// contactsIconSVG 通信录图标（按用户给的参考图：一本通讯录 + 右侧索引格 + 中间听筒）。
-//
-// **线稿风格要靠"细长矩形拼描边"**：Fyne 的 ThemedResource 只把 **fill** 换成
-// 主题色（internal/svg 的 replaceFillColor 只处理填充，不认 stroke），用
-// stroke 画的线不会跟着主题变色。听筒是 Material phone 路径按 0.5 缩放、平移到
-// 封面中央的（坐标由脚本换算，别手改）。
-// contactsHandsetPath 听筒路径：Material phone 按 0.5 缩放 + 平移到封面中央
-// （坐标由脚本换算，手改容易错位）。
-const contactsHandsetPath = "M 7.46 11.395 A 7.525 7.525 0 0 0 10.755 14.69 L 11.855 13.59 A 0.5 0.5 0 0 1 12.365 13.47 C 12.925 13.655 13.53 13.755 14.15 13.755 A 0.5 0.5 0 0 1 14.65 14.255 L 14.65 16 A 0.5 0.5 0 0 1 14.15 16.5 A 8.5 8.5 0 0 1 5.65 8 A 0.5 0.5 0 0 1 6.15 7.5 L 7.9 7.5 A 0.5 0.5 0 0 1 8.4 8 C 8.4 8.62 8.5 9.225 8.685 9.785 A 0.5 0.5 0 0 1 8.565 10.295 L 7.46 11.395 Z"
-
-func contactsIconSVG(color string) string {
-	f := func(x, y, w, h, r float32) string {
-		return fmt.Sprintf(`<rect x="%g" y="%g" width="%g" height="%g" rx="%g" fill="%s"/>`,
-			x, y, w, h, r, color)
-	}
-	var b strings.Builder
-	b.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">` + "\n")
-	// 封面：左侧书脊 + 上/下/右三条边框
-	b.WriteString(f(2.2, 2.5, 2.4, 19, 1.2) + "\n")
-	b.WriteString(f(2.2, 2.5, 15.4, 2.2, 1.1) + "\n")
-	b.WriteString(f(2.2, 19.3, 15.4, 2.2, 1.1) + "\n")
-	b.WriteString(f(15.4, 2.5, 2.2, 19, 1.1) + "\n")
-	// 右侧 4 个索引格
-	for _, y := range []float32{5.2, 9.4, 13.6, 17.8} {
-		b.WriteString(f(18, y, 3.8, 2.2, 0.7) + "\n")
-	}
-	// 中间听筒
-	b.WriteString(`<path fill="` + color + `" d="` + contactsHandsetPath + `"/>` + "\n")
-	b.WriteString(`</svg>`)
-	return b.String()
-}
-
-// arrowIconSVG 通话记录行的方向箭头（REQ-UI-031）：↗ 呼出 / ↙ 呼入。
-//
-// 形状参考常见的"去电/来电"图标：**粗箭头**（三角箭头 + 粗杆），
-// 不是 Material 的细线箭头。杆与三角头在斜边上正好接合（杆的右上角落在
-// 三角的斜边上），合成一个整体。
-//
-// 注意：**不要把基图形与箭头用 SVG 的 <g transform> 拼在一个文件里**——
-// Fyne 的 SVG 渲染器不认这个变换，结果是整张图空白（实测）。两个图元在
-// ui_history.go 里用两个 canvas.Image 叠放合成。
-func arrowIconSVG(colour string, incoming bool) string {
-	path := `M22 2 L12 2 L22 12 Z M19 9 L9 19 L6 16 L16 6 Z` // ↗ 呼出（三角头 10×10）
-	if incoming {
-		path = `M2 22 L12 22 L2 12 Z M5 15 L15 5 L18 8 L8 18 Z` // ↙ 呼入（180° 旋转）
-	}
-	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
-<path fill="` + colour + `" d="` + path + `"/>
 </svg>`
 }
 

@@ -95,7 +95,7 @@ var virtualNameTokens = []string{
 // virtualMACPrefixes 常见虚拟化平台的 MAC 厂商前缀（网卡名常常认不出来，
 // MAC 是更硬的证据）。全是 OUI/前缀，**不做前缀之外的猜测**。
 var virtualMACPrefixes = []string{
-	"00:15:5d", // Hyper-V / WSL
+	"00:15:5d",                                     // Hyper-V / WSL
 	"00:50:56", "00:0c:29", "00:05:69", "00:1c:14", // VMware
 	"08:00:27", "0a:00:27", // VirtualBox（含 Host-Only）
 	"02:42",    // Docker

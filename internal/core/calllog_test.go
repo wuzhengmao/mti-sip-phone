@@ -65,6 +65,8 @@ func (f *fakeTel) Dial(context.Context, string) (string, error) {
 	return f.id, nil
 }
 
+func (f *fakeTel) SendHeartbeat(string, bool, string, string, time.Duration) error { return nil }
+
 func (f *fakeTel) DialVideo(context.Context, string) (string, error) {
 	if f.videoErr != nil {
 		return "", f.videoErr
@@ -84,7 +86,7 @@ func newCallLogTestApp(tel Telephony) (*App, *fakeCallLog) {
 func TestCallLogIncomingLifecycle(t *testing.T) {
 	app, log := newCallLogTestApp(nil)
 
-	app.OnIncoming("c1", "1002", "张三", true)
+	app.OnIncoming("c1", IncomingCall{Remote: "1002", RemoteName: "张三", HasVideo: true})
 	app.OnEstablished("c1")
 	app.OnTerminated("c1", "remote_hangup")
 
@@ -139,7 +141,7 @@ func TestCallLogMissedIncoming(t *testing.T) {
 	}
 	for _, c := range cases {
 		app, log := newCallLogTestApp(nil)
-		app.OnIncoming("c1", "1002", "", false)
+		app.OnIncoming("c1", IncomingCall{Remote: "1002", RemoteName: "", HasVideo: false})
 		app.OnTerminated("c1", c.reason)
 
 		if len(log.finishes) != 1 {
@@ -213,6 +215,58 @@ func TestCallLogFinishReportedTwice(t *testing.T) {
 	}
 }
 
+// TestCallLogSkipSelfCaller 主叫就是本机分机号的来电不记通话记录
+// （平台监听/会议会以本机号码回呼话机），其它号码照常记；号码按规范化比较。
+func TestCallLogSkipSelfCaller(t *testing.T) {
+	cfg := config.Default()
+	cfg.Account.Account = "2999"
+	app := New(cfg, nil, NewBus())
+	log := &fakeCallLog{}
+	app.SetCallLog(log)
+
+	app.OnIncoming("c1", IncomingCall{Remote: "2999"})
+	app.OnEstablished("c1")
+	app.OnTerminated("c1", "local_hangup")
+	if len(log.starts) != 0 {
+		t.Fatalf("主叫为本机的通话不应记开始记录，得到 %d 条", len(log.starts))
+	}
+
+	// 带 URI 前缀/参数的主叫号码同样按规范化命中
+	app.OnIncoming("c2", IncomingCall{Remote: "sip:2999@10.168.4.40"})
+	if len(log.starts) != 0 {
+		t.Fatalf("规范化后为本机的号码也不应记录，得到 %d 条", len(log.starts))
+	}
+
+	// 其它号码照常记录
+	app.OnIncoming("c3", IncomingCall{Remote: "2901"})
+	if len(log.starts) != 1 || log.starts[0].CallID != "c3" {
+		t.Fatalf("其它号码的来电应正常记录，得到 %+v", log.starts)
+	}
+}
+
+// TestDialNamedPeerName 座席列表直接呼出：带上的显示名写进 Call.PeerName
+// （界面展示时 PeerName 优先于通信录名称），Dial 不带名字时保持空。
+func TestDialNamedPeerName(t *testing.T) {
+	app, _ := newCallLogTestApp(&fakeTel{id: "c1"})
+	id, err := app.DialNamed(context.Background(), "2901", "测试1")
+	if err != nil {
+		t.Fatalf("DialNamed 失败: %v", err)
+	}
+	c := app.getCall(id)
+	if c == nil || c.Remote != "2901" || c.PeerName != "测试1" {
+		t.Fatalf("带名称呼出应写 PeerName，实际 %+v", c)
+	}
+
+	app2, _ := newCallLogTestApp(&fakeTel{id: "c2"})
+	id2, err := app2.Dial(context.Background(), "2901")
+	if err != nil {
+		t.Fatalf("Dial 失败: %v", err)
+	}
+	if c2 := app2.getCall(id2); c2 == nil || c2.PeerName != "" {
+		t.Fatalf("普通拨号不应带 PeerName，实际 %+v", c2)
+	}
+}
+
 // TestCallLogUnavailable 未接入存储（数据库打开失败）时，界面侧查询返回
 // 明确错误，采集侧静默跳过。
 func TestCallLogUnavailable(t *testing.T) {
@@ -227,7 +281,7 @@ func TestCallLogUnavailable(t *testing.T) {
 		t.Fatalf("清空应返回 ErrCallLogUnavailable，得到 %v", err)
 	}
 	// 未接入时采集不得 panic
-	app.OnIncoming("c1", "1002", "", false)
+	app.OnIncoming("c1", IncomingCall{Remote: "1002", RemoteName: "", HasVideo: false})
 	app.OnEstablished("c1")
 	app.OnTerminated("c1", "remote_hangup")
 }

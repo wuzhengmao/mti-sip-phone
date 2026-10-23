@@ -126,7 +126,7 @@ await sdk.connect();
 
 | 方法 | 说明 |
 | --- | --- |
-| `dial(target, {video})` | 拨号。`target` 为号码或 SIP URI；`video: true`（或 `dialVideo(target)`）发起**视频呼叫**。返回 `{callId}` |
+| `dial(target, {video, name})` | 拨号。`target` 为号码或 SIP URI；`video: true`（或 `dialVideo(target)`）发起**视频呼叫**；`name` = 对端显示名（如在线座席列表的 `displayName`，**优先于通信录名称**，为空照旧）。返回 `{callId}` |
 | `answer(callId, {video})` | 接听。`video: true`（或 `answerVideo(callId)`）= **视频接听**（开摄像头双向视频）；普通接听 = 不接受视频（对端也不再发） |
 | `hangup(callId)` | 挂断（振铃中呼出 = 取消；振铃中呼入 = 拒接） |
 | `reject(callId, code)` | 拒接，`code` 为 SIP 状态码，默认 `486` |
@@ -200,7 +200,8 @@ await sdk.connect();
 | `deleteCallLog(callIds)` | 删除若干条 |
 | `clearCallLog()` | 清空（不可撤销） |
 
-记录字段：`callId/direction/remote/remoteName/startedAt/answeredAt/endedAt/hasVideo/missed/reason`，
+记录字段：`callId/direction/remote/remoteName/displayName/startedAt/answeredAt/endedAt/hasVideo/missed/reason`，
+`displayName` 是**座席显示名**（座席列表直接呼出时记录，展示时优先于通信录名称）。
 命中通信录时另有 `contact: {name, note, starred}`（软电话侧按号码规范化解析，与桌面通话记录页同一口径）。
 **时间戳是毫秒整数，`0` 表示未发生**（`answeredAt: 0` = 未接通，`endedAt: 0` = 进行中）。
 
@@ -242,6 +243,41 @@ await sdk.checkUpdateNow();   // 立即检查站点（不用等下一个周期�
 
 ⚠️ 两点务必写进你的 UI：**必须由用户点击**（不要自动调用）；`applyUpdate()` 成功后
 进程会替换自身并重启，**页面连接随即断开**。
+
+### 5.9 CTI 坐席与话务（REQ-ACC-026 / REQ-ACC-034 / REQ-ACC-035）
+
+坐席相关能力只在**坐席模式**（CTI 推过 `MSP_EVENT_AGENT_ONLINE`）下可用；非坐席模式调用
+会被拒绝（code `cti_not_agent`）。指令走 out-of-dialog SIP NOTIFY（`Event: MSP_ACTION`），
+**SDK 方法都会等平台回执（MSP_RESULT）后才 resolve**，不必自己维护 seq 与超时。
+
+```js
+const { agents } = await sdk.listAgents();   // 在线座席
+await sdk.setAgentBusy(true);                // 置忙（false = 置闲；同 setIdle()/setBusy()）
+await sdk.takeover('2002');                  // 代接 2002 的振铃来电
+await sdk.monitor('2002');                   // 班长监听
+await sdk.consult('2002');                   // 咨询（转移/三方见下表）
+```
+
+| 方法 | 说明 |
+| --- | --- |
+| `listAgents()` | 在线座席：`{agents:[{agent,displayName,acd,agentMode,agentStatus}], count}`（按座席号排序） |
+| `setAgentBusy(busy)` / `setBusy()` / `setIdle()` | 坐席置忙/置闲；生效状态经 `cti.agent` 事件回显 |
+| `setConferenceMemberMuted(member, muted)` / `setConferenceMemberDeafened(member, deafened)` / `setConferenceMemberVideoMuted(member, muted)` | 会议成员会控（owner，参数 `member` 为成员号码） |
+| `ctiAction(action, arg?)` | 通用入口：`arg` 为字符串 = `target`、数组 = `members`、对象 = 直接并入参数（如 `{member: "2002"}`） |
+| `consult(target)` / `consultThreeWay(target)` | 咨询 / 咨询转三方 |
+| `transfer(target)` / `consultTransfer(target)` | 直接转移 / 咨询转移 |
+| `monitor(target)` / `takeover(target)` | 监听 / 代接 |
+| `exitThreeWay(target)` | 三方通话里强制挂断某一方（仅 owner） |
+| `addConferenceMembers(members)` / `removeConferenceMembers(members)` | 加/减会议成员 |
+| `finishConsult()` / `finishConference()` | 结束咨询 / 结束会议（owner） |
+| `whisper()` / `intervene()` / `intercept()` | 监听耳语 / 插话（强插）/ 强拦 |
+
+失败错误码：`cti_failed`（平台拒绝，`message` 里带平台错误码）、`cti_busy`（已有指令在途，
+同一时间只允许一条）、`cti_timeout`、`cti_not_agent`。
+
+坐席状态见 `system.state` 与 `cti.agent` 事件：`agentOnline` / `agentDisplayName` /
+`agentMode`（`none`/`normal`/`dial_out`/`monitor`）/ `agentBusy`。座席状态颜色约定与桌面一致：
+`free` 绿、`dialing`/`ringing`/`talking` 黄、其余（`busy`/`leave`/`not_ready`/`miss_phone`/`offline`…）红。
 
 ## 6. 视频订阅（重点）
 
@@ -299,10 +335,15 @@ sub.transforms();
 | `calllog.changed` | 通话记录被删除/清空 | `{action, deleted}`（新增记录仍由 `call.terminated`/`call.failed` 驱动） |
 | `system.config` | 配置被改写 | `{section, values}`，`section`: `account`/`audio`/`video`/`log`/`ws`/`autoStart` |
 | `audio.ready` | 音频后端后台初始化完成 | `{ready}`；据此刷新设备下拉（无 UI 版没有桌面界面，这是唯一信号） |
+| `cti.agent` | 坐席模式/置忙变化 | `{online, displayName, agentMode, isBusy}`；`agentMode=none` 时 `online=false` |
+| `cti.state` | 通话的复杂话务状态变化（咨询/三方/监听/会议） | `{callId, call}`；`call.cti` 是完整 `CTIState`（`talkState` 等） |
+| `cti.result` | CTI 指令结果（MSP_RESULT） | `{seq, success, code, message, action, data?}`；用 `cti.action` 时通常不需要它 |
 | `system.update` | 自动更新状态变化 | `phase`: `idle`/`available`/`downloading`/`ready`/`failed`；含 `progress`、`error` 等 |
 
-通话对象（`call`）字段：`id`、`direction`、`remote`、`remoteName`、`state`、`muted`、
-`micMuted`、`speakerMuted`、`micGain`、`speakerVolume`、`hasVideo`、`video{...}`、`contact?`。
+通话对象（`call`）字段：`id`、`direction`、`remote`、`remoteName`、`peerName?`（INVITE 的
+Call-Info display-name，显示名称时优先于通信录）、`consult?`（本通是服务端推来的咨询腿）、
+`state`、`muted`、`micMuted`、`speakerMuted`、`micGain`、`speakerVolume`、`hasVideo`、
+`video{...}`、`contact?`、`cti?`（复杂话务状态：`talkState` 与咨询/三方/监听/会议各字段）。
 
 ## 8. 避坑清单（都是实际踩过的）
 

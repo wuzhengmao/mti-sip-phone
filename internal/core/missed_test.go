@@ -50,7 +50,7 @@ func missedOf(t *testing.T, m map[string]any) bool {
 // TestMissedOnRemoteCancel 呼入振铃中对端取消 → 未接来电。
 func TestMissedOnRemoteCancel(t *testing.T) {
 	app, ch := newMissedTestApp()
-	app.OnIncoming("c1", "1002", "张三", false)
+	app.OnIncoming("c1", IncomingCall{Remote: "1002", RemoteName: "张三", HasVideo: false})
 	app.OnTerminated("c1", "remote_cancel")
 
 	m := endEvent(t, ch, "call.terminated")
@@ -67,7 +67,7 @@ func TestMissedOnRemoteCancel(t *testing.T) {
 func TestNotMissedWhenHandledLocally(t *testing.T) {
 	for _, reason := range []string{"rejected", "local_hangup"} {
 		app, ch := newMissedTestApp()
-		app.OnIncoming("c1", "1002", "", false)
+		app.OnIncoming("c1", IncomingCall{Remote: "1002", RemoteName: "", HasVideo: false})
 		app.OnTerminated("c1", reason)
 		if missedOf(t, endEvent(t, ch, "call.terminated")) {
 			t.Fatalf("reason=%s 是本端主动结束，不应判为未接", reason)
@@ -78,7 +78,7 @@ func TestNotMissedWhenHandledLocally(t *testing.T) {
 // TestNotMissedWhenEstablished 呼入接通后再挂断 → 不是未接。
 func TestNotMissedWhenEstablished(t *testing.T) {
 	app, ch := newMissedTestApp()
-	app.OnIncoming("c1", "1002", "", false)
+	app.OnIncoming("c1", IncomingCall{Remote: "1002", RemoteName: "", HasVideo: false})
 	app.OnEstablished("c1")
 	app.OnTerminated("c1", "remote_hangup")
 	if missedOf(t, endEvent(t, ch, "call.terminated")) {
@@ -100,7 +100,7 @@ func TestNotMissedForOutgoing(t *testing.T) {
 // 只有第一条判未接——否则界面会重复弹通知。
 func TestMissedIdempotent(t *testing.T) {
 	app, ch := newMissedTestApp()
-	app.OnIncoming("c1", "1002", "", false)
+	app.OnIncoming("c1", IncomingCall{Remote: "1002", RemoteName: "", HasVideo: false})
 	app.OnTerminated("c1", "remote_cancel")
 	if !missedOf(t, endEvent(t, ch, "call.terminated")) {
 		t.Fatal("第一条结束事件应判为未接")
@@ -114,7 +114,7 @@ func TestMissedIdempotent(t *testing.T) {
 // TestMissedOnIncomingFailed 呼入未接通就失败（协商/媒体失败）→ 未接。
 func TestMissedOnIncomingFailed(t *testing.T) {
 	app, ch := newMissedTestApp()
-	app.OnIncoming("c1", "1002", "", false)
+	app.OnIncoming("c1", IncomingCall{Remote: "1002", RemoteName: "", HasVideo: false})
 	app.OnFailed("c1", "failed")
 	if !missedOf(t, endEvent(t, ch, "call.failed")) {
 		t.Fatal("呼入未接通失败应判为未接")
@@ -124,7 +124,7 @@ func TestMissedOnIncomingFailed(t *testing.T) {
 // TestNotMissedAfterEstablishedFailed 接通后失败（如媒体异常）不是未接。
 func TestNotMissedAfterEstablishedFailed(t *testing.T) {
 	app, ch := newMissedTestApp()
-	app.OnIncoming("c1", "1002", "", false)
+	app.OnIncoming("c1", IncomingCall{Remote: "1002", RemoteName: "", HasVideo: false})
 	app.OnEstablished("c1")
 	app.OnFailed("c1", "failed")
 	if missedOf(t, endEvent(t, ch, "call.failed")) {

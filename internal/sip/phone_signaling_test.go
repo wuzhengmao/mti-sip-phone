@@ -50,11 +50,11 @@ type testUAC struct {
 	dcc    *sipgo.DialogClientCache
 
 	mu           sync.Mutex
-	byes         []string    // 收到的 BYE Call-ID
-	waitErrs     []error     // WaitAnswer 返回的错误
-	reInviteDirs []string    // 收到的 re-INVITE 媒体方向（保持测试用）
+	byes         []string     // 收到的 BYE Call-ID
+	waitErrs     []error      // WaitAnswer 返回的错误
+	reInviteDirs []string     // 收到的 re-INVITE 媒体方向（保持测试用）
 	lastReInvite *sip.Request // 最近收到的 re-INVITE（ACK 校验基准）
-	ackState     int         // re-INVITE ACK 校验状态：0=等待 1=OK 2=头不一致 3=超时未到
+	ackState     int          // re-INVITE ACK 校验状态：0=等待 1=OK 2=头不一致 3=超时未到
 }
 
 func newTestUAC(t *testing.T) *testUAC {
@@ -570,7 +570,10 @@ func startEarlyMediaPeer(t *testing.T) string {
 				continue
 			}
 			// 180 → 183（带早期媒体 SDP）→ 200
-			_ = func() error { _, err := ln.WriteTo([]byte(sip.NewResponseFromRequest(req, 180, "Ringing", nil).String()), raddr); return err }()
+			_ = func() error {
+				_, err := ln.WriteTo([]byte(sip.NewResponseFromRequest(req, 180, "Ringing", nil).String()), raddr)
+				return err
+			}()
 			go func(req *sip.Request) {
 				time.Sleep(100 * time.Millisecond)
 				res183 := sip.NewResponseFromRequest(req, 183, "Session Progress", []byte(testSDPAnswer))
@@ -587,7 +590,7 @@ func startEarlyMediaPeer(t *testing.T) string {
 }
 
 // TestIncomingBusyWhileActive 单通话限制：已有通话时新来电直接回 486
-//（USER_BUSY），不进入振铃流程。
+// （USER_BUSY），不进入振铃流程。
 func TestIncomingBusyWhileActive(t *testing.T) {
 	sink := &testSink{}
 	p, addr := newTestPhoneListening(t, sink)
@@ -680,7 +683,7 @@ func TestEarlyMediaRingback(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestOutgoingCancelDuringRinging 呼出振铃中本地挂断：对端必须收到 CANCEL
-//（表现为 INVITE 事务被终止），本地上报通话结束。
+// （表现为 INVITE 事务被终止），本地上报通话结束。
 func TestOutgoingCancelDuringRinging(t *testing.T) {
 	addr, peer := newPeerServer(t, -1) // 只回 180 不接听
 	sink := &testSink{}

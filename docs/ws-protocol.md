@@ -58,7 +58,7 @@
 
 | 方法 | 参数 | 成功返回 | 说明 |
 | --- | --- | --- | --- |
-| `call.dial` | `{ "target": "1001", "video": false }` | `{ "callId": "..." }` | 拨号；target 为号码或 SIP URI；`video: true` 发起视频呼叫（REQ-VIDEO-001） |
+| `call.dial` | `{ "target": "1001", "video": false, "name": "" }` | `{ "callId": "..." }` | 拨号；target 为号码或 SIP URI；`video: true` 发起视频呼叫（REQ-VIDEO-001）；`name`（可选）= **对端显示名**（如在线座席列表的 `displayName`），呼叫期间**优先于通信录名称**显示，为空时行为不变 |
 | `call.answer` | `{ "callId": "...", "video": false }` | `{ "callId": "..." }` | 接听；`video: true` 视频接听——打开摄像头双向视频（REQ-VIDEO-004） |
 | `call.hangup` | `{ "callId": "..." }` | `{ "callId": "..." }` | 挂断 |
 | `call.reject` | `{ "callId": "...", "code": 486 }` | `{ "callId": "..." }` | 拒接；code 为 SIP 状态码，默认 486 |
@@ -72,7 +72,7 @@
 | `system.getState` | `{}` | 见下 | 查询当前状态（版本、平台、注册、通话、更新状态、**自动更新配置 updateConfig**、**官方更新站点 updatePrimarySite**、自动接听开关） |
 | `contact.export` | `{}` | `{ "csv": "...", "count": 12 }` | 导出通信录 CSV 文本（REQ-WS-015）：表头 `号码,名称,备注,常用`，**UTF-8 带 BOM**（Excel 直接打开不乱码）。网页端的增删改查见 `contact.list/save/delete/setStarred/clear`（REQ-WS-018） |
 | `contact.import` | `{ "csv": "号码,名称,备注,常用\n2999,张三,前台,是\n" }` | `{ "added": 1, "updated": 0, "skipped": 0, "total": 12 }` | 导入通信录 CSV：按号码去重，**已存在的只覆盖号码/名称/备注，常用标志只增不减**（本地已标就保持、本地没标而 CSV 标了则变常用），不存在的整条新增；没有号码或整行解析失败的行计入 `skipped`。参数缺失返回 `invalid_params`，通信录不可用返回 `contacts_unavailable`。单条消息上限 4MB |
-| `calllog.query` | `{ "remote": "1001", "limit": 50, "offset": 0 }` | `{ "records": [...], "total": 357, "hasMore": true }` | 分页查询通话记录（REQ-WS-017），**新的在前**；`remote` 按号码子串筛选，`limit` 默认 50、上限 200（越界钳制）。时间戳一律**毫秒整数**，`0` 表示未发生（`answeredAt: 0` = 未接通，`endedAt: 0` = 进行中）。每条记录在号码命中通信录时带 `contact: {name, note, starred}`（口径同桌面通话记录页：号码规范化后查 core 的内存快照），页面据此显示「号码 名称★」与备注悬停。数据库未接入返回 `calllog_unavailable` |
+| `calllog.query` | `{ "remote": "1001", "limit": 50, "offset": 0 }` | `{ "records": [...], "total": 357, "hasMore": true }` | 分页查询通话记录（REQ-WS-017），**新的在前**；`remote` 按号码子串筛选，`limit` 默认 50、上限 200（越界钳制）。时间戳一律**毫秒整数**，`0` 表示未发生（`answeredAt: 0` = 未接通，`endedAt: 0` = 进行中）；`displayName` 是**座席显示名**（在线座席列表直接呼出时记录，页面展示时优先于通信录名称）。每条记录在号码命中通信录时带 `contact: {name, note, starred}`（口径同桌面通话记录页：号码规范化后查 core 的内存快照），页面据此显示「号码 名称★」与备注悬停。数据库未接入返回 `calllog_unavailable` |
 | `calllog.delete` | `{ "callIds": ["abc", "def"] }` | `{ "deleted": 2 }` | 按 callId 删除若干条通话记录；空数组返回 `invalid_params`。成功后广播 `calllog.changed` |
 | `calllog.clear` | `{}` | `{ "deleted": 357 }` | 清空全部通话记录（不可撤销）。成功后广播 `calllog.changed` |
 | `contact.list` | `{ "query": "zs" }`（可选） | `{ "count": 12, "total": 12, "contacts": [{ "number", "name", "note", "starred" }] }` | 列出联系人（REQ-WS-018）。给了 `query` 就**在软电话侧过滤**：支持**音头拼音 / 全拼 / 汉字混合**（`zs`/`zhangsan`/`张三`/`张san` 都能命中「张三」）、号码与备注的子串、号码的纯数字写法（`138` 命中 `+86 138-0000-0000`）——与桌面通信录页是**同一份实现**（`internal/contactsearch`，网页端没有拼音字典）。结果按**拼音排序**（空名称最前，同音再按规范化号码）；`count` 是本次返回条数、`total` 是通信录总数 |
@@ -100,6 +100,29 @@
 | `system.setAutoAnswer` | `{ "enabled": true }` | `{ "enabled": true }` | 自动接听开关（REQ-CALL-014）：与软电话界面上的「自动接听」按钮**共用一份状态**，变更后广播 `system.autoAnswer`，桌面按钮与网页据此同步。视频来电自动接听时按「视频接听」接通（REQ-VIDEO-004） |
 | `system.register` | `{}` | `{ "enabled": true, "state": "registered" }` | **登录账号**（REQ-ACC-024 / REQ-WS-021）：与托盘菜单「登录账号」一致——**启用账户**并**落盘**，然后立即向服务器注册。返回只表示"已接受"（注册在后台进行，结果经 `register.state` 事件回显） |
 | `system.unregister` | `{}` | `{ "enabled": false, "state": "unregistered" }` | **退出账号**（REQ-ACC-024 / REQ-WS-021）：发 expires=0、停注册周期，并**落盘禁用账户**——之后启动/断线重连都不再自动注册（直到 `system.register` 或 sip:// 拉起）。与托盘菜单「退出账号」一致 |
+| `cti.action` | `{ "action": "takeover", "target": "2002" }`（带 target）/ `{ "action": "addConferenceMembers", "members": ["2002"] }`（带 members）/ `{ "action": "finishConsult" }`（无参数） | `{ "action": "takeover", "seq": "12" }`（带返回值的动作另有 `data`） | **CTI 反向控制指令**（REQ-ACC-026 / REQ-ACC-034）：经 out-of-dialog NOTIFY（`Event: MSP_ACTION`）发给 CTI，**等 `MSP_RESULT` 回来后同步回包**（最多约 3 秒）。动作与参数见下。失败：平台回 success=false → `cti_failed`（message 带平台错误码）；2 秒内无回执 → `cti_timeout`；已有指令在途 → `cti_busy`；非坐席模式 → `cti_not_agent`；动作/参数不合法 → `invalid_params`。结果同时以 `cti.result` 事件广播 |
+| `cti.listAgents` | `{}` | `{ "agents": [{ "agent", "displayName", "acd", "agentMode", "agentStatus" }], "count": 3 }` | **在线座席列表**（REQ-ACC-035，CTI 动作 `listAgents`）：等 `MSP_RESULT` 后把 `data` 归一化成固定字段并按座席号排序。`agentStatus`：`free` / `dialing` / `ringing` / `talking` / `busy` / `leave` / `not_ready` / `free_offhook` / `miss_phone` / `offline`。**非坐席模式返回 `cti_not_agent`**。本机座席由页面自行过滤（与本机号码规范化后比较） |
+
+**`cti.action` 的动作与参数**（与桌面通话面板/在线座席页的按钮一一对应）：
+
+| 动作 | 额外参数 | 说明 |
+| --- | --- | --- |
+| `consult` | `target` | 发起咨询（被咨询方 = target） |
+| `consultThreeWay` | `target`（可选，缺省用当前咨询） | 咨询转三方 |
+| `transfer` | `target` | 直接转移 |
+| `consultTransfer` | `target`（可选，缺省用当前咨询） | 咨询转移 |
+| `monitor` | `target` | 监听坐席（班长模式） |
+| `takeover` | `target` | 代接坐席的振铃来电 |
+| `exitThreeWay` | `target` | 三方通话里强制挂断某一方（仅 owner） |
+| `addConferenceMembers` | `members`（可为空数组） | 邀请加入会议；**空数组 = 直接把当前两方通话转成会议**（与桌面 UI 的「会议」按钮一致） |
+| `removeConferenceMembers` | `members`（至少一个号码） | 从会议移除成员 |
+| `muteConferenceMember` / `unmuteConferenceMember` | `member` | 会议成员禁音/取消禁音（owner） |
+| `deafConferenceMember` / `undeafConferenceMember` | `member` | 会议成员禁听/取消禁听（owner） |
+| `vmuteConferenceMember` / `unvmuteConferenceMember` | `member` | 会议成员禁视频/取消禁视频（owner） |
+| `finishConsult` / `finishConference` | — | 结束咨询 / 结束会议（owner） |
+| `whisper` / `intervene` / `intercept` | — | 监听耳语 / 插话（强插）/ 强拦 |
+| `setBusy` / `setIdle` | — | 坐席置忙 / 置闲（结果经 `cti.agent` 事件回显） |
+
 | `system.setUpdateConfig` | `{ "url": "https://update.example.com", "appId": "mti-sip-phone", "intervalMinutes": 5, "prerelease": false }` | 生效后的完整配置 `{url, appId, intervalMinutes, prerelease}` | 写入软电话的**自动更新配置**（REQ-UPD-018）：软电话据此自己定时查询更新站点（**url 留空 = 不检查**，周期 1–1440 分钟，prerelease 默认 false）。字段**都是可选的**，只改传入的那些；写入后落盘、立即生效（配了站点马上查一次）并广播 `system.updateConfig`。url 非 http/https 或周期越界返回 `invalid_params` |
 | `system.notifyUpdate` | `{ "version": "1.1.0", "url": "http://dl.x/app.exe", "sha256": "…", "notes": "…", "os": "windows", "arch": "amd64", "force": false }` | `{ "phase": "available", "version": "1.1.0", "currentVersion": "1.0.11" }` | 告知软电话有新版本可用（自动更新，见 6.3）；`sha256`/`notes`/`os`/`arch` 可选；`force: true` = **强制推送**，跳过"版本必须更高"的检查（REQ-UPD-015，页面对着手动推送/回滚用；SDK 的定时查询不带它） |
 | `video.subscribe` | `{ "remote": { "maxWidth": 640, "maxHeight": 480, "fps": 30, "quality": 75 }, "local": { "maxWidth": 160, "maxHeight": 120 }, "keepWindow": false }` | 见下 | 订阅视频画面（REQ-VIDEO-009）：**必定订阅远端画面**（`remote` 不传也有默认参数），`local` 可选——不传就是**不订阅本地回显**；两条通道各带各的参数（本地回显通常小一号）。**`keepWindow`**（默认 `false`）：订阅后是否仍**保持软电话的视频窗口显示**——不传/false 时软电话自动关闭视频窗口（画面在网页看），传 `true` 则窗口继续显示（两处同时看）。画面以二进制帧推送（见 4.1）。**视频通话被关闭时不建立订阅，直接返回 `video_unsupported`**（REQ-VIDEO-014） |
@@ -199,7 +222,7 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
   "arch": "amd64",
   "account": {
     "enabled": true, "server": "10.168.4.40", "port": 5060, "expires": 300,
-    "rport": true, "optchk": true, "stunEnabled": false, "stunServer": "stun.l.google.com:19302",
+    "rport": true, "stunEnabled": false, "stunServer": "stun.l.google.com:19302",
     "proxy": "", "transport": "tls", "tlsVerify": false, "srtp": "supported",
     "domain": "", "publicIP": "", "account": "2999", "authUser": "", "displayName": "",
     "passwordSet": true
@@ -260,6 +283,9 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `calllog.changed` | `{ "action": "delete|clear", "deleted": 2 }` | 通话记录被删除/清空（REQ-WS-017）；**新增记录**仍由 `call.terminated` / `call.failed` 驱动刷新 |
 | `system.config` | `{ "section": "account|audio|video|log|ws|autoStart", "values": {...} }` | 配置被改写（REQ-WS-019）：本机配置页保存或网页 `system.set*` 写入都会广播，其它网页据此同步表单 |
 | `audio.ready` | `{ "ready": true }` | 音频后端后台初始化完成（REQ-WS-016）：网页据此刷新设备列表（无 UI 版没有桌面界面，这是唯一的信号） |
+| `cti.agent` | `{ "online", "displayName", "agentMode", "isBusy" }` | **坐席模式/置忙变化**（REQ-ACC-028 / REQ-ACC-034）：`MSP_EVENT_AGENT_ONLINE/OFFLINE` 与网页/桌面的 `setBusy`/`setIdle` 结果都经这里回显；`agentMode` 为 `none`/`normal`/`dial_out`/`monitor`，`agentMode=none` 时 `online=false`。重连时也可从 `system.state` 的 `agentOnline`/`agentDisplayName`/`agentMode`/`agentBusy` 取当前值 |
+| `cti.state` | `{ "callId", "call" }` | **通话的复杂话务状态变化**（REQ-ACC-026）：`MSP_EVENT_*`（咨询/三方/监听/会议）翻译后的完整通话快照，`call.cti` 是 `CTIState`（`talkState`：`twoParty`/`consult`/`threeWay`/`monitor`/`conference`，其余字段见协议 §16 与 `docs/cti-sip-phone-protocol.md`） |
+| `cti.result` | `{ "seq", "success", "code", "message", "action", "data"? }` | **CTI 指令结果**（MSP_RESULT）：与 `cti.action` 的同步回包等价（桌面界面按 `seq` 对齐，网页/SDK 可直接用 `cti.action` 的 Promise）。超时结果也会走这里（`code: "TIMEOUT"`） |
 
 `call` 对象中的视频相关字段（REQ-VIDEO-*）：
 
@@ -284,7 +310,7 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `waitingCall` | 已下载完成，等通话结束后自动重启安装 |
 | `error` | 失败原因（中文，面向用户展示） |
 
-通话对象（`call`）字段：`id`、`direction`（incoming/outgoing）、`remote`、`remoteName`、`state`（ringing/established/terminated）、`muted`（保持）、`micMuted`、`speakerMuted`、`micGain`（0–200 的百分比）、`speakerVolume`（0–100 的百分比）、`hasVideo`、`video`（见上）。
+通话对象（`call`）字段：`id`、`direction`（incoming/outgoing）、`remote`、`remoteName`、`peerName`（INVITE 的 Call-Info display-name，可选；显示名称时优先于通信录）、`consult`（本通是服务端推来的咨询腿，可选）、`state`（ringing/established/terminated）、`muted`（保持）、`micMuted`、`speakerMuted`、`micGain`（0–200 的百分比）、`speakerVolume`（0–100 的百分比）、`hasVideo`、`video`（见上）。
 
 `micGain` / `speakerVolume` 与开关的关系（REQ-MEDIA-006）：**0 就是禁用**；禁用期间这两个字段保留"恢复值"（解禁后回到的音量），当前是否禁用看 `micMuted` / `speakerMuted`。新通话默认都是 100。
 
@@ -317,6 +343,10 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `audio_unavailable` | 音频能力不可用 |
 | `config_unavailable` | 该配置项依赖的外部能力未接入（重启 / 开机自启 / 信令开关；沙箱实例的 `system.setAutoStart` 即此） |
 | `update_unavailable` | 更新能力未接入 |
+| `cti_busy` | 已有一条 CTI 指令在途（同一时间只允许一条，REQ-ACC-026） |
+| `cti_timeout` | CTI 指令超时（未等到 `MSP_RESULT`） |
+| `cti_failed` | CTI 平台回了失败结果，`message` 里带平台错误信息与错误码 |
+| `cti_not_agent` | 当前不在坐席模式，话务动作/在线座席列表无从发起 |
 | `internal` | 内部错误 |
 
 ## 6. 典型时序

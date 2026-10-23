@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,18 +58,7 @@ type Phone struct {
 
 	regCancel context.CancelFunc
 
-	// 服务端心跳看护（REQ-ACC-020/021）：从**传输层**收到的 OPTIONS 学习服务
-	// 端的探测间隔，超过 2.5 个周期没收到就立即重新注册（服务端在前几次探测
-	// 无响应后往往已把本机摘出 location，等 0.7×expires 的续注册太久）。
-	// 计数必须在传输层做：服务端的探测复用同一个 Via branch，sipgo 的事务层
-	// 会把 Timer J（32 秒）内的相同 branch 当重传、不再回调 handler。
-	hbMu       sync.Mutex
-	hbLast     time.Time     // 上一条 OPTIONS 的墙钟时刻（零值 = 尚未观测到/已复位）
-	hbCount    int           // 学习期内已观测到的间隔样本数（= 心跳条数 - 1）
-	hbSum      time.Duration // 样本间隔总和（求平均用）
-	hbMinGap   time.Duration // 见过的最小间隔（判定"探测中断后重启"的基准）
-	hbInterval time.Duration // 平均间隔（0 = 样本不足 hbMinHeartbeats，尚未武装）
-	regPeerIP  string        // 最近一次 REGISTER 成功响应来自的 IP（只统计它发来的探测）
+	regPeerIP string // 最近一次 REGISTER 成功响应来自的 IP（CTI NOTIFY 来源校验）
 
 	// 注册看护参数（REQ-CALL-009，测试注入用）：零值取默认值；
 	// 必须在 Register 之前设置，之后由看护 goroutine 只读。
@@ -79,10 +69,30 @@ type Phone struct {
 
 	calls map[string]*callSession
 
+	// udpLn UDP 信令监听 socket（ServeUDP 里保存）：用于向服务器发"端口映射
+	// 保活"——NAT 后面的 UDP 客户端，出站 REGISTER/INVITE 走的是 sipgo 的
+	// 临时 socket，**监听端口本身没有 NAT 映射**，服务端的 in-dialog 请求
+	//（BYE/INFO）按 Contact 发到监听端口时会被 NAT 丢弃。保活见 udpkeepalive.go。
+	udpLn   net.PacketConn
+	udpKick chan struct{} // 注册成功后立即补发一次保活（buffer=1，非阻塞）
+
+	// CTI 话务控制（REQ-ACC-026）：反向 **out-of-dialog NOTIFY**（MSP_ACTION /
+	// MSP_HEARTBEAT）的 seq 分配与在途结果等待。同一时间只允许一条 MSP_ACTION
+	// 在途（ctiInFlight），结果按 seq 对齐（见 cti.go）。
+	ctiMu           sync.Mutex
+	ctiNextSeq      int
+	ctiInFlight     bool
+	ctiInFlightSeq  string
+	ctiHeartbeatSeq int // 心跳自己的序列号（协议：用于集群去重）
+
 	autoAnswer atomic.Bool // 自动接听开关
 
 	videoMu  sync.RWMutex
 	videoCfg config.VideoConfig // 摄像头与视频参数（REQ-VIDEO-002/005）
+
+	// peerNameLookup 号码 → 显示名：呼出 INVITE 的 Call-Info display-name 用
+	//（REQ-ACC-029）。由 core 注入（通信录在 core 侧，sip 层拿不到），p.mu 保护。
+	peerNameLookup func(string) string
 }
 
 // callSession 一次通话的运行时状态。
@@ -113,33 +123,6 @@ func UserAgentName() string {
 	return "mti-sip-phone v" + core.Version
 }
 
-const (
-	// hbMinHeartbeats 心跳间隔学习所需的最少心跳条数（REQ-ACC-021）：至少观测到
-	// 这么多条才取平均武装判定——样本太少不足以代表服务端的真实周期。
-	hbMinHeartbeats = 5
-	// hbDuplicateGap 小于此间隔的心跳视为重传/重复探测（实测服务端偶尔在
-	// 0.2~0.3 秒内重发一条），不参与学习、但更新"最近心跳时刻"。
-	hbDuplicateGap = time.Second
-	// hbOverdueFactor 超时判定的周期倍数：超过「2.5 个心跳周期」没收到探测即
-	// 认为服务端已经不再探测（多半已把本机摘掉），立即重新注册。
-	hbOverdueFactor = 2.5
-)
-
-// userAgentFor 注册报文使用的 User-Agent：启用服务端心跳检测时在标准标识后
-// 追加 optchk 标记（REQ-ACC-020），服务端据此定期向本机发 OPTIONS 探测。
-// OPTIONS 不需要专门应答——sipgo 默认回 405，实测服务端接受（回 200 反而
-// 在 NAT/rport 场景下对不上而被判失败）。
-func userAgentFor(acc config.Account) string {
-	ua := UserAgentName()
-	// optchk 只在 **UDP** 传输时加（用户要求）：服务端的心跳探测（OPTIONS）
-	// 在连接型传输（TCP/TLS）上另有保活/连接状态可用，脚本里的心跳判定
-	// 也未必覆盖它们，标记只会让服务端多做无用探测。
-	if acc.ChkOpt && config.NormalizeTransport(acc.Transport) == config.TransportUDP {
-		ua += " optchk"
-	}
-	return ua
-}
-
 // nowClock 取当前时刻：看护相关逻辑共用（测试可注入 watchNow）。
 func (p *Phone) nowClock() time.Time {
 	if p.watchNow != nil {
@@ -148,89 +131,9 @@ func (p *Phone) nowClock() time.Time {
 	return time.Now()
 }
 
-// noteHeartbeat 记录一条服务端 OPTIONS 探测，并从相邻间隔学习探测周期
-// （REQ-ACC-021）：累计 hbMinHeartbeats 条心跳（即 4 个间隔样本）后取**平均**
-// 作为间隔；样本不足不武装（免得拿不准的间隔误判）。时钟回拨不学习；间隔突增
-// （> 3× 见过的最小间隔）视为探测中断后重启，样本清零重新学习；亚秒级重发
-// 视为重复探测，只更新时刻不记样本。
-func (p *Phone) noteHeartbeat() {
-	now := p.nowClock()
-	p.hbMu.Lock()
-	defer p.hbMu.Unlock()
-	if p.hbLast.IsZero() {
-		p.hbLast = now
-		return
-	}
-	gap := time.Duration(now.UnixNano() - p.hbLast.UnixNano())
-	switch {
-	case gap <= 0:
-		return // 时钟回拨：不学习（也不更新时刻）
-	case gap < hbDuplicateGap:
-		p.hbLast = now // 重传/重复探测：只更新"最近见到心跳"的时刻
-		return
-	}
-	p.hbLast = now
-	if p.hbMinGap > 0 && gap > 3*p.hbMinGap {
-		// 探测中断后重启：重新学习（本条心跳作为新的第一条）
-		p.hbCount, p.hbSum, p.hbMinGap, p.hbInterval = 0, 0, 0, 0
-		return
-	}
-	p.hbCount++
-	p.hbSum += gap
-	if p.hbMinGap == 0 || gap < p.hbMinGap {
-		p.hbMinGap = gap
-	}
-	if p.hbCount >= hbMinHeartbeats-1 {
-		interval := p.hbSum / time.Duration(p.hbCount)
-		switch {
-		case p.hbInterval == 0:
-			logx.Logger().Info("已学习服务端心跳间隔，开始漏检判定",
-				"interval", interval.Round(time.Second).String(), "samples", p.hbCount)
-		case interval > p.hbInterval+time.Second || interval < p.hbInterval-time.Second:
-			logx.Logger().Info("服务端心跳间隔变化",
-				"old", p.hbInterval.Round(time.Second).String(),
-				"new", interval.Round(time.Second).String(), "samples", p.hbCount)
-		}
-		p.hbInterval = interval
-	}
-}
-
-// heartbeatOverdue 是否已超过 hbOverdueFactor 个心跳周期没收到探测
-// （REQ-ACC-021）：只在「已观测到心跳且间隔已知」时成立，成立后**复位**
-// （等下一次心跳重新武装），避免服务端彻底不再探测时反复触发重新注册。
-// 服务器不发 OPTIONS（不支持 optchk）时从未观测到心跳，这里恒为 false。
-func (p *Phone) heartbeatOverdue(now time.Time) bool {
-	p.hbMu.Lock()
-	defer p.hbMu.Unlock()
-	if p.hbLast.IsZero() || p.hbInterval <= 0 {
-		return false
-	}
-	limit := time.Duration(float64(p.hbInterval) * hbOverdueFactor)
-	if time.Duration(now.UnixNano()-p.hbLast.UnixNano()) <= limit {
-		return false
-	}
-	p.hbLast = time.Time{}
-	return true
-}
-
-// heartbeatInterval 已学习到的心跳间隔（0 = 未知；仅用于日志）。
-func (p *Phone) heartbeatInterval() time.Duration {
-	p.hbMu.Lock()
-	defer p.hbMu.Unlock()
-	return p.hbInterval
-}
-
-// resetHeartbeat 复位心跳看护状态：每次 Register（新账户/重新注册）都重新
-// 观测、重新学习间隔，避免拿旧的（可能属于另一台服务器的）间隔误判。
-func (p *Phone) resetHeartbeat() {
-	p.hbMu.Lock()
-	defer p.hbMu.Unlock()
-	p.hbLast = time.Time{}
-	p.hbCount, p.hbSum, p.hbMinGap, p.hbInterval = 0, 0, 0, 0
-}
-
 // noteRegisterPeer 记录注册服务器的地址（REGISTER 成功响应的来源，形如
-// "10.168.4.40:15060"），只留 IP——心跳只统计它发来的探测。
+// "10.168.4.40:15060"），只留 IP——CTI NOTIFY 的来源校验用它（只接受注册
+// 服务器发来的通知）。
 func (p *Phone) noteRegisterPeer(src string) {
 	if src == "" {
 		return
@@ -261,78 +164,6 @@ func serverDest(acc config.Account) string {
 	return net.JoinHostPort(acc.Server, strconv.Itoa(acc.Port))
 }
 
-// hostIsServer host（不含端口）是否就是注册的 SIP 服务器：先比"最近一次
-// REGISTER 成功响应来自的 IP"（最可靠，配置写域名也成立），再比配置里的
-// server / proxy。SIP 里的域与地址都可能不带端口，所以只比 host。
-func (p *Phone) hostIsServer(host string) bool {
-	if host == "" {
-		return false
-	}
-	host = strings.Trim(host, "[]")
-	p.mu.Lock()
-	peer, acc := p.regPeerIP, p.acc
-	p.mu.Unlock()
-	if peer != "" && strings.EqualFold(host, peer) {
-		return true
-	}
-	for _, s := range []string{acc.Server, acc.Proxy} {
-		if s == "" {
-			continue
-		}
-		if h, _, err := net.SplitHostPort(s); err == nil {
-			s = h
-		}
-		if strings.EqualFold(host, strings.Trim(s, "[]")) {
-			return true
-		}
-	}
-	return false
-}
-
-// readFilter 传输层入口钩子：统计注册服务器发来的 OPTIONS 探测（REQ-ACC-021）。
-// **只统计、不改报文、不吞请求**——OPTIONS 由 sipgo 默认回 405（实测服务端接受）。
-//
-// 为什么必须在传输层数、而不是在 OPTIONS 的 handler 里：服务端的探测复用
-// 同一个 Via branch（实测 OpenSIPS），sipgo 的服务端事务会把 Timer J（32 秒）
-// 内的相同 branch 请求当**重传**、不再回调 handler——按 handler 计数会把
-// 10 秒的真实心跳看成 ~40 秒，学出来的间隔与漏检判定全部失真。
-func (p *Phone) readFilter(props sip.TransportReadProps, data []byte) ([]byte, error) {
-	// 服务端心跳只对 **UDP** 生效（REQ-ACC-020 修订，用户要求）：连接型传输
-	// （TCP/TLS）注册报文不带 optchk、服务端不按心跳探测，所以计数、间隔学习与
-	// 超时重注册一并停掉；此前学到的状态由 Register 里的 resetHeartbeat 清掉。
-	if bytes.HasPrefix(data, []byte("OPTIONS ")) && p.heartbeatWanted() && p.hostIsServer(hostOfAddr(props.RemoteAddr)) {
-		p.noteHeartbeat()
-	}
-	return data, nil
-}
-
-// heartbeatWanted 当前账户是否需要服务端心跳检测：**仅 UDP 传输**且开关打开。
-func (p *Phone) heartbeatWanted() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.acc.ChkOpt && config.NormalizeTransport(p.acc.Transport) == config.TransportUDP
-}
-
-// hostOfAddr 取 net.Addr 的 host 部分（不含端口）。
-func hostOfAddr(a net.Addr) string {
-	s := addrString(a)
-	if s == "" {
-		return ""
-	}
-	if h, _, err := net.SplitHostPort(s); err == nil {
-		return h
-	}
-	return s
-}
-
-// addrString net.Addr → "host:port"（nil 安全）。
-func addrString(a net.Addr) string {
-	if a == nil {
-		return ""
-	}
-	return a.String()
-}
-
 // NewPhone 创建软电话。sink 用于向核心层上报事件；audioMgr 为 nil 时
 // 跳过音频设备对接（用于测试或无音频环境）。
 //
@@ -341,11 +172,10 @@ func addrString(a net.Addr) string {
 // 客户端出向 socket 由 sipgo 动态分配（避免 WithClientPort 导致
 // 服务器按固定端口回包而无人监听的超时问题）。
 func NewPhone(sink core.EventSink, audioMgr *audio.Manager, useRPort bool) (*Phone, error) {
-	// Phone 先建（UA 的传输层读钩子要挂在 p 上，见 readFilter/REQ-ACC-021）
+	// Phone 先建（UA 的 TLS 配置引用 p 的原子开关，见 tlsVerifyFlag）
 	p := &Phone{sink: sink, audio: audioMgr, calls: make(map[string]*callSession)}
 	ua, err := sipgo.NewUA(
 		sipgo.WithUserAgent(UserAgentName()),
-		sipgo.WithUserAgentTransportLayerOptions(sip.WithTransportLayerReadFilter(p.readFilter)),
 		// TLS（REQ-ACC-006）：配置在 UA 创建时注入（sipgo 把指针捕获进拨号
 		// 闭包，之后换不了），校验开关按原子标记实时读，见 tlsVerifyFlag
 		sipgo.WithUserAgenTLSConfig(clientTLSConfig(&p.tlsVerify)),
@@ -400,6 +230,14 @@ func (p *Phone) ServeUDP(ctx context.Context, ln net.PacketConn) error {
 	if a, ok := ln.LocalAddr().(*net.UDPAddr); ok {
 		p.noteLocalPort("udp", a.Port)
 	}
+	p.mu.Lock()
+	p.udpLn = ln
+	if p.udpKick == nil {
+		p.udpKick = make(chan struct{}, 1)
+	}
+	kick := p.udpKick
+	p.mu.Unlock()
+	go p.udpMappingKeepalive(ctx, ln, kick)
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 	return p.server.ServeUDP(ln)
@@ -444,20 +282,21 @@ func (p *Phone) contactFor(acc config.Account) sip.Uri {
 		if tlsPort > 0 {
 			u.Port = tlsPort
 		}
-		u.UriParams = sip.NewParams()
-		u.UriParams.Add("transport", config.TransportTLS)
-		return u
-	}
-	if port > 0 {
+	} else if port > 0 {
 		u.Port = port
 	}
-	// 连接型传输（TCP）：Contact 要显式写 `transport=tcp`——对端/服务端按 Contact
-	// 的 URI 决定用哪种传输回来，而 `sip:` URI 不带 transport 参数时**默认是 UDP**
-	//（NAT/TLS 那一串问题里踩过的同一个坑）。UDP 不加（缺省即 UDP）。
-	if config.NormalizeTransport(acc.Transport) == config.TransportTCP {
-		u.UriParams = sip.NewParams()
-		u.UriParams.Add("transport", config.TransportTCP)
+	// URI 参数：transport（tcp/tls 必须显式声明——sip: 不带 transport 缺省按 UDP
+	// 回连）+ msp=support（能力协商，REQ-ACC-026：向 CTI 声明本话机支持
+	// MSP_EVENT_* 事件）。udp 也带 msp=support（transport 参数不加，缺省即 UDP）。
+	params := sip.NewParams()
+	switch config.NormalizeTransport(acc.Transport) {
+	case config.TransportTLS:
+		params.Add("transport", config.TransportTLS)
+	case config.TransportTCP:
+		params.Add("transport", config.TransportTCP)
 	}
+	params.Add("msp", "support")
+	u.UriParams = params
 	return u
 }
 
@@ -542,6 +381,44 @@ func (p *Phone) handleControlNotify(req *sip.Request) {
 		logx.Logger().Warn("收到非注册服务器发来的控制通知，已忽略", "event", ev, "source", req.Source())
 		return
 	}
+	// MSP_EVENT_*（通话面板事件，REQ-ACC-026）与 MSP_RESULT（反向指令回执）：
+	// 同样只接受注册服务器来源，但走各自的分发通道。
+	if name := parseMSPEventName(ev); name != "" {
+		var body map[string]any
+		if len(bytes.TrimSpace(req.Body())) > 0 {
+			_ = json.Unmarshal(req.Body(), &body)
+		}
+		go p.sink.OnMSPEvent(name, body)
+		return
+	}
+	if strings.EqualFold(ev, "MSP_UNSUPPORTED") {
+		// 协议 1.0.18：服务端不支持 NOTIFY 通道。核心层据此停止心跳并
+		// 退出坐席模式（与心跳非 200 同一处理）。
+		var body map[string]any
+		if len(bytes.TrimSpace(req.Body())) > 0 {
+			_ = json.Unmarshal(req.Body(), &body)
+		}
+		go p.sink.OnMSPEvent("unsupported", body)
+		return
+	}
+	if strings.EqualFold(ev, "MSP_RESULT") {
+		var b struct {
+			// seq 在协议 1.0.18 改成**字符串**；flexString 也兼容老服务端的数字
+			Seq     flexString `json:"seq"`
+			Success bool       `json:"success"`
+			Code    flexString `json:"code"`
+			Message string     `json:"message"`
+			Action  string     `json:"action"`
+			Data    any        `json:"data"`
+		}
+		if err := json.Unmarshal(req.Body(), &b); err != nil {
+			logx.Logger().Warn("MSP_RESULT 正文不是合法 JSON，忽略",
+				"err", err, "body", string(req.Body()))
+			return
+		}
+		p.handleCTIResult(string(b.Seq), b.Success, string(b.Code), b.Message, b.Action, b.Data)
+		return
+	}
 	var cmd core.RemoteCommand
 	switch {
 	case strings.EqualFold(ev, notifyEventDial):
@@ -592,6 +469,15 @@ func (p *Phone) handleControlNotify(req *sip.Request) {
 		cmd = core.RemoteCommand{Kind: "unregister", Reason: b.Reason, Agent: b.Agent}
 
 	default:
+		// MSP_HEARTBEAT / MSP_ACTION 是**话机自己发出去**的反向通道事件
+		//（协议第二部分）。收到它们只有一种常见情况：服务端按 R-URI（本机 AOR）
+		// 做 location 查找后把报文回环回来了——真正的目的是让它转给 FreeSWITCH。
+		// 这里回 200、忽略即可，但日志要写清楚，别让人误以为是 CTI 推来的。
+		if ev == "MSP_HEARTBEAT" || ev == "MSP_ACTION" {
+			logx.Logger().Debug("收到发往 CTI 的反向事件被服务端回环，忽略",
+				"event", ev, "from", req.Source())
+			return
+		}
 		logx.Logger().Debug("入向 NOTIFY 不是已知控制事件，忽略", "event", ev)
 		return
 	}
@@ -701,7 +587,6 @@ func (p *Phone) Register(ctx context.Context, acc config.Account) error {
 	if p.regCancel != nil {
 		p.regCancel()
 	}
-	p.resetHeartbeat() // 重新等第一条服务端心跳（REQ-ACC-021）
 	regCtx, cancel := context.WithCancel(ctx)
 	p.regCancel = cancel
 
@@ -763,6 +648,7 @@ func (p *Phone) DialVideo(ctx context.Context, target string) (string, error) {
 func (p *Phone) dial(ctx context.Context, target string, withVideo bool) (string, error) {
 	p.mu.Lock()
 	acc := p.acc
+	lookup := p.peerNameLookup
 	p.mu.Unlock()
 	if acc.Server == "" || acc.Account == "" {
 		return "", fmt.Errorf("未配置 SIP 账户")
@@ -829,7 +715,12 @@ func (p *Phone) dial(ctx context.Context, target string, withVideo bool) (string
 	p.mu.Unlock()
 
 	offer := media.SDPOfferFor(engine, cs.video, "sendrecv", p.videoOfferDirection(cs.video))
-	dlg, err := p.dccInvite(recipient, offer, acc)
+	// 被叫显示名（通信录里有就带上，REQ-ACC-029 的 Call-Info display-name）
+	peerName := ""
+	if lookup != nil {
+		peerName = lookup(recipient.User)
+	}
+	dlg, err := p.dccInvite(recipient, offer, acc, peerName)
 	if err != nil {
 		cancel()
 		p.mu.Lock()
@@ -1216,6 +1107,14 @@ func (p *Phone) SendDTMF(callID, digit string) error {
 	return nil
 }
 
+// SetPeerNameLookup 注入"按号码查显示名"的回调（core.App.PeerDisplayName）：
+// 呼出 INVITE 的 Call-Info 用它带 display-name（REQ-ACC-029）。
+func (p *Phone) SetPeerNameLookup(fn func(string) string) {
+	p.mu.Lock()
+	p.peerNameLookup = fn
+	p.mu.Unlock()
+}
+
 // SetAutoAnswer 开关自动接听：开启后来电自动接听（REQ-CALL 新增）。
 func (p *Phone) SetAutoAnswer(enabled bool) error {
 	p.autoAnswer.Store(enabled)
@@ -1324,6 +1223,9 @@ func (p *Phone) registerLoop(ctx context.Context, acc config.Account, kickCh <-c
 		// 已生效（Contact host 为公网 IP 即 STUN 生效）
 		contact := p.contactFor(acc)
 		logx.Logger().Info("注册成功", "expires", expires, "contact", contact.String())
+		// 注册成功立即补发一次 UDP 监听端口映射保活（NAT 场景下让对端的
+		// in-dialog 请求能打到监听端口，见 udpkeepalive.go）
+		p.kickUDPMapping()
 
 		// 续注册：到期前 30% 时重新注册（按 RFC 3261 建议）；
 		// 收到看护信号（休眠唤醒/网络变化/STUN 就绪）时立即重新注册
@@ -1423,7 +1325,7 @@ func (p *Phone) sendRegisterOpts(ctx context.Context, acc config.Account, expire
 	req.AppendHeader(contact)
 	req.AppendHeader(sip.NewHeader("Expires", strconv.Itoa(expires)))
 	req.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, NOTIFY, INFO, REFER"))
-	req.AppendHeader(sip.NewHeader("User-Agent", userAgentFor(acc)))
+	req.AppendHeader(sip.NewHeader("User-Agent", UserAgentName()))
 
 	// 自定义 build：sipgo 默认的 ClientRequestRegisterBuild 按 RFC 3261 清空
 	// R-URI 的用户部分，但 OpenSIPS 的 registrar 从 R-URI 提取 location 表的
@@ -1572,7 +1474,7 @@ func (p *Phone) dialogServer() *sipgo.DialogServerCache {
 }
 
 // dccInvite 创建 dialog client cache（按账户传输方式）并发起 INVITE。
-func (p *Phone) dccInvite(recipient sip.Uri, offer string, acc config.Account) (*sipgo.DialogClientSession, error) {
+func (p *Phone) dccInvite(recipient sip.Uri, offer string, acc config.Account, peerName string) (*sipgo.DialogClientSession, error) {
 	p.ensureDialogCaches(acc)
 	// 出向请求走哪个传输由 R-URI 的 transport 参数决定（sipgo 的 dialog 层
 	// 会把它写成 req.SetTransport，见 sipgo/dialog_ua.go）——tcp / tls 都必须显式写，
@@ -1601,6 +1503,12 @@ func (p *Phone) dccInvite(recipient sip.Uri, offer string, acc config.Account) (
 		sip.NewHeader("User-Agent", UserAgentName()),
 		from, to,
 	}
+	// Call-Info（REQ-ACC-029）：声明本次呼叫的类型与被叫显示名，对端/CTI 据此
+	// 显示名称、区分普通呼叫与咨询腿：
+	//   Call-Info: <sip:2002@10.168.4.40>;display-name=%E6%9D%8E%E5%9B%9B;call-type=call
+	// display-name 只在通信录里有名字时带上（用户要求"如果有的话"）。
+	headers = append(headers, sip.NewHeader("Call-Info",
+		buildCallInfo(recipient.User, recipient.Host, peerName, "call")))
 	// 出站代理（REQ-ACC-019）：首条 Route 指向代理（loose routing）；
 	// TLS 下代理地址也用 sips:（RFC 3261 §8.1.2：Route 与 R-URI 的保密级别一致）。
 	// 域名（REQ-ACC-022）同一个手法：R-URI/To 写域名，但报文要发到 Server:Port
@@ -1846,6 +1754,11 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 	from := req.From()
 	remote := from.Address.User
 	remoteName := from.DisplayName
+	// Call-Info（REQ-ACC-029）：服务端可能带上对端名称与呼叫类型，例如
+	//   Call-Info: <sip:2901@10.168.4.40>;display-name=%E6%B5%8B%E8%AF%951;call-type=consult
+	// display-name 是**百分号编码**的对端名字，显示优先级高于通信录名称；
+	// call-type=consult 表示这是服务端推来的咨询腿（接通后不显示话务入口按钮）。
+	ci := parseCallInfo(req)
 
 	callID := uuid.NewString()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1935,7 +1848,13 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 	}
 
 	// 上报来电事件（核心层会弹窗/推送 WS 事件）
-	p.sink.OnIncoming(callID, remote, remoteName, hasVideo)
+	p.sink.OnIncoming(callID, core.IncomingCall{
+		Remote:     remote,
+		RemoteName: remoteName,
+		PeerName:   ci.DisplayName,
+		Consult:    strings.EqualFold(ci.CallType, "consult"),
+		HasVideo:   hasVideo,
+	})
 
 	// 自动接听决策：
 	//   1) INVITE 携带 Call-Info: <...>;answer-after=x（REQ-CALL-015）：
@@ -2004,31 +1923,94 @@ func (p *Phone) respondRinging(dlg *sipgo.DialogServerSession) {
 	}
 }
 
+// callInfo INVITE 的 Call-Info 头里我们关心的参数（REQ-ACC-029）。
+type callInfo struct {
+	DisplayName string // display-name（URL 解码后的对端名称）
+	CallType    string // call-type（call / consult …）
+}
+
+// parseCallInfo 解析 INVITE 的 Call-Info 头（可能有多条、也可能带别的 purpose）：
+//
+//	Call-Info: <sip:2901@10.168.4.40>;display-name=%E6%B5%8B%E8%AF%951;call-type=consult
+//
+// 只取 `<uri>` 之后的参数，值做 URL 解码（display-name 里的汉字是百分号编码）。
+func parseCallInfo(req *sip.Request) callInfo {
+	params := callInfoParams(req)
+	return callInfo{DisplayName: params["display-name"], CallType: params["call-type"]}
+}
+
+// callInfoParams 把全部 Call-Info 头里的参数展开成 map（键小写，先出现的优先）。
+func callInfoParams(req *sip.Request) map[string]string {
+	out := make(map[string]string, 4)
+	for _, h := range req.GetHeaders("Call-Info") {
+		v := h.Value()
+		// 跳过 <uri>：URI 自己可能带 `;transport=tcp` 之类的参数
+		if i := strings.IndexByte(v, '>'); i >= 0 {
+			v = v[i+1:]
+		}
+		for _, part := range strings.Split(v, ";") {
+			part = strings.TrimSpace(part)
+			k, val, ok := strings.Cut(part, "=")
+			if !ok {
+				continue
+			}
+			k = strings.ToLower(strings.TrimSpace(k))
+			val = strings.Trim(strings.TrimSpace(val), `"`)
+			if dec, err := url.QueryUnescape(val); err == nil {
+				val = dec
+			}
+			if _, exists := out[k]; !exists {
+				out[k] = val
+			}
+		}
+	}
+	return out
+}
+
 // parseAnswerAfter 解析 INVITE 的 Call-Info 头中的 answer-after 参数。
 // 返回 -1 表示未指定。
 // 头格式：Call-Info: <sip:xxx>;answer-after=0
 func parseAnswerAfter(req *sip.Request) int {
-	for _, h := range req.GetHeaders("Call-Info") {
-		v := h.Value()
-		// 在 <...> 之后的参数中查找 answer-after=N
-		if idx := strings.Index(v, "answer-after="); idx >= 0 {
-			rest := v[idx+len("answer-after="):]
-			num := ""
-			for _, c := range rest {
-				if c >= '0' && c <= '9' {
-					num += string(c)
-				} else {
-					break
-				}
-			}
-			if num != "" {
-				if n, err := strconv.Atoi(num); err == nil && n >= 0 {
-					return n
-				}
-			}
-		}
+	if n, err := strconv.Atoi(callInfoParams(req)["answer-after"]); err == nil && n >= 0 {
+		return n
 	}
 	return -1
+}
+
+// buildCallInfo 拼呼出 INVITE 的 Call-Info 头值：
+//
+//	<sip:2002@10.168.4.40>;display-name=%E6%9D%8E%E5%9B%9B;call-type=call
+//
+// display-name 为空时不带（用户要求"如果有的话"）。
+func buildCallInfo(user, host, displayName, callType string) string {
+	v := "<sip:" + user + "@" + host + ">"
+	if displayName != "" {
+		v += ";display-name=" + callInfoEscape(displayName)
+	}
+	if callType != "" {
+		v += ";call-type=" + callType
+	}
+	return v
+}
+
+// callInfoEscape 按 RFC 3986 对 Call-Info 的参数值做百分号编码：只保留
+// 字母数字与 `-_.~`，其余字节（含 `+`/`;`/`=`/空格/汉字）一律 %XX——
+// 否则值里的 `;` 会被对端当成参数分隔符。
+func callInfoEscape(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '-' || c == '_' || c == '.' || c == '~' {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&0x0f])
+	}
+	return b.String()
 }
 
 // handleReInvite 处理通话中的 in-dialog re-INVITE（对端保持/恢复）：

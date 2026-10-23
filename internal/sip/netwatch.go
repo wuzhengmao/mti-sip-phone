@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"mti-sip-phone/internal/config"
-	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
 )
 
@@ -120,21 +119,6 @@ func (p *Phone) watchRegistration(ctx context.Context, acc config.Account, kickC
 				reasons = append(reasons, "网络出口地址变化 "+lastIP+" → "+ip)
 				lastIP, lastOK = ip, true
 			}
-		}
-
-		// 3) 服务端心跳漏检（REQ-ACC-021）：启用心跳且已学到探测间隔时，
-		// 超过 2.5 个周期没收到 OPTIONS 就立即重新注册（服务端在前几次探测
-		// 无响应后往往已把本机摘出 location，等 0.7×expires 的续注册太久）。
-		// 单独 kick：不需要刷新 STUN/TCP。服务器不发 OPTIONS（不支持 optchk）
-		// 时从未观测到心跳，这里恒不触发。
-		// 仅 UDP：连接型传输不发 optchk，服务端不会按心跳探测（REQ-ACC-020 修订）
-		if acc.ChkOpt && config.NormalizeTransport(acc.Transport) == config.TransportUDP && p.heartbeatOverdue(ts) {
-			logx.Logger().Info("超过 2.5 个心跳周期未收到服务端 OPTIONS，判为掉线并立即重新注册",
-				"interval", p.heartbeatInterval().String())
-			// 先置"未注册"（界面圆点与托盘图标变红、注册失败原因可见），
-			// 再触发重新注册（会依次发布"注册中"→"已注册"）
-			p.sink.OnRegisterState(core.RegUnregistered, "服务端心跳超时")
-			p.sendKick(kickCh, "未收到服务端 OPTIONS 心跳（超 2.5 个周期）")
 		}
 
 		if len(reasons) == 0 {

@@ -189,7 +189,7 @@ func TestDialUsesDomainAndDeclaredIP(t *testing.T) {
 }
 
 // TestDeclaredIPOverridesStun 声明 IP 优先于 STUN 探测到的公网地址
-//（用户既然手填了就以它为准）。
+// （用户既然手填了就以它为准）。
 func TestDeclaredIPOverridesStun(t *testing.T) {
 	p := newTestPhone(t, &testSink{})
 	p.mu.Lock()
@@ -254,14 +254,14 @@ func TestVirtualInterfaceFilter(t *testing.T) {
 		mac  net.HardwareAddr
 		want bool
 	}{
-		{"vEthernet (WSL)", mac("00:15:5d:11:22:33"), true},      // Hyper-V/WSL：名字+MAC 都命中
-		{"Ethernet 2", mac("00:50:56:aa:bb:cc"), true},           // VMware：只有 MAC 命中
-		{"Ethernet 3", mac("08:00:27:aa:bb:cc"), true},           // VirtualBox
-		{"docker0", mac("02:42:aa:bb:cc:dd"), true},              // Docker
+		{"vEthernet (WSL)", mac("00:15:5d:11:22:33"), true}, // Hyper-V/WSL：名字+MAC 都命中
+		{"Ethernet 2", mac("00:50:56:aa:bb:cc"), true},      // VMware：只有 MAC 命中
+		{"Ethernet 3", mac("08:00:27:aa:bb:cc"), true},      // VirtualBox
+		{"docker0", mac("02:42:aa:bb:cc:dd"), true},         // Docker
 		{"TAP-Windows Adapter V9", mac("00:ff:aa:bb:cc:dd"), true},
-		{"VirtualBox Host-Only Network", nil, true},              // 只有名字命中
+		{"VirtualBox Host-Only Network", nil, true}, // 只有名字命中
 		{"Tailscale", nil, true},
-		{"以太网", mac("d8:5e:d3:11:22:33"), false},                // 真实网卡（Intel OUI）
+		{"以太网", mac("d8:5e:d3:11:22:33"), false}, // 真实网卡（Intel OUI）
 		{"WLAN", mac("3c:22:fb:11:22:33"), false},
 		{"Ethernet", nil, false},
 	}

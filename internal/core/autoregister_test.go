@@ -23,6 +23,15 @@ type regTel struct {
 	videoSupported bool
 	videoEnabled   bool
 
+	// 心跳（MSP_HEARTBEAT）记录
+	hbMu      sync.Mutex
+	hbs       int
+	hbMode    string
+	hbBusy    bool
+	hbExpires time.Duration
+	hbName    string
+	hbErr     error // 非 nil 时 SendHeartbeat 返回它（模拟服务端不支持 NOTIFY）
+
 	// 远端指令实际调到的动作
 	dialed, dialedVideo     []string
 	answered, answeredVideo []string
@@ -200,4 +209,23 @@ func waitReg(t *testing.T, tel *regTel, want int) {
 	}
 	regs, _ := tel.counts()
 	t.Fatalf("等待注册 %d 次超时，实际 %d 次", want, regs)
+}
+
+// SendHeartbeat 记录坐席心跳（MSP_HEARTBEAT）。
+func (r *regTel) SendHeartbeat(agentMode string, isBusy bool, displayName, status string, expires time.Duration) error {
+	r.hbMu.Lock()
+	defer r.hbMu.Unlock()
+	r.hbs++
+	r.hbMode = agentMode
+	r.hbBusy = isBusy
+	r.hbExpires = expires
+	r.hbName = displayName
+	return r.hbErr
+}
+
+// heartbeat 返回心跳次数与最近一次的内容。
+func (r *regTel) heartbeat() (int, string, bool, time.Duration, string) {
+	r.hbMu.Lock()
+	defer r.hbMu.Unlock()
+	return r.hbs, r.hbMode, r.hbBusy, r.hbExpires, r.hbName
 }

@@ -23,6 +23,8 @@ window.SipApp = window.SipApp || {};
     update: null,            // 更新状态（system.update / system.state.update）
     autoAnswer: false,
     contactCount: 0,
+    // 坐席模式（REQ-ACC-028 / REQ-ACC-034）：system.state 快照 + cti.agent 事件维护
+    agent: { online: false, displayName: '', mode: 'none', busy: false },
   };
 
   const sdk = new SipPhoneSDK({
@@ -77,10 +79,18 @@ window.SipApp = window.SipApp || {};
       if (data.autoAnswer !== undefined) state.autoAnswer = data.autoAnswer;
       if (data.update) state.update = data.update;
       if (data.recentDial) state.recentDial = data.recentDial;
+      // 坐席模式（REQ-ACC-028）：快照里带上 online/displayName/agentMode/isBusy
+      state.agent = {
+        online: !!data.agentOnline,
+        displayName: data.agentDisplayName || '',
+        mode: data.agentMode || 'none',
+        busy: !!data.agentBusy,
+      };
       const calls = data.calls || [];
       state.call = calls.length ? calls[0] : null;
     }
     emit('state', state);
+    emit('agent', state.agent);
   });
 
   sdk.on('register.state', function (data) {
@@ -93,12 +103,21 @@ window.SipApp = window.SipApp || {};
   });
 
   ['call.incoming', 'call.dialing', 'call.ringing', 'call.established',
-    'call.muted', 'call.audio', 'call.video'].forEach(function (name) {
+    'call.audio', 'call.video'].forEach(function (name) {
       sdk.on(name, function (data) {
         if (data && data.call) state.call = data.call;
         emit('call', state.call);
       });
     });
+
+  // call.muted 的负载是 {callId, muted}（不带 call 快照）：把它并回 state.call，
+  // 界面才能把「保持」切换成「取消保持」。
+  sdk.on('call.muted', function (data) {
+    if (state.call && data && typeof data.muted === 'boolean') {
+      state.call = Object.assign({}, state.call, { muted: data.muted });
+    }
+    emit('call', state.call);
+  });
 
   ['call.terminated', 'call.failed'].forEach(function (name) {
     sdk.on(name, function (data) {
@@ -130,6 +149,26 @@ window.SipApp = window.SipApp || {};
   sdk.on('calllog.changed', function (data) { emit('calllog', data); });
   sdk.on('video.transform', function (data) { emit('transform', data); });
   sdk.on('video.web', function (data) { emit('videoWeb', data); });
+
+  // ---- CTI（REQ-ACC-026 / REQ-ACC-028 / REQ-ACC-034）----
+  // 坐席模式/置忙：顶栏徽章、在线座席页据此刷新。
+  sdk.on('cti.agent', function (data) {
+    state.agent = {
+      online: !!(data && data.online),
+      displayName: (data && data.displayName) || '',
+      mode: (data && data.agentMode) || 'none',
+      busy: !!(data && data.isBusy),
+    };
+    emit('agent', state.agent);
+  });
+  // 话务状态（咨询/三方/监听/会议）：负载带完整通话快照，直接并回 state.call
+  sdk.on('cti.state', function (data) {
+    if (data && data.call) state.call = data.call;
+    emit('call', state.call);
+    emit('cti', state.call ? state.call.cti || null : null);
+  });
+  // 指令结果（桌面的按钮与网页可能同时发起）：页面可据此弹提示
+  sdk.on('cti.result', function (data) { emit('ctiResult', data); });
 
   App.store = {
     sdk: sdk,

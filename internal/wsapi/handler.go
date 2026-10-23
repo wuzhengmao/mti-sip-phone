@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -135,6 +136,9 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		var p struct {
 			Target string `json:"target"`
 			Video  bool   `json:"video"` // 可选：true 发起视频呼叫（REQ-VIDEO-001）
+			// Name 可选的**对端显示名**（如在线座席列表里的 displayName）：
+			// 呼叫期间优先于通信录名称显示，为空时行为不变。
+			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil || p.Target == "" {
 			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 target"))
@@ -144,9 +148,15 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 			callID string
 			err    error
 		)
-		if p.Video {
+		name := strings.TrimSpace(p.Name)
+		switch {
+		case p.Video && name != "":
+			callID, err = s.app.DialVideoNamed(ctx, p.Target, name)
+		case p.Video:
 			callID, err = s.app.DialVideo(ctx, p.Target)
-		} else {
+		case name != "":
+			callID, err = s.app.DialNamed(ctx, p.Target, name)
+		default:
 			callID, err = s.app.Dial(ctx, p.Target)
 		}
 		if err != nil {
@@ -442,6 +452,10 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 	default:
 		// 分组的子分发器（各文件一组方法，主 switch 不再无限膨胀）：
 		// 依次询问，谁认领谁返回响应。
+		if r, ok := s.dispatchCTI(ctx, msg); ok {
+			resp = r
+			break
+		}
 		if r, ok := s.dispatchCallLog(msg); ok {
 			resp = r
 			break
@@ -518,6 +532,10 @@ func codeOf(err error) string {
 		return CodeConfigUnavailable
 	case errors.Is(err, core.ErrConfigInvalid):
 		return CodeInvalidParams
+	case errors.Is(err, core.ErrCTIBusy):
+		return CodeCTIBusy
+	case errors.Is(err, errCTITimeout):
+		return CodeCTITimeout
 	default:
 		return CodeInternal
 	}

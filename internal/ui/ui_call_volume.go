@@ -204,10 +204,12 @@ func (a *App) applySpeakerButton() {
 		return
 	}
 	if a.speakerLevel.on() {
+		a.speakerBtn.SetAccent(colorHoldBlue) // 无底色样式：图标 = 强调色
 		a.speakerBtn.SetTrack(colorLevelTrack)
 		a.speakerBtn.SetIcon(IconSpeakerOn)
 		a.speakerBtn.SetLevels(a.speakerLevel.blueLevel(), a.speakerLevel.boostLevel())
 	} else {
+		a.speakerBtn.SetAccent(colorDangerRed)
 		a.speakerBtn.SetTrack(colorSwitchGray)
 		a.speakerBtn.SetIcon(IconSpeakerOff)
 		a.speakerBtn.SetLevels(0, 0)
@@ -222,10 +224,12 @@ func (a *App) applyMicButton() {
 		return
 	}
 	if a.micLevel.on() {
+		a.micBtn.SetAccent(colorHoldBlue)
 		a.micBtn.SetTrack(colorLevelTrack)
 		a.micBtn.SetIcon(IconMicOn)
 		a.micBtn.SetLevels(a.micLevel.blueLevel(), a.micLevel.boostLevel())
 	} else {
+		a.micBtn.SetAccent(colorDangerRed)
 		a.micBtn.SetTrack(colorSwitchGray)
 		a.micBtn.SetIcon(IconMicOff)
 		a.micBtn.SetLevels(0, 0)

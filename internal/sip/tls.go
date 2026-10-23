@@ -217,7 +217,7 @@ func loadOrCreateCert(dir string) (tls.Certificate, error) {
 
 // generateSelfSigned 生成 RSA 2048 自签证书：SAN 覆盖本机各网卡 IP、hostname 与
 // localhost——服务端按 IP 回连时，若它开启了对端校验，证书里得有这个 IP 才有东西可对
-//（默认不校验时这些只是让证书看起来正常）。RSA 而非 ECDSA：兼容性优先。
+// （默认不校验时这些只是让证书看起来正常）。RSA 而非 ECDSA：兼容性优先。
 func generateSelfSigned() (certPEM, keyPEM []byte, err error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

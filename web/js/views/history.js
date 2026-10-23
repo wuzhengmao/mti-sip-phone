@@ -99,11 +99,12 @@ window.SipApp.views = window.SipApp.views || {};
     const acts = App.dom.el('td', { class: 'acts' });
     const call = App.dom.el('button', { class: 'ghost' }, '呼叫');
     call.addEventListener('click', function () {
-      sdk.dial(r.remote).catch(function (e) { App.ui.toast(App.util.errText(e), 'err'); });
+      // 回拨时带上记录里的座席显示名（没有则照旧走通信录）
+      sdk.dial(r.remote, { name: r.displayName }).catch(function (e) { App.ui.toast(App.util.errText(e), 'err'); });
     });
     const vcall = App.dom.el('button', { class: 'ghost' }, '视频');
     vcall.addEventListener('click', function () {
-      sdk.dialVideo(r.remote).catch(function (e) { App.ui.toast(App.util.errText(e), 'err'); });
+      sdk.dialVideo(r.remote, r.displayName).catch(function (e) { App.ui.toast(App.util.errText(e), 'err'); });
     });
     const del = App.dom.el('button', { class: 'red' }, '删除');
     del.addEventListener('click', function () {

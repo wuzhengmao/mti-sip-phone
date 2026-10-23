@@ -196,6 +196,9 @@
      *         system.update（自动更新状态：phase/progress/error 等）/
      *         video.frame（订阅视频后逐帧推送，data 为 {channel, seq, blob, size}）/
      *         system.updateConfig（自动更新配置变化）/
+     *         cti.agent（坐席模式/置忙变化：{online, displayName, agentMode, isBusy}）/
+     *         cti.state（通话话务状态变化：{call}，call.cti 见协议 §16）/
+     *         cti.result（CTI 指令结果：{seq, success, code, message, action, data?}）/
      *         connected / disconnected
      * 注：SDK 本地事件（connected / disconnected）不会派发给 '*' 订阅者。
      * @param {string} event 事件名，'*' 订阅全部
@@ -225,21 +228,25 @@
     /**
      * 拨号。
      * @param {string} target 号码或 SIP URI
-     * @param {{video?: boolean}} [options] video=true 发起视频呼叫
+     * @param {{video?: boolean, name?: string}} [options] video=true 发起视频呼叫；
+     *   name = 对端显示名（如在线座席列表里的 displayName，呼叫期间优先于通信录名称）
      * @returns {Promise<{callId: string}>}
      */
     dial(target, options) {
       options = options || {};
-      return this._request('call.dial', { target: target, video: !!options.video });
+      const p = { target: target, video: !!options.video };
+      if (options.name) p.name = String(options.name);
+      return this._request('call.dial', p);
     }
 
     /**
      * 视频呼叫（dial 的便捷写法）。
      * @param {string} target 号码或 SIP URI
+     * @param {string} [name] 对端显示名（可选）
      * @returns {Promise<{callId: string}>}
      */
-    dialVideo(target) {
-      return this.dial(target, { video: true });
+    dialVideo(target, name) {
+      return this.dial(target, { video: true, name: name });
     }
 
     /**
@@ -385,6 +392,124 @@
      */
     unregister() {
       return this._request('system.unregister', {});
+    }
+
+    // ---- CTI 坐席/话务（REQ-ACC-026 / REQ-ACC-034 / REQ-ACC-035）----
+
+    /**
+     * 在线座席列表（CTI `listAgents`）：同步等到 MSP_RESULT 后返回。
+     * 非坐席模式以 code='cti_not_agent' 拒绝。
+     * @returns {Promise<{agents: Array<{agent: string, displayName: string,
+     *   acd: string, agentMode: string, agentStatus: string}>, count: number}>}
+     */
+    listAgents() {
+      return this._request('cti.listAgents', {});
+    }
+
+    /**
+     * 坐席置忙/置闲（协议 §9.3 的 setBusy / setIdle）。
+     * 真正生效后的状态经 `cti.agent` 事件回显（{online, displayName, agentMode, isBusy}）。
+     * @param {boolean} busy true = 置忙，false = 置闲
+     * @returns {Promise<{action: string, seq: string}>}
+     */
+    setAgentBusy(busy) {
+      return this.ctiAction(busy ? 'setBusy' : 'setIdle');
+    }
+
+    /** 坐席置闲（setIdle 的便捷写法） */
+    setIdle() { return this.setAgentBusy(false); }
+
+    /** 坐席置忙（setBusy 的便捷写法） */
+    setBusy() { return this.setAgentBusy(true); }
+
+    /**
+     * 发起一条 CTI 反向控制指令（REQ-ACC-026），与桌面通话面板的按钮一致：
+     * 指令经 out-of-dialog NOTIFY（Event: MSP_ACTION）发给 CTI，等 MSP_RESULT
+     * 回来后 resolve；失败以 code=cti_failed / cti_busy / cti_timeout /
+     * cti_not_agent 拒绝（message 里带平台错误信息）。
+     *
+     * action 与第二个参数：
+     *   consult / consultThreeWay / transfer / consultTransfer /
+     *   monitor / takeover / exitThreeWay          → target（号码字符串）
+     *   addConferenceMembers / removeConferenceMembers → members（号码数组）
+     *   finishConsult / finishConference / whisper / intervene / intercept /
+     *   setBusy / setIdle                          → 不需要参数
+     *
+     * @param {string} action 动作名
+     * @param {string|string[]} [arg] target 或 members
+     * @returns {Promise<{action: string, seq: string, data?: any}>}
+     */
+    ctiAction(action, arg) {
+      const p = { action: String(action) };
+      if (Array.isArray(arg)) {
+        p.members = arg.map(String);
+      } else if (arg && typeof arg === 'object') {
+        Object.keys(arg).forEach(function (k) { p[k] = arg[k]; });
+      } else if (typeof arg === 'string' && arg) {
+        p.target = arg;
+      }
+      return this._request('cti.action', p);
+    }
+
+    /** 发起咨询（被咨询方 = target） */
+    consult(target) { return this.ctiAction('consult', target); }
+
+    /** 咨询转三方（被咨询方 = target） */
+    consultThreeWay(target) { return this.ctiAction('consultThreeWay', target); }
+
+    /** 直接转移（target = 被转移方） */
+    transfer(target) { return this.ctiAction('transfer', target); }
+
+    /** 咨询转移（target = 被咨询/被转移方） */
+    consultTransfer(target) { return this.ctiAction('consultTransfer', target); }
+
+    /** 监听某坐席（班长模式） */
+    monitor(target) { return this.ctiAction('monitor', target); }
+
+    /** 代接某坐席的振铃来电 */
+    takeover(target) { return this.ctiAction('takeover', target); }
+
+    /** 三方通话里强制挂断某一方（仅 owner） */
+    exitThreeWay(target) { return this.ctiAction('exitThreeWay', target); }
+
+    /** 结束咨询（回到原通话） */
+    finishConsult() { return this.ctiAction('finishConsult'); }
+
+    /** 结束会议（owner） */
+    finishConference() { return this.ctiAction('finishConference'); }
+
+    /** 监听耳语 */
+    whisper() { return this.ctiAction('whisper'); }
+
+    /** 监听插话（强插） */
+    intervene() { return this.ctiAction('intervene'); }
+
+    /** 监听强拦 */
+    intercept() { return this.ctiAction('intercept'); }
+
+    /** 把成员加入会议（members 为号码数组） */
+    addConferenceMembers(members) {
+      return this.ctiAction('addConferenceMembers', Array.isArray(members) ? members : [members]);
+    }
+
+    /** 从会议移除成员（members 为号码数组） */
+    removeConferenceMembers(members) {
+      return this.ctiAction('removeConferenceMembers', Array.isArray(members) ? members : [members]);
+    }
+
+    /** 会议成员会控（owner）：禁音 / 取消禁音（逐项开关，参数 member=成员号码） */
+    setConferenceMemberMuted(member, muted) {
+      return this.ctiAction(muted ? 'muteConferenceMember' : 'unmuteConferenceMember', { member: member });
+    }
+
+    /** 会议成员会控（owner）：禁听 / 取消禁听 */
+    setConferenceMemberDeafened(member, deafened) {
+      return this.ctiAction(deafened ? 'deafConferenceMember' : 'undeafConferenceMember', { member: member });
+    }
+
+    /** 会议成员会控（owner）：禁视频 / 取消禁视频 */
+    setConferenceMemberVideoMuted(member, muted) {
+      return this.ctiAction(muted ? 'vmuteConferenceMember' : 'unvmuteConferenceMember', { member: member });
     }
 
     /**

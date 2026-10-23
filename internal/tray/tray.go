@@ -31,7 +31,7 @@ const openDebounce = time.Second
 
 // Options 托盘运行参数。
 type Options struct {
-	// Title 悬停提示的基础文案（与完整版一致，形如 "mti-sip-phone"）。
+	// Title 悬停提示的基础文案（与完整版一致，形如 "MTI 软电话"）。
 	Title string
 	// OnOpen 打开控制台（左键点击图标或菜单项）。默认实现见 OpenBrowser。
 	OnOpen func()
@@ -50,13 +50,15 @@ type Options struct {
 var state struct {
 	mu         sync.Mutex
 	opts       Options
-	ready      bool // systray 就绪（onReady 之后才能 SetIcon/SetTooltip）
-	registered bool // 图标颜色：只有 registered 为绿
-	signedIn   bool // 菜单：registered 或 registering → 「退出账号」，其余 → 「登录账号」
+	ready      bool   // systray 就绪（onReady 之后才能 SetIcon/SetTooltip）
+	registered bool   // 图标颜色：registered 才可能是绿/黄（否则红）
+	agentBusy  bool   // 已注册且坐席置忙 → 黄色图标
+	signedIn   bool   // 菜单：registered 或 registering → 「退出账号」，其余 → 「登录账号」
 	detail     string // 附加到提示里的信息（如本机号码）
 	lastOpen   time.Time
 	greenIcon  []byte
 	redIcon    []byte
+	yellowIcon []byte
 
 	accountItem *systray.MenuItem // 「登录账号 / 退出账号」菜单项（OnAccount 为 nil 时恒为 nil）
 }
@@ -68,8 +70,9 @@ var state struct {
 func Run(o Options) {
 	state.mu.Lock()
 	state.opts = o
-	state.greenIcon = loadIcon(appicon.PhoneGreenSVG(), appicon.ColorGreen)
-	state.redIcon = loadIcon(appicon.PhoneRedSVG(), appicon.ColorRed)
+	state.greenIcon = loadIcon(appicon.PhoneGreenPNG(), appicon.ColorGreen)
+	state.redIcon = loadIcon(appicon.PhoneRedPNG(), appicon.ColorRed)
+	state.yellowIcon = loadIcon(appicon.PhoneYellowPNG(), appicon.ColorYellow)
 	state.mu.Unlock()
 
 	// 左键点击：直接开控制台（**不弹菜单**）。必须在 systray.Run 之前设置：
@@ -163,6 +166,15 @@ func SetState(regState, detail string) {
 	applyAccountItem()
 }
 
+// SetAgentBusy 坐席置忙状态（已注册且置忙时托盘图标变黄，REQ-UI-011 修订）。
+// Run 之前调用也有效（状态缓存，就绪时统一应用）。
+func SetAgentBusy(busy bool) {
+	state.mu.Lock()
+	state.agentBusy = busy
+	state.mu.Unlock()
+	applyIcon()
+}
+
 // accountLabel 「登录账号 / 退出账号」菜单项标签：已注册侧显示「退出账号」，
 // 未注册侧显示「登录账号」。
 func accountLabel(signedIn bool) string {
@@ -193,10 +205,13 @@ func Quit() {
 // applyIcon 按当前注册状态换图标（托盘未就绪时只记状态，就绪时统一应用）。
 func applyIcon() {
 	state.mu.Lock()
-	ready, registered := state.ready, state.registered
+	ready, registered, busy := state.ready, state.registered, state.agentBusy
 	icon := state.redIcon
 	if registered {
 		icon = state.greenIcon
+		if busy {
+			icon = state.yellowIcon
+		}
 	}
 	state.mu.Unlock()
 	if !ready || len(icon) == 0 {
@@ -206,7 +221,7 @@ func applyIcon() {
 }
 
 // tooltipText 悬停提示文案：标题 + 附加信息（一般是本机号码），
-// 与完整版的托盘提示完全一致（形如 "mti-sip-phone - 2999"）——
+// 与完整版的托盘提示完全一致（形如 "MTI 软电话 - 2999"）——
 // 不带版本号、也不加状态后缀：注册状态由图标颜色表达（REQ-UI-011）。
 func tooltipText() string {
 	state.mu.Lock()

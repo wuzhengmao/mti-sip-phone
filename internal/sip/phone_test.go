@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,19 +17,44 @@ import (
 	"mti-sip-phone/internal/core"
 )
 
-// testSink 收集 Phone 上报的事件，供断言。
-type testSink struct {
-	mu         sync.Mutex
-	regs       []core.RegisterState
-	events     []string
-	remoteCmds []core.RemoteCommand
-	calls      []string
+// contactHeaderValue REGISTER 的 Contact 头原文（测试断言用）。
+func contactHeaderValue(req *sip.Request) string {
+	if h := req.GetHeader("Contact"); h != nil {
+		return h.Value()
+	}
+	return ""
 }
 
-func (s *testSink) OnIncoming(callID, remote, remoteName string, hasVideo bool) {
+// testSink 收集 Phone 上报的事件，供断言。
+type testSink struct {
+	mu           sync.Mutex
+	regs         []core.RegisterState
+	events       []string
+	remoteCmds   []core.RemoteCommand
+	ctiResults   []core.CTIResult
+	mspEvents    []mspEventRec
+	calls        []string
+	lastIncoming core.IncomingCall
+}
+
+// mspEventRec 记录一条 MSP_EVENT（event 名 + body）。
+type mspEventRec struct {
+	event string
+	body  map[string]any
+}
+
+func (s *testSink) OnIncoming(callID string, info core.IncomingCall) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, "incoming:"+callID)
+	s.lastIncoming = info
+}
+
+// lastIncomingInfo 最近一次来电的解析结果（Call-Info 名称/类型等，REQ-ACC-029）。
+func (s *testSink) lastIncomingInfo() core.IncomingCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastIncoming
 }
 
 func (s *testSink) OnVideoState(callID string, st core.VideoState) {
@@ -67,6 +93,37 @@ func (s *testSink) OnRemoteCommand(cmd core.RemoteCommand) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.remoteCmds = append(s.remoteCmds, cmd)
+}
+
+// OnCTIResult 记录 INFO 指令结果（REQ-ACC-026）。
+func (s *testSink) OnCTIResult(res core.CTIResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ctiResults = append(s.ctiResults, res)
+}
+
+// OnMSPEvent 记录通话面板事件（REQ-ACC-026）。
+func (s *testSink) OnMSPEvent(event string, body map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mspEvents = append(s.mspEvents, mspEventRec{event: event, body: body})
+}
+
+// waitCTIResult 轮询等待满足条件的 INFO 结果。
+func (s *testSink) waitCTIResult(timeout time.Duration, pred func(core.CTIResult) bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		for _, r := range s.ctiResults {
+			if pred(r) {
+				s.mu.Unlock()
+				return true
+			}
+		}
+		s.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
 }
 
 // waitRemoteCmd 轮询等待满足条件的控制指令（NOTIFY 的副作用是异步的）。
@@ -143,12 +200,13 @@ func (s *testSink) waitEvent(prefix string, timeout time.Duration) bool {
 	return false
 }
 
-// regRecord 测试服务器收到的一条 REGISTER（账号 + Expires），
+// regRecord 测试服务器收到的一条 REGISTER（账号 + Expires + Contact），
 // 供换账号先注销旧账号的断言用（只记带 Authorization 的那条，
 // 即真正生效的注册/注销请求）。
 type regRecord struct {
 	user    string
 	expires int
+	contact string // Contact 头原文（断言 msp=support 用）
 }
 
 // regRecorder 线程安全地记录收到的 REGISTER。
@@ -157,9 +215,9 @@ type regRecorder struct {
 	regs []regRecord
 }
 
-func (r *regRecorder) add(user string, expires int) {
+func (r *regRecorder) add(user string, expires int, contact string) {
 	r.mu.Lock()
-	r.regs = append(r.regs, regRecord{user: user, expires: expires})
+	r.regs = append(r.regs, regRecord{user: user, expires: expires, contact: contact})
 	r.mu.Unlock()
 }
 
@@ -209,7 +267,7 @@ func startTestServerRecording(t *testing.T) (addr string, rec *regRecorder) {
 				expires = v
 			}
 		}
-		rec.add(user, expires)
+		rec.add(user, expires, contactHeaderValue(req))
 		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
 		res.AppendHeader(sip.NewHeader("Expires", "3600"))
 		_ = tx.Respond(res)
@@ -298,6 +356,47 @@ func TestRegisterFlow(t *testing.T) {
 	}
 	if sink.lastReg() != core.RegRegistered {
 		t.Fatalf("注册状态应为 registered，实际: %v", sink.regs)
+	}
+}
+
+// TestRegisterContactMSP 注册的 Contact 必须带 `msp=support`（REQ-ACC-026）：
+// CTI 周期同步 OpenSIPS location 表时按 contact 里的这个参数判断该话机支持
+// MSP 私有协议（MSP_EVENT_* 只推给声明支持的话机）。
+func TestRegisterContactMSP(t *testing.T) {
+	addr, rec := startTestServerRecording(t)
+	sink := &testSink{}
+	p := newTestPhone(t, sink)
+
+	host, portStr, _ := net.SplitHostPort(addr)
+	port := 0
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
+
+	acc := config.Account{
+		Server:    host,
+		Port:      port,
+		Transport: "udp",
+		Account:   "1001",
+		Password:  "secret",
+		Expires:   300,
+	}
+	if err := p.Register(context.Background(), acc); err != nil {
+		t.Fatalf("Register 返回错误: %v", err)
+	}
+	if !sink.waitRegState(core.RegRegistered, 5*time.Second) {
+		t.Fatalf("注册未成功，实际状态: %v", sink.regs)
+	}
+
+	var contact string
+	for _, r := range rec.list() {
+		if r.user == "1001" && r.expires > 0 {
+			contact = r.contact
+		}
+	}
+	if contact == "" {
+		t.Fatalf("服务器未收到注册的 Contact，记录: %+v", rec.list())
+	}
+	if !strings.Contains(contact, "msp=support") {
+		t.Fatalf("REGISTER 的 Contact 应带 msp=support，实际: %s", contact)
 	}
 }
 

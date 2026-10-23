@@ -116,7 +116,7 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 | 日志（分级、滚动、脱敏、SIP 信令跟踪） | ✅ 已完成 |
 | 本地 WS 控制服务 + 事件推送 | ✅ 已完成 |
 | JS SDK + 网页控制台 | ✅ 已完成 |
-| SIP 注册（UDP/TCP/TLS + Digest + 续注册 + 退避重试 + 休眠/切网恢复 + 服务端心跳） | ✅ 已完成（UDP/TCP 与真实服务端联调通过；TLS 与本机 TLS 对端联调通过） |
+| SIP 注册（UDP/TCP/TLS + Digest + 续注册 + 退避重试 + 休眠/切网恢复） | ✅ 已完成（UDP/TCP 与真实服务端联调通过；TLS 与本机 TLS 对端联调通过） |
 | SIP 呼叫（呼出/呼入/接听/拒接/挂断/保持/DTMF） | ✅ 已完成（与真实服务端联调通过） |
 | 媒体引擎（PCMA/PCMU/Opus/G.722 + RTP + 抖动缓冲 + 音量/增益） | ✅ 已完成 |
 | 音频设备（枚举/选择/全双工，malgo） | ✅ 已完成 |

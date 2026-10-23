@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 # mti-sip-phone Linux 构建脚本：本机 Linux GUI 产物 + Windows GUI / 对侧 Linux 架构交叉产物，输出到 dist/
+#
+# 用法：
+#   ./build.sh                         全部 5 个目标 × 2 个变体（发布用）
+#   ./build.sh --target windows-amd64  只出 Windows amd64（完整版 + 无 UI 版，**测试用**，
+#                                      几十秒完成）；目标名见下方 want_target 附近
+#
 # 依赖：Go 1.24+、系统 gcc（CGO）
 #   - 交叉 Windows GUI 需 mingw-w64（amd64/arm64 主机均有包）：
 #       Debian/Ubuntu: sudo apt install gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
@@ -28,6 +34,28 @@
 # 的基础版本）；正式发布走 SIP_PHONE_RELEASE=1 ./build.sh（scripts/release.sh 调用）。
 set -e
 cd "$(dirname "$0")"
+
+# --target <名称>：只构建指定目标（**测试时用**，例如 --target windows-amd64，
+# 只出完整版 + 无 UI 版的 Windows amd64 两个产物，几十秒完成）。
+# 可重复或逗号分隔；不带该参数 = 全部目标（发布用）。
+# 目标名：linux-native / linux-cross / windows-amd64 / windows-386 / windows-arm64
+#         / linux（= native + cross）
+TARGETS=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --target) TARGETS="${TARGETS:+$TARGETS,}${2:?--target 需要一个目标名}"; shift ;;
+        *) echo "未知参数：$1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+want_target() {
+    [ -z "$TARGETS" ] && return 0
+    case ",$TARGETS," in
+        *",$1,"*) return 0 ;;
+    esac
+    return 1
+}
 
 export GOTOOLCHAIN=local
 mkdir -p dist
@@ -533,21 +561,21 @@ build_windows_arm64() {
         -o "$(out_name windows arm64 .exe)" ./cmd/sip-phone
 }
 
-# ---- 按变体跑一遍全部目标 ----
+# ---- 按变体跑一遍选定目标（--target 过滤；不传 = 全部，发布用）----
 
 variant_setup full
-build_linux_native
-build_linux_cross
-build_windows_amd64
-build_windows_386
-build_windows_arm64
+{ want_target linux || want_target linux-native; } && build_linux_native
+{ want_target linux || want_target linux-cross; } && build_linux_cross
+want_target windows-amd64 && build_windows_amd64
+want_target windows-386 && build_windows_386
+want_target windows-arm64 && build_windows_arm64
 
 variant_setup noui
-build_linux_native
-build_linux_cross
-build_windows_amd64
-build_windows_386
-build_windows_arm64
+{ want_target linux || want_target linux-native; } && build_linux_native
+{ want_target linux || want_target linux-cross; } && build_linux_cross
+want_target windows-amd64 && build_windows_amd64
+want_target windows-386 && build_windows_386
+want_target windows-arm64 && build_windows_arm64
 
-echo "构建完成：dist/（版本 ${APP_VERSION}）"
+echo "构建完成：dist/（版本 ${APP_VERSION}${TARGETS:+，目标 ${TARGETS}}）"
 ls -la dist/

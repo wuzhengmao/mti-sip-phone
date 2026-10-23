@@ -1,16 +1,13 @@
 // gen-appicon 生成 exe 文件图标 assets/app-icon.ico：把 internal/appicon 的
-// 绿色话机 SVG 光栅化成多尺寸位图，打包成多条目 PNG-ICO（Vista+ 支持，
-// 本项目门槛 Windows 10+）。
+// 绿色话机 PNG（256×256，iconfont 原始渲染）CatmullRom 缩到多尺寸位图，
+// 打包成多条目 PNG-ICO（Vista+ 支持，本项目门槛 Windows 10+）。
 //
 // 用法（仓库根目录）：go run ./tools/gen-appicon
-//
-// 光栅化走 internal/appicon 的 Rasterize（与托盘图标同一条链路），保证文件
-// 图标与托盘观感一致。
 //
 // 下一步生成 .syso 资源（一次性，go-winres 纯 Go 工具，不写进 go.mod）：
 //
 //	go run github.com/tc-hib/go-winres@latest make \
-//	  --arch amd64,386,arm64 --icon assets/app-icon.ico --out cmd/sip-phone
+//	  --in cmd/sip-phone/winres.json --arch amd64,386,arm64 --out cmd/sip-phone/rsrc
 //
 // 三个 rsrc_windows_*.syso 提交进仓库后，Go 对 Windows 目标自动链接它们，
 // 所有 Windows 产物（完整版/无 UI 版/控制台版）都带图标，构建脚本零改动；
@@ -28,6 +25,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"golang.org/x/image/draw"
+
 	"mti-sip-phone/internal/appicon"
 )
 
@@ -44,14 +43,23 @@ func main() {
 }
 
 func run(out string) error {
+	src, err := png.Decode(bytes.NewReader(appicon.PhoneGreenPNG()))
+	if err != nil {
+		return fmt.Errorf("解码话机 PNG 失败: %w", err)
+	}
+	sb := src.Bounds()
+
 	var imgs []image.Image
 	for _, s := range sizes {
-		img, err := appicon.Rasterize(appicon.PhoneGreenSVG(), float64(s))
-		if err != nil {
-			return fmt.Errorf("光栅化 %dpx 失败: %w", s, err)
+		if s == sb.Dx() && s == sb.Dy() {
+			imgs = append(imgs, src)
+			continue
 		}
-		imgs = append(imgs, img)
+		dst := image.NewRGBA(image.Rect(0, 0, s, s))
+		draw.CatmullRom.Scale(dst, dst.Bounds(), src, sb, draw.Over, nil)
+		imgs = append(imgs, dst)
 	}
+
 	var buf bytes.Buffer
 	if err := writeICO(&buf, imgs); err != nil {
 		return err

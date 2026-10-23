@@ -23,16 +23,16 @@ const notifyBodyMax = 64
 //     主叫为「显示名（号码）」，两者只有其一（或相同）时就用其一。
 //
 // 通知**第一行**（应用名）由系统显示，不走这里：Windows 取 AUMID 注册表的
-// DisplayName（固定「mti-sip-phone 软电话」，不随账号变化）。
+// DisplayName（固定「MTI 软电话」，不随账号变化）。
 func missedNotificationText(c *core.Call, ringFor time.Duration) (title, body string) {
 	title = "未接来电"
 	if c == nil {
 		return title, ""
 	}
-	// 主叫：通信录名称优先（REQ-UI-037；通话事件里的 contact 由核心层填好），
-	// 其次「显示名（号码）」——号码始终可见
-	name := ""
-	if c.Contact != nil {
+	// 主叫：Call-Info 名称（REQ-ACC-029）优先，其次通信录名称（REQ-UI-037；
+	// 通话事件里的 contact 由核心层填好），最后「显示名（号码）」——号码始终可见
+	name := c.PeerName
+	if name == "" && c.Contact != nil {
 		name = c.Contact.Name
 	}
 	if name == "" {

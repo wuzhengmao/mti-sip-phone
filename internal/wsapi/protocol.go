@@ -47,6 +47,16 @@ const (
 	CodeConfigUnavailable = "config_unavailable"
 	// CodeUpdateUnavailable 更新能力未接入（未配置更新器）。
 	CodeUpdateUnavailable = "update_unavailable"
+	// CodeCTIBusy 已有 CTI 指令在途（同一时间只允许一条，REQ-ACC-026）。
+	CodeCTIBusy = "cti_busy"
+	// CodeCTITimeout CTI 指令超时（约 2 秒内没收到 MSP_RESULT）。
+	CodeCTITimeout = "cti_timeout"
+	// CodeCTIFailed CTI 平台回了失败结果（MSP_RESULT success=false，
+	// message 里带平台的错误信息与错误码）。
+	CodeCTIFailed = "cti_failed"
+	// CodeCTINotAgent 当前不在坐席模式（没有 displayName/agentMode 的 CTI 后端），
+	// 话务类指令（咨询/转移/监听…）无从发起。
+	CodeCTINotAgent = "cti_not_agent"
 )
 
 // 请求方法名。
@@ -104,6 +114,8 @@ const (
 	MethodUpdateCancel              = "update.cancel"                    // 取消下载
 	MethodUpdateApply               = "update.apply"                     // 安装并重启
 	MethodUpdateStatus              = "update.status"                    // 更新状态快照
+	MethodCTIAction                 = "cti.action"                       // CTI 反向控制指令（REQ-ACC-026）
+	MethodCTIListAgents             = "cti.listAgents"                   // 在线座席列表（REQ-ACC-035）
 )
 
 // 事件名。
@@ -136,6 +148,15 @@ const (
 	EvSystemConfig = "system.config"
 	// EvAudioReady 音频后端就绪（REQ-WS-016）：后台初始化完成，设备列表可枚举。
 	EvAudioReady = "audio.ready"
+	// EvCTIAgent 坐席模式/置忙状态变化（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）：
+	// {online, displayName, agentMode, isBusy}。
+	EvCTIAgent = "cti.agent"
+	// EvCTIState 通话的话务状态变化（咨询/三方/监听/会议，REQ-ACC-026）：
+	// {call}，call.cti 里是完整的 CTIState。
+	EvCTIState = "cti.state"
+	// EvCTIResult CTI 指令结果（MSP_RESULT）：{seq, success, code, message, action, data?}。
+	// cti.action / cti.listAgents 的调用方会同时收到这条事件（同步回包之外）。
+	EvCTIResult = "cti.result"
 )
 
 // newError 构造错误信息。

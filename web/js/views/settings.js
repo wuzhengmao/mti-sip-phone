@@ -89,7 +89,6 @@ window.SipApp.views = window.SipApp.views || {};
     $('accProxy').value = a.proxy || '';
     $('accStunServer').value = a.stunServer || '';
     $('accRPort').checked = !!a.rport;
-    $('accOptChk').checked = !!a.optchk;
     $('accStunEnabled').checked = !!a.stunEnabled;
     $('accTLSVerify').checked = !!a.tlsVerify;
     fillSelect('accTransport', TRANSPORTS, a.transport || 'udp');
@@ -146,7 +145,6 @@ window.SipApp.views = window.SipApp.views || {};
   function updateTransportHint() {
     const t = $('accTransport').value;
     $('accTLSVerify').disabled = t !== 'tls';
-    $('accOptChk').disabled = t !== 'udp';
     $('accHint').textContent = t === 'tls'
       ? 'TLS 只加密信令；通话媒体（声音/视频）是否加密由「媒体加密」决定。'
       : '保存后会立即按新配置重新注册。';
@@ -189,7 +187,6 @@ window.SipApp.views = window.SipApp.views || {};
       proxy: $('accProxy').value.trim(),
       stunServer: $('accStunServer').value.trim(),
       rport: $('accRPort').checked,
-      optchk: $('accOptChk').checked,
       stunEnabled: $('accStunEnabled').checked,
       tlsVerify: $('accTLSVerify').checked,
       transport: $('accTransport').value,

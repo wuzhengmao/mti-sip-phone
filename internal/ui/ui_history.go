@@ -50,10 +50,8 @@ const (
 	historyRowGap = 2
 	// historyRowSep 分割线高度。
 	historyRowSep = 1
-	// historyDirIconSize 行首方向图标尺寸（要放得下话机 + 箭头 + 摄像头标记）。
-	historyDirIconSize = 30
-	// historyVideoMarkSize 第一行号码右边「视频通话」摄像头标记的尺寸。
-	historyVideoMarkSize = 16
+	// historyDirIconSize 行首方向图标尺寸。
+	historyDirIconSize = 22
 	// historyVideoIconSize 行内「视频呼叫」按钮里摄像头图标的尺寸（摄像头是
 	// 扁宽图形，同尺寸下比话机显小，单独放大一点）。
 	historyVideoIconSize = 16
@@ -62,13 +60,6 @@ const (
 	// historyScrollGap 行内内容右侧给滚动条让出的宽度：滚动条由列表自己画在
 	// 列表右缘上，行内容（时间与按钮）都要躲开它，列表宽度本身不变。
 	historyScrollGap = 14
-	// 方向箭头相对"话机右上角"的微调（像素）。基准是向右上角收：x 减、y 加；
-	// 然后两个方向都再上移 historyDirArrowUp，来电箭头再右移 historyDirArrowInDX
-	//（来电箭头是呼出箭头的 180° 旋转，视觉重心偏左下，所以补一点）。
-	historyDirArrowDX   = float32(4)
-	historyDirArrowDY   = float32(7)
-	historyDirArrowUp   = float32(1)
-	historyDirArrowInDX = float32(1)
 	// historyRowIconSize 行内图形按钮尺寸（呼叫/视频呼叫）。
 	historyRowIconSize = 24
 	// historyLoadAhead 距底部还有这么多像素就预加载下一批。
@@ -165,11 +156,9 @@ func (a *App) buildHistoryPage() {
 }
 
 // showHistory 切到通话记录页（主窗体顶栏按钮，仅非通话状态可用）。
+// showHistory 切到通话记录页。**通话中也可以打开**：只浏览，行内操作按钮按
+// 当前话务/拨号复用状态显示（见 listRowActions，REQ-ACC-035）。
 func (a *App) showHistory() {
-	if a.activeCallID != "" {
-		a.showInfo("提示", "通话中无法查看通话记录")
-		return
-	}
 	a.hideTip()         // 切页时收起备注提示
 	a.hideDialSuggest() // 拨号建议下拉同理
 	a.mainContent.Objects[0] = a.historyPage
@@ -545,10 +534,11 @@ func (a *App) onHistoryCall(rec core.CallRecord, video bool) {
 		return
 	}
 	a.dialSelect.SetText(rec.Remote)
+	name := rec.DisplayName // 回拨时继续沿用座席显示名（没有则回退通信录）
 	if video {
-		a.onVideoCallButton()
+		a.onVideoCallButtonNamed(name)
 	} else {
-		a.onCallButton()
+		a.onCallButtonNamed(name)
 	}
 }
 
@@ -646,8 +636,10 @@ func newHistoryRow(st *historyState, rec core.CallRecord) *historyRow {
 	a := st.a
 	r := &historyRow{st: st, rec: rec}
 
-	// ---- 第一行：方向图标 + 号码/显示名（命中通信录时号码后面跟名称与 ★）+
-	// 视频通话标记 …… 开始时间 ----
+	// ---- 第一行：方向图标 + 号码/显示名（命中通信录时号码后面跟名称与 ★）……
+	// 开始时间 ----
+	// 语音/视频已由行首方向图标区分（电话呼入/呼出 vs 视频电话呼入/呼出），
+	// 号码后面不再重复画摄像头标记。
 	whoText, starred, note := a.historyDisplay(rec)
 	// 有备注时名称可悬停出提示（REQ-UI-037）；没有备注就是普通文本，
 	// 行为与从前完全一致
@@ -658,35 +650,20 @@ func newHistoryRow(st *historyState, rec core.CallRecord) *historyRow {
 		who = newPlainText(whoText, historyFontMain, theme.ForegroundColor(), false)
 	}
 	when := newPlainText(historyTimeText(rec.StartedAt, time.Now()), historyFontSmall, theme.ForegroundColor(), false)
-	// 视频通话标记：紧跟号码右边，颜色同文字（主题前景色）
-	var mark fyne.CanvasObject = canvas.NewImageFromResource(nil)
-	if rec.HasVideo {
-		img := canvas.NewImageFromResource(theme.NewColoredResource(IconVideoMark, theme.ColorNameForeground))
-		img.FillMode = canvas.ImageFillContain
-		img.SetMinSize(fyne.NewSize(historyVideoMarkSize, historyVideoMarkSize))
-		mark = img
-	} else {
-		mark.Hide()
-	}
-	// 顺序：号码/名称 → ★（常用）→ 摄像头（视频通话）
-	whoWithMark := container.New(markAfterLayout{gap: 4}, who, starMark(starred), mark)
+	// 顺序：号码/名称 → ★（常用）
+	whoWithMark := container.New(markAfterLayout{gap: 4}, who, starMark(starred))
 	line1 := container.NewBorder(nil, nil, nil, when, whoWithMark)
 
 	// ---- 第二行：状态 · 时长 …… 呼叫 / 视频呼叫 ----
 	meta := newPlainText(historyMetaText(rec), historyFontSmall, theme.ForegroundColor(), false)
-	callBtn := newCompactButton(IconPhoneWhite, colorHoldBlue, historyRowIconSize,
-		func() { a.onHistoryCall(rec, false) })
-	callBtn.SetCornerRadius(historyRowButtonRadius)
-	actions := container.NewHBox(callBtn)
-	// 视频呼叫按钮：视频功能不可用（本构建没有 / 用户在配置里关掉了，
-	// REQ-VIDEO-014）时不显示
+	// 操作按钮随通话/拨号复用状态变化（同通信录/在线座席，见 listRowActions）
+	record := rec
+	var videoAct func()
 	if a.core != nil && a.core.VideoUsable() {
-		videoBtn := newCompactButton(IconVideoOn, colorHoldBlue, historyRowIconSize,
-			func() { a.onHistoryCall(rec, true) })
-		videoBtn.SetCornerRadius(historyRowButtonRadius)
-		videoBtn.SetIconSize(historyVideoIconSize) // 摄像头图形单独放大一点
-		actions.Add(videoBtn)
+		videoAct = func() { a.onHistoryCall(record, true) }
 	}
+	actions := a.listRowActions(record.Remote, historyRowIconSize, historyRowButtonRadius,
+		historyVideoIconSize, func() { a.onHistoryCall(record, false) }, videoAct, false, "")
 	line2 := container.NewBorder(nil, nil, meta, nil)
 
 	lines := container.New(panelRowsLayout{}, line1, line2) // 两行纵向居中（行距 2px）
@@ -731,70 +708,39 @@ func (r *historyRow) setSelected(on bool) {
 // 展示文案与配色（纯函数，便于单测）
 // ---------------------------------------------------------------------------
 
-// historyDirectionIcon 方向图标：**话机为主体**，右上角贴粗方向箭头
-// （↗ 呼出 / ↙ 呼入）；颜色表示结果（绿=已接通、红=未接通）。
-// 视频通话不在这里体现——第一行号码右边另有一个摄像头标记。
-//
-// 两个图元是各自独立出图、在这里用 canvas.Image 叠放的：Fyne 的 SVG 渲染器
-// 不认 <g transform>，把它们拼进一个 SVG 文件会整张空白（实测）。
+// historyDirectionIcon 方向图标：iconfont 的「电话呼入/呼出」「视频电话呼入/
+// 呼出」白色 PNG——方向与视频都由图形本身表达，接通/未接通由第二行状态文字
+// 表达（图标不再分红绿）。
 func historyDirectionIcon(r core.CallRecord) fyne.CanvasObject {
-	phone, arrow := historyDirectionResources(r)
-
-	phoneImg := canvas.NewImageFromResource(phone)
-	phoneImg.FillMode = canvas.ImageFillContain
-	arrowImg := canvas.NewImageFromResource(arrow)
-	arrowImg.FillMode = canvas.ImageFillContain
-
-	return container.NewCenter(container.New(
-		historyDirIconLayout{incoming: r.Direction == "incoming"}, phoneImg, arrowImg))
+	img := canvas.NewImageFromResource(historyDirectionResource(r))
+	img.FillMode = canvas.ImageFillContain
+	img.SetMinSize(fyne.NewSize(historyDirIconSize, historyDirIconSize))
+	return container.NewCenter(img)
 }
 
-// historyDirectionResources 方向图标用到的两个图元：话机（主体）与方向箭头，
-// 颜色都表示结果（绿=已接通、红=未接通）。
-func historyDirectionResources(r core.CallRecord) (phone, arrow fyne.Resource) {
-	ok := !r.AnsweredAt.IsZero()
+// historyDirectionResource 方向图标：呼入/呼出 × 语音/视频；已接通=白、
+// 未接通=红。
+func historyDirectionResource(r core.CallRecord) fyne.Resource {
 	incoming := r.Direction == "incoming"
-
-	phone, arrow = IconPhoneRed, IconArrowOutRed
+	ok := !r.AnsweredAt.IsZero()
 	switch {
-	case ok:
-		phone, arrow = IconPhoneGreen, IconArrowOutGreen
+	case incoming && r.HasVideo && !ok:
+		return IconVideoInRed
+	case incoming && r.HasVideo:
+		return IconVideoIn
+	case incoming && !ok:
+		return IconCallInRed
+	case incoming:
+		return IconCallIn
+	case r.HasVideo && !ok:
+		return IconVideoOutRed
+	case r.HasVideo:
+		return IconVideoOut
+	case !ok:
+		return IconCallOutRed
+	default:
+		return IconCallOut
 	}
-	if incoming {
-		arrow = IconArrowInRed
-		if ok {
-			arrow = IconArrowInGreen
-		}
-	}
-	return phone, arrow
-}
-
-// historyDirIconLayout 方向图标内部布局：话机占主体、靠左下，粗箭头压在它的
-// 右上角（两者在斜边上接合，像一个整体，重心不堆在右上）。
-//
-// 箭头位置按方向微调：来电箭头是呼出箭头的 180° 旋转，视觉重心偏左下，
-// 所以比呼出再往右挪一点（见下面几个常量）。
-type historyDirIconLayout struct{ incoming bool }
-
-func (historyDirIconLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
-	return fyne.NewSize(historyDirIconSize, historyDirIconSize)
-}
-
-func (l historyDirIconLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
-	phone, arrow := objs[0], objs[1]
-
-	ps := fyne.NewSize(size.Width*0.76, size.Height*0.76)
-	phone.Resize(ps)
-	phone.Move(fyne.NewPos(0, size.Height-ps.Height))
-
-	ax := size.Width*0.44 - historyDirArrowDX
-	ay := historyDirArrowDY - historyDirArrowUp
-	if l.incoming {
-		ax += historyDirArrowInDX
-	}
-	as := fyne.NewSize(size.Width*0.46, size.Height*0.46)
-	arrow.Resize(as)
-	arrow.Move(fyne.NewPos(ax, ay))
 }
 
 // historySeparatorColor 行分割线：深色主题用深灰、浅色主题用浅灰（用户指定）。
@@ -815,17 +761,21 @@ func historyMetaText(r core.CallRecord) string {
 	return strings.Join(parts, " · ")
 }
 
-// historyDisplay 记录行的对端展示（REQ-UI-037）：命中通信录时**号码在前、
-// 名称在后**（用户要求"电话号码右边显示通信录上的名称"），并带回是否常用（★）
-// 与备注（悬停提示）；未命中沿用原来的「显示名（号码）」。
+// historyDisplay 记录行的对端展示（REQ-UI-037）：名称优先级为
+// **座席显示名（DisplayName，座席列表直接呼出时记录）> 通信录名称 > SIP 显示名**。
+// 命中通信录时**号码在前、名称在后**（用户要求"电话号码右边显示通信录上的名称"），
+// 并带回是否常用（★）与备注（悬停提示）；未命中沿用「显示名（号码）」。
 func (a *App) historyDisplay(rec core.CallRecord) (text string, starred bool, note string) {
-	c, ok := a.contactFor(rec.Remote)
-	if !ok {
-		return historyWhoText(rec), false, ""
+	c, hasContact := a.contactFor(rec.Remote)
+	name := rec.DisplayName
+	if name == "" && hasContact {
+		name = c.Name
 	}
-	name := c.Name
 	if name == "" {
 		name = rec.RemoteName
+	}
+	if !hasContact {
+		return historyWhoTextName(rec, name), false, ""
 	}
 	switch {
 	case name == "" || name == rec.Remote:
@@ -842,14 +792,19 @@ func (a *App) historyDisplay(rec core.CallRecord) (text string, starred bool, no
 // 截断由 plainText 按宽度做，这里先挡一道超长文本。
 const contactNoteMax = 200
 
-// historyWhoText 对端展示名：显示名（号码），只有其一（或相同）时用其一。
+// historyWhoText 对端展示名：SIP 显示名（号码），只有其一（或相同）时用其一。
 func historyWhoText(r core.CallRecord) string {
+	return historyWhoTextName(r, r.RemoteName)
+}
+
+// historyWhoTextName 同 historyWhoText，但名称由调用方决定（座席显示名/通信录）。
+func historyWhoTextName(r core.CallRecord, name string) string {
 	who := r.Remote
-	if r.RemoteName != "" && r.RemoteName != r.Remote {
+	if name != "" && name != r.Remote {
 		if who == "" {
-			who = r.RemoteName
+			who = name
 		} else {
-			who = r.RemoteName + "（" + r.Remote + "）"
+			who = name + "（" + r.Remote + "）"
 		}
 	}
 	// 号码/显示名来自 SIP 报文：去掉控制字符并截断

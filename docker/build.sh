@@ -4,6 +4,7 @@
 #
 # 用法（在 WSL / Linux 里执行；位置随意，脚本自己找仓库根）：
 #   docker/build.sh                 # 构建镜像（如缺）+ 编译全部 5 个产物
+#   docker/build.sh --target windows-amd64   # **只编 Windows amd64（测试用，快）**
 #   docker/build.sh --libs          # 只编第三方静态库（视频 / Opus+AEC，很慢，幂等）
 #   docker/build.sh --build-image   # 只（重新）构建镜像
 #   docker/build.sh --shell         # 进容器开一个交互 shell（排查用）
@@ -25,12 +26,15 @@ GO_VERSION="1.25.0"
 export MSYS_NO_PATHCONV=1
 
 MODE=build
+FORCE_IMAGE=0
+EXTRA_ARGS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --libs)        MODE=libs ;;
         --build-image) MODE=image ;;
         --shell)       MODE=shell ;;
-        --go)          GO_VERSION="${2:?--go 需要一个版本号}"; shift ;;
+        --go)          GO_VERSION="${2:?--go 需要一个版本号}"; FORCE_IMAGE=1; shift ;;
+        --target)      EXTRA_ARGS="$EXTRA_ARGS --target ${2:?--target 需要一个目标名}"; shift ;;
         *) echo "未知参数：$1" >&2; exit 2 ;;
     esac
     shift
@@ -68,11 +72,18 @@ case "$(uname -s)" in
         ;;
 esac
 
-# 每次都过一遍 build：命中缓存只要几秒，而且能顺带把 Dockerfile 的改动带上。
-# **不要用 `image inspect` 判断镜像是否存在**——实测 wslc 的这个子命令会卡死
-# （60 秒无响应、整个脚本卡在第一行，日志 0 字节），而 build/images 都正常。
-echo "== 校验/构建镜像 $IMAGE（命中缓存时几秒；CLI=$CLI）=="
-"$CLI" build --progress=plain --build-arg "GO_VERSION=$GO_VERSION" -t "$IMAGE" "$BUILD_CTX"
+# 本地已有镜像就直接用，跳过 rebuild——`docker build` 必须先联网解析 FROM 基础
+# 镜像元数据（要访问 Docker Hub），网络不通时会在编译步骤之前就失败（本地镜像
+# 其实完好）。只有显式 --build-image / --go 或镜像不存在时才 rebuild。
+# ⚠️ 跳过依赖 `image inspect`，但它在 wslc 下会卡死（60 秒无响应），所以这个
+# "跳过"只在 docker CLI 下生效；wslc 仍走原来的每次 build。
+if [ "$MODE" != image ] && [ "$FORCE_IMAGE" != 1 ] && [ "$CLI" = docker ] \
+    && docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "== 使用本地镜像 $IMAGE（跳过 rebuild；--build-image / --go 可强制重建）=="
+else
+    echo "== 校验/构建镜像 $IMAGE（命中缓存时几秒；CLI=$CLI）=="
+    "$CLI" build --progress=plain --build-arg "GO_VERSION=$GO_VERSION" -t "$IMAGE" "$BUILD_CTX"
+fi
 if [ "$MODE" = image ]; then
     echo "镜像就绪：$IMAGE"
     exit 0
@@ -109,7 +120,7 @@ case "$MODE" in
         echo "== 完成。接着跑 docker/build.sh 出 5 个产物 =="
         ;;
     build)
-        run_in_container "./build.sh"
+        run_in_container "./build.sh $EXTRA_ARGS"
         echo "== 产物在 $ROOT/dist/ =="
         ;;
 esac

@@ -43,6 +43,28 @@ window.SipApp = window.SipApp || {};
     show(hash || 'call');
   }
 
+  /**
+   * 顶栏坐席徽章（REQ-ACC-028 / REQ-ACC-034）：坐席模式下显示模式 + 空闲/置忙，
+   * 点击切换 setBusy/setIdle（与桌面顶栏的座席按钮一致）；非坐席模式隐藏。
+   * 在线座席列表只在拨号对话框的「在线座席」页签里（导航栏不再单独入口）。
+   */
+  function refreshAgent() {
+    const ag = store.state.agent || { online: false };
+    const badge = $('agentBadge');
+    if (!badge) return;
+    if (!ag.online) {
+      badge.hidden = true;
+      return;
+    }
+    const modeText = { normal: '普通', dial_out: '外呼', monitor: '班长' }[ag.mode] || '';
+    const stateText = ag.busy ? '置忙' : '空闲';
+    badge.textContent = '坐席' + (modeText ? '·' + modeText : '') + '·' + stateText;
+    badge.className = 'badge ' + (ag.busy ? 'warn' : 'ok');
+    badge.title = '坐席' + (ag.displayName ? '：' + ag.displayName : '') +
+      '（' + stateText + '，点击' + (ag.busy ? '置闲' : '置忙') + '）';
+    badge.hidden = false;
+  }
+
   function refreshTop() {
     const st = store.state;
     const conn = $('connBadge');
@@ -151,15 +173,35 @@ window.SipApp = window.SipApp || {};
     });
     store.on('state', refreshTop);
     store.on('state', refreshUpdateBadge);   // 连上时状态快照里就带着更新状态
+    store.on('state', refreshAgent);         // 坐席状态也在快照里
+    store.on('agent', refreshAgent);
     store.on('update', refreshUpdateBadge);  // 之后按 system.update 事件刷新
     store.on('register', refreshTop);
     store.on('connected', refreshTop);
     store.on('disconnected', refreshTop);
 
+    // 坐席徽章点击 = 置忙/置闲（与桌面顶栏的座席按钮同一动作；
+    // 生效状态由 cti.agent 事件回显，不在本地乐观更新）
+    $('agentBadge').style.cursor = 'pointer';
+    $('agentBadge').addEventListener('click', function () {
+      if (!store.isConnected()) return;
+      const ag = store.state.agent || {};
+      if (!ag.online) return;
+      const busy = !ag.busy;
+      store.sdk.setAgentBusy(busy).then(function () {
+        App.ui.toast(busy ? '已置忙' : '已置闲', 'ok');
+        refreshAgent();
+      }).catch(function (e) {
+        if (!App.util.isOfflineErr(e)) { App.ui.toast(App.util.errText(e), 'err'); }
+      });
+    });
+
     Object.keys(views).forEach(function (k) { if (views[k].mount) views[k].mount(); });
     route();
     refreshTop();
+    refreshAgent();
     refreshUpdateBadge();
+    App.dialpad.bind();
     App.callbar.bind();
     App.callbar.render(null);
 
