@@ -40,6 +40,8 @@ cd "$(dirname "$0")"
 # 可重复或逗号分隔；不带该参数 = 全部目标（发布用）。
 # 目标名：linux-native / linux-cross / windows-amd64 / windows-386 / windows-arm64
 #         / linux（= native + cross）
+#         也可用架构别名 linux-amd64 / linux-arm64：与本机架构相同 → linux-native，
+#         对侧架构 → linux-cross。
 TARGETS=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -49,10 +51,41 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# 目标名拼错时不能静默什么都不构建（踩过：--target linux-amd64 旧版直接空跑）。
+if [ -n "$TARGETS" ]; then
+    for t in $(printf '%s' "$TARGETS" | tr ',' ' '); do
+        case " linux linux-native linux-cross linux-amd64 linux-arm64 windows-amd64 windows-386 windows-arm64 " in
+            *" $t "*) ;;
+            *)
+                echo "未知目标：$t" >&2
+                echo "可用目标：linux / linux-native / linux-cross / linux-amd64 / linux-arm64 / windows-amd64 / windows-386 / windows-arm64" >&2
+                exit 2
+                ;;
+        esac
+    done
+fi
+
 want_target() {
     [ -z "$TARGETS" ] && return 0
     case ",$TARGETS," in
         *",$1,"*) return 0 ;;
+    esac
+    # 架构别名：linux-amd64 / linux-arm64（本机架构 → native，对侧 → cross）
+    case "$1" in
+        linux-native)
+            if [ -n "${NATIVE_ARCH:-}" ]; then
+                case ",$TARGETS," in
+                    *",linux-$NATIVE_ARCH,"*) return 0 ;;
+                esac
+            fi
+            ;;
+        linux-cross)
+            if [ -n "${CROSS_ARCH:-}" ]; then
+                case ",$TARGETS," in
+                    *",linux-$CROSS_ARCH,"*) return 0 ;;
+                esac
+            fi
+            ;;
     esac
     return 1
 }
@@ -562,6 +595,15 @@ build_windows_arm64() {
 }
 
 # ---- 按变体跑一遍选定目标（--target 过滤；不传 = 全部，发布用）----
+
+# 别名在本机解析不到对应架构（例如在不支持交叉的宿主上传 linux-amd64）时，
+# 也不能静默空跑。
+if [ -n "$TARGETS" ] && ! { want_target linux || want_target linux-native || \
+    want_target linux-cross || want_target windows-amd64 || \
+    want_target windows-386 || want_target windows-arm64; }; then
+    echo "所选目标在本机不可构建：$TARGETS（本机 ${NATIVE_ARCH}，交叉目标 ${CROSS_ARCH:-无}）" >&2
+    exit 2
+fi
 
 variant_setup full
 { want_target linux || want_target linux-native; } && build_linux_native

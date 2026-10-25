@@ -106,6 +106,8 @@
 
 ### 修复
 
+- **`build.sh --target` 目标名**：未知目标（如 `linux-amd64`）原来会静默跳过全部构建、只打印「构建完成」；现在直接报错退出并列出可用目标，同时支持 `linux-amd64` / `linux-arm64` 架构别名（与本机架构相同 → `linux-native`，对侧 → `linux-cross`）。补上脚本可执行位（git 里原为 644）。
+
 - **通话记录保存并优先显示座席显示名**（REQ-CALL-007 补充）：从在线座席列表直接呼出时，把座席的 `displayName` 写进通话记录的新列 `display_name`（SQLite user_version 2；旧库打开时自动 `ALTER TABLE` 补列，旧记录为空）。记录展示名称的优先级变为**座席显示名 > 通信录名称 > SIP 显示名**（桌面通话记录页、网页通话记录与回拨都沿用该名称：桌面回拨走 `onCallButtonNamed`，网页 `call.dial{name}`）。`calllog.query` 返回新增 `displayName` 字段。回归：`TestDisplayNameRoundTrip`、`TestLegacySchemaGetsDisplayNameColumn`、`TestHistoryDisplayPrefersDisplayName`。
 
 - **监听面板主被叫行：号码完整显示、名称可截断 + 悬停看全文**：原来整行是"号码 名称"一个文本，空间不足时按左到右截断，电话号码先被截成 `1381…`（用户实测）。现在拆成 [左号码][左名称] → [右号码][右名称]（`monitorPeerLayout`）：**号码永远按完整宽度显示**，名称按剩余空间等比分配、放不下才补省略号；名称被截断时**悬停显示完整名称**（`newHoverClipNote`，未截断不弹提示）。回归：`TestMonitorPeerLayoutKeepsNumbersFull`。
