@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS call_log (
   direction   TEXT    NOT NULL,
   remote      TEXT    NOT NULL,
   remote_name TEXT    NOT NULL DEFAULT '',
+  display_name TEXT   NOT NULL DEFAULT '',
   started_at  INTEGER NOT NULL,
   answered_at INTEGER NOT NULL DEFAULT 0,
   ended_at    INTEGER NOT NULL DEFAULT 0,
@@ -63,7 +64,7 @@ CREATE TABLE IF NOT EXISTS call_log (
   created_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_call_log_started ON call_log(started_at DESC);
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 `
 
 // errClosed 存储已关闭（退出过程中的查询）。
@@ -107,6 +108,12 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("初始化通话记录表失败: %w", err)
 	}
+	// 老库补列（user_version=1 没有 display_name）：CREATE TABLE IF NOT EXISTS
+	// 不会改已存在的表，必须显式检查后 ALTER。
+	if err := ensureCallLogColumns(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("升级通话记录表失败: %w", err)
+	}
 
 	s := &Store{db: db, ops: make(chan func(*sql.DB) error, writeQueueSize)}
 	// 启动清扫必须在 worker 起来之前做完（此刻还没有本次运行的记录）
@@ -114,6 +121,38 @@ func Open(path string) (*Store, error) {
 	s.wg.Add(1)
 	go s.worker()
 	return s, nil
+}
+
+// ensureCallLogColumns 给旧版本建出来的表补新增列（当前需要 display_name）。
+func ensureCallLogColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(call_log)`)
+	if err != nil {
+		return err
+	}
+	has := false
+	for rows.Next() {
+		var (
+			cid, notNull, pk int
+			name, ctype      string
+			dflt             any
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "display_name" {
+			has = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE call_log ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 // sweepInterrupted 把上次运行遗留的"进行中"记录标为中断：进程崩溃或
@@ -196,10 +235,12 @@ func (s *Store) Close() error {
 func (s *Store) Start(r core.CallRecord) {
 	s.post(func(db *sql.DB) error {
 		_, err := db.Exec(`INSERT OR IGNORE INTO call_log
-			(call_id, direction, remote, remote_name, started_at, answered_at,
+			(call_id, direction, remote, remote_name, display_name, started_at, answered_at,
 			 ended_at, has_video, missed, reason, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			truncate(r.CallID), truncate(r.Direction), truncate(r.Remote), truncate(r.RemoteName),
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			truncate(r.CallID), truncate(r.Direction), truncate(r.Remote),
+			truncate(core.CleanDisplayName(r.RemoteName)),
+			truncate(r.DisplayName),
 			toMillis(r.StartedAt), toMillis(r.AnsweredAt), toMillis(r.EndedAt),
 			boolToInt(r.HasVideo), boolToInt(r.Missed), truncate(r.Reason),
 			time.Now().UnixMilli())
@@ -254,8 +295,8 @@ func (s *Store) Query(f core.CallLogFilter) (core.CallLogPage, error) {
 		if err := db.QueryRow(`SELECT COUNT(*) FROM call_log`+where, args...).Scan(&page.Total); err != nil {
 			return err
 		}
-		rows, err := db.Query(`SELECT call_id, direction, remote, remote_name, started_at,
-			answered_at, ended_at, has_video, missed, reason
+		rows, err := db.Query(`SELECT call_id, direction, remote, remote_name, display_name,
+			started_at, answered_at, ended_at, has_video, missed, reason
 			FROM call_log`+where+` ORDER BY started_at DESC, rowid DESC LIMIT ? OFFSET ?`,
 			append(args, limit+1, f.Offset)...)
 		if err != nil {
@@ -270,12 +311,15 @@ func (s *Store) Query(f core.CallLogFilter) (core.CallLogPage, error) {
 				started, answered, ended int64
 				hasVideo, missed         int
 			)
-			if err := rows.Scan(&r.CallID, &r.Direction, &r.Remote, &r.RemoteName,
+			if err := rows.Scan(&r.CallID, &r.Direction, &r.Remote, &r.RemoteName, &r.DisplayName,
 				&started, &answered, &ended, &hasVideo, &missed, &r.Reason); err != nil {
 				return err
 			}
 			r.StartedAt, r.AnsweredAt, r.EndedAt = fromMillis(started), fromMillis(answered), fromMillis(ended)
 			r.HasVideo, r.Missed = hasVideo != 0, missed != 0
+			// 老记录里可能存着网关的占位显示名（如 "Outbound Call"）：
+			// 读出来时同样过滤，界面显示回退到号码。
+			r.RemoteName = core.CleanDisplayName(r.RemoteName)
 			records = append(records, r)
 		}
 		if err := rows.Err(); err != nil {

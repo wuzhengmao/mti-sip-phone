@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"mti-sip-phone/internal/core"
 )
 
 // waitFor 轮询直到条件成立或超时（事件链路是异步的，直接断言会竞态）。
@@ -52,7 +54,7 @@ func TestUnregisterOnDisconnect(t *testing.T) {
 	waitFor(t, 3*time.Second, enabled)
 
 	// ③ 通话中断开 → 排队，话务结束后才注销
-	app.OnIncoming("c1", "2901", "", false)
+	app.OnIncoming("c1", core.IncomingCall{Remote: "2901"})
 	_ = conn2.Close(websocket.StatusNormalClosure, "")
 	time.Sleep(400 * time.Millisecond) // 超过延迟窗口：应仍在排队（未注销）
 	if !enabled() {
@@ -64,7 +66,7 @@ func TestUnregisterOnDisconnect(t *testing.T) {
 	// ④ 排队期间重连 → 取消排队任务，话务结束也不注销
 	conn3 := dialWS(t, url)
 	waitFor(t, 3*time.Second, enabled)
-	app.OnIncoming("c2", "2901", "", false)
+	app.OnIncoming("c2", core.IncomingCall{Remote: "2901"})
 	_ = conn3.Close(websocket.StatusNormalClosure, "")
 	time.Sleep(400 * time.Millisecond) // 排队中（通话未结束）
 	if !enabled() {

@@ -1,13 +1,19 @@
 package ui
 
 import (
+	"bytes"
+	"fmt"
 	"image"
+	"image/color"
+	"image/png"
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
@@ -598,5 +604,509 @@ func TestTooltipWidgetInterfaces(t *testing.T) {
 	var note any = newHoverNote("张三", 12, "备注", tip)
 	if _, ok := note.(desktop.Hoverable); !ok {
 		t.Error("hoverNote 必须实现 desktop.Hoverable（联系人备注靠悬停显示）")
+	}
+}
+
+// TestStatusRowAgentIcon 顶栏状态行加坐席图标后：
+//  1. 先用较窄宽度布局（模拟图标未显示时的旧尺寸）再把「已注册」截断；
+//  2. 换到足够宽度重新布局，文字必须**恢复**（不能被永久截成「...」）；
+//  3. 图标排在文字右边的正确位置。
+func TestStatusRowAgentIcon(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	tip := newTooltipLayer()
+	label := newPlainText("已注册", 14, theme.ForegroundColor(), true)
+	icon := newHoverIcon(IconAgentSeat, 16, tip)
+	icon.SetNote("张三")
+	objs := []fyne.CanvasObject{newStatusDot("registered"), label, icon}
+
+	// 窄宽度（比 MinSize 少 1px）→ 文字被截断
+	m := statusRowLayout{}.MinSize(objs)
+	statusRowLayout{}.Layout(objs, fyne.NewSize(m.Width-1, 20))
+	if label.text.Text == "已注册" {
+		t.Fatal("窄宽度下本应截断，测试前提不成立")
+	}
+	// 足够宽度（= MinSize，即布局实际会分到的宽度）→ 文字恢复
+	statusRowLayout{}.Layout(objs, fyne.NewSize(m.Width, 20))
+	if label.text.Text != "已注册" {
+		t.Fatalf("宽度恢复后文字应恢复为「已注册」，实际 %q", label.text.Text)
+	}
+	if m.Width < 2+16+2+fyne.MeasureText("已注册", 14, fyne.TextStyle{Bold: true}).Width+3+16 {
+		t.Fatalf("MinSize 应包含文字原始宽度与图标宽度，实际 %v", m.Width)
+	}
+	// 命中区比图标本体大一圈（左移了 hoverIconHitPad），视觉图标仍在文字右侧
+	if icon.Position().X+hoverIconHitPad <= label.Position().X+label.Size().Width-1 {
+		t.Fatalf("图标应在文字右侧：label x=%.1f w=%.1f icon x=%.1f",
+			label.Position().X, label.Size().Width, icon.Position().X)
+	}
+}
+
+// TestHoverIconShowsNote 坐席图标悬停：停住后提示图层显示 displayName。
+func TestHoverIconShowsNote(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	tip := newTooltipLayer()
+	icon := newHoverIcon(IconAgentSeat, 16, tip)
+	icon.SetNote("张三")
+	if m := icon.MinSize(); m.Width < 16 || m.Height < 16 {
+		t.Fatalf("图标最小尺寸异常：%v", m)
+	}
+	icon.MouseIn(&desktop.MouseEvent{PointEvent: fyne.PointEvent{AbsolutePosition: fyne.NewPos(10, 10)}})
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if tip.shown {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("悬停后应显示提示")
+}
+
+// TestTooltipLayerRenders 提示图层真的画出来了：在 Stack 顶层显示提示后，
+// 画布对应位置的像素不应与背景相同（防止"逻辑上 show 了、实际没绘制"）。
+func TestTooltipLayerRenders(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	bg := canvas.NewRectangle(color.NRGBA{R: 0, G: 0, B: 0, A: 255})
+	tip := newTooltipLayer()
+	w := test.NewWindow(container.NewStack(bg, tip))
+	defer w.Close()
+	w.Resize(fyne.NewSize(200, 120))
+
+	tip.show("座席已登录 - 张三", fyne.NewPos(10, 10))
+	img := w.Canvas().Capture()
+	// 提示框画在 absPos + (12,18) 处，取框内一点
+	px := color.NRGBAModel.Convert(img.At(40, 45)).(color.NRGBA)
+	if px.R > 20 || px.G > 20 || px.B > 20 {
+		return // 非黑 = 画出了东西
+	}
+	t.Fatalf("提示图层未绘制：像素 (40,45) = %+v", px)
+}
+
+// TestHoverIconShowsNoteOnMove 图标"出现时鼠标已经在上面"的场景（Fyne 只发
+// MouseMoved、不发 MouseIn）：MouseMoved 也必须能拉起提示（REQ-ACC-028，
+// 用户实测"图标出来了但移上去不弹提示，重新注册一次又好了"）。
+func TestHoverIconShowsNoteOnMove(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	tip := newTooltipLayer()
+	icon := newHoverIcon(IconAgentSeat, 16, tip)
+	icon.SetNote("座席已登录 - 张三")
+	icon.MouseMoved(&desktop.MouseEvent{PointEvent: fyne.PointEvent{AbsolutePosition: fyne.NewPos(10, 10)}})
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if tip.shown {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("MouseMoved 后也应显示提示")
+}
+
+// TestTooltipLayerShowsOnFirstShow 第一次显示就必须自己把底色/文字摆好：
+// 底色在显示前是 0 尺寸，若只依赖"下一次布局"，提示会看不见——直到别的事件
+// 触发一次整帧重绘才突然出现（真机现象"一会有一会没"）。
+func TestTooltipLayerShowsOnFirstShow(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	tip := newTooltipLayer()
+	w := test.NewWindow(container.NewStack(tip))
+	defer w.Close()
+	w.Resize(fyne.NewSize(200, 120))
+
+	tip.show("座席已登录 - 张三", fyne.NewPos(10, 10))
+	if !tip.box.Visible() {
+		t.Fatal("显示后提示框必须可见")
+	}
+	if tip.bg.Size().Width <= 0 || tip.bg.Size().Height <= 0 {
+		t.Fatalf("首次显示时底色尺寸不应为 0：%v", tip.bg.Size())
+	}
+	if tip.bg.Position().X < 10 || tip.bg.Position().Y < 10 {
+		t.Fatalf("底色应摆在指针右下方，实际 %v", tip.bg.Position())
+	}
+
+	tip.hide()
+	if tip.box.Visible() || tip.shown {
+		t.Fatal("hide 后提示框必须隐藏")
+	}
+}
+
+// TestCTISpinFrames 「指令在途」的旋转圆圈：8 帧都要能解码、且不是空图。
+func TestCTISpinFrames(t *testing.T) {
+	if len(ctiSpinFrames) != 8 {
+		t.Fatalf("旋转图标应有 8 帧，实际 %d", len(ctiSpinFrames))
+	}
+	for i, f := range ctiSpinFrames {
+		img, err := png.Decode(bytes.NewReader(f.Content()))
+		if err != nil {
+			t.Fatalf("第 %d 帧不是可解码的 PNG：%v", i, err)
+		}
+		if img.Bounds().Dx() == 0 || img.Bounds().Dy() == 0 {
+			t.Fatalf("第 %d 帧是空图", i)
+		}
+	}
+}
+
+// TestCTISpinRestoresLatestIcon 在途转圈期间面板重建换了按钮图标（耳语→监听）：
+// 回执到达时必须恢复到**最新**图标，不能恢复成点击前的旧图标。
+func TestCTISpinRestoresLatestIcon(t *testing.T) {
+	testApp := test.NewApp()
+	defer testApp.Quit()
+	a := &App{}
+	btn := newPanelButton(IconCTIWhisper, colorHoldBlue, callPanelButtonSize, nil)
+	a.ctiInFlight = true
+	a.ctiPending = btn
+	a.ctiPendingRes = IconCTIWhisper
+	a.ctiSpinAt = time.Now().Add(-2 * ctiMinSpin) // 已超过最短转圈时间：立即恢复
+	btn.SetIcon(ctiSpinFrames[0])                 // 模拟转圈中
+
+	// 在途期间面板重建：耳语态把图标换成监听（应同步"恢复图标"）
+	a.setCTIButtonIcon(btn, IconCTIMonitor)
+	a.stopCTISpin()
+
+	if got := btn.iconSrc.Name(); got != IconCTIMonitor.Name() {
+		t.Fatalf("回执后应恢复成最新图标（监听），实际 %q", got)
+	}
+	if a.ctiInFlight {
+		t.Fatal("stopCTISpin 后不应仍在途")
+	}
+}
+
+func TestCTIIconsRender(t *testing.T) {
+	for name, res := range map[string]fyne.Resource{
+		"咨询":   IconCTIConsult,
+		"咨询转接": IconCTIConsultTransfer,
+		"三方":   IconCTIThreeWay,
+		"转移":   IconCTITransfer,
+		"会议":   IconCTIConference,
+		"视频会议": IconCTIVideoConference,
+		"监听":   IconCTIMonitor,
+		"耳语":   IconCTIWhisper,
+		"强拦":   IconCTIIntercept,
+		"强插":   IconCTIIntervene,
+		"添加成员": IconCTIAddMember,
+		"强制挂断": IconHangup,
+		"主持人":  IconHost,
+	} {
+		img, err := png.Decode(bytes.NewReader(res.Content()))
+		if err != nil {
+			t.Fatalf("%s 图标不是可解码的 PNG：%v", name, err)
+		}
+		if img.Bounds().Dx() == 0 || img.Bounds().Dy() == 0 {
+			t.Fatalf("%s 图标是空图", name)
+		}
+	}
+}
+
+// TestCompactButtonSetBgSurvivesEnable 改过底色后禁用再启用，颜色必须保持：
+// Enable() 按 baseBg 还原，SetBg 不同步 baseBg 的话会回到构造时的旧色
+// （踩过：主窗体呼叫按钮设成蓝底后又被 applyMainCallMode 的 Enable 变回绿色）。
+func TestCompactButtonSetBgSurvivesEnable(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	b := newCompactButton(IconPlayWhite, colorSuccessGreen, 36, nil)
+	b.SetBg(colorHoldBlue)
+	b.Disable()
+	b.Enable()
+	if got := b.bg.FillColor; got != colorHoldBlue {
+		t.Fatalf("启用后底色应保持蓝色，实际 %v", got)
+	}
+}
+
+// TestCallNameBoxMinSizeUsesFullText 通话面板按 MinSize 给对端号码分配宽度：
+// MinSize 若取"被截断后"的宽度，号码会永远显示成「…」——用户实测：拨号时
+// 前面的呼叫号码变成了 …
+func TestCallNameBoxMinSizeUsesFullText(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	b := newCallNameBox(newTooltipLayer())
+	b.Set("1381003", false, "", "")
+	full := b.MinSize().Width
+	if full < 40 {
+		t.Fatalf("MinSize 应按完整号码算宽度，实际 %.1f", full)
+	}
+	b.Resize(fyne.NewSize(8, 20)) // 极窄：文字被截成「…」
+	if got := b.MinSize().Width; got != full {
+		t.Fatalf("文字被截断后 MinSize 不应缩小（否则永远恢复不了）：%.1f → %.1f", full, got)
+	}
+}
+
+// TestCompactButtonShowsTip 通话面板的紧凑按钮（只有图标）悬停后要弹出文字说明
+// （用户要求：面板上每个按钮移动上去都给提示）。没挂提示的按钮不能弹。
+func TestCompactButtonShowsTip(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	tip := newTooltipLayer()
+
+	b := newCompactButton(IconPlayWhite, colorSuccessGreen, 36, nil)
+	if _, ok := any(b).(desktop.Hoverable); !ok {
+		t.Fatal("compactButton 必须实现 desktop.Hoverable（面板按钮的悬停提示靠它）")
+	}
+	b.setTip(tip, "挂断")
+	b.MouseIn(&desktop.MouseEvent{PointEvent: fyne.PointEvent{AbsolutePosition: fyne.NewPos(10, 10)}})
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if tip.shown {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !tip.shown {
+		t.Fatal("悬停后应显示按钮提示")
+	}
+
+	// 移开：提示立即收起
+	b.MouseOut()
+	if tip.shown {
+		t.Fatal("移开后提示应收起")
+	}
+
+	// 没有提示文案的按钮（主窗体上的按钮）不弹
+	noTip := newCompactButton(IconPlayWhite, colorSuccessGreen, 36, nil)
+	noTip.MouseIn(&desktop.MouseEvent{PointEvent: fyne.PointEvent{AbsolutePosition: fyne.NewPos(10, 10)}})
+	time.Sleep(tooltipDelay + 100*time.Millisecond)
+	if tip.shown {
+		t.Fatal("未设置提示的按钮不该弹提示")
+	}
+}
+
+// fakeContacts 内存通信录（peerText 的优先级测试用）。
+type fakeContacts struct{ list []core.Contact }
+
+func (f *fakeContacts) List() ([]core.Contact, error)          { return f.list, nil }
+func (f *fakeContacts) Save(string, core.Contact) error        { return nil }
+func (f *fakeContacts) SetStarred([]string, bool) (int, error) { return 0, nil }
+func (f *fakeContacts) Delete([]string) (int, error)           { return 0, nil }
+func (f *fakeContacts) Clear() (int, error)                    { return 0, nil }
+func (f *fakeContacts) Merge([]core.Contact) (int, int, error) { return 0, 0, nil }
+func (f *fakeContacts) Close() error                           { return nil }
+
+// TestCallDisplayPrefersPeerName INVITE 的 Call-Info display-name（core.Call.PeerName，
+// REQ-ACC-029）**优先于通信录名称**；没有才回退通信录、再回退 SIP 显示名。
+func TestCallDisplayPrefersPeerName(t *testing.T) {
+	test.NewApp()
+	cfg := config.Default()
+	c := core.New(cfg, nil, core.NewBus())
+	c.SetContacts(&fakeContacts{list: []core.Contact{{Number: "2002", Name: "通信录名字"}}})
+	a := &App{core: c, cfg: cfg}
+
+	call := &core.Call{Remote: "2002", RemoteName: "From名字", PeerName: "Call-Info名字"}
+	if got, _, _ := a.callDisplay(call); got != "2002 Call-Info名字" {
+		t.Fatalf("Call-Info 名称应优先于通信录，实际 %q", got)
+	}
+	if got := callRemoteName(call); got != "Call-Info名字" {
+		t.Fatalf("callRemoteName 也应优先 Call-Info 名称，实际 %q", got)
+	}
+	call.PeerName = ""
+	if got, _, _ := a.callDisplay(call); got != "2002 通信录名字" {
+		t.Fatalf("无 Call-Info 名称时应回退通信录，实际 %q", got)
+	}
+}
+
+// TestPeerTextPrefersCTIName 话务面板里号码的展示：**协议给的名称优先**
+// （MSP_EVENT_* 的 xxxName），没有才回退通信录的名称，再没有就只显示号码。
+func TestPeerTextPrefersCTIName(t *testing.T) {
+	test.NewApp()
+	cfg := config.Default()
+	c := core.New(cfg, nil, core.NewBus())
+	c.SetContacts(&fakeContacts{list: []core.Contact{{Number: "2002", Name: "通信录名字"}}})
+	a := &App{core: c, cfg: cfg}
+
+	if got := a.peerText("2002", "李四"); got != "2002 李四" {
+		t.Fatalf("应优先用协议给的名称，实际 %q", got)
+	}
+	if got := a.peerText("2002", ""); got != "2002 通信录名字" {
+		t.Fatalf("协议没给名称时应回退通信录，实际 %q", got)
+	}
+	if got := a.peerText("9999", ""); got != "9999" {
+		t.Fatalf("都没有时应只显示号码，实际 %q", got)
+	}
+}
+
+// TestCompactButtonIconReraster 换图标后**位图必须真的重画**。
+//
+// Fyne 的 canvas.Image 在只换 Resource 时 Refresh 不一定重新栅格化 SVG——
+// 实测：视频图标从蓝换成红、Resource 已经变了，画布上却仍是蓝色；转圈动画
+// 每帧换资源也一样"转了但画面不变"。修复是给图标做一次整数尺寸的
+// Resize 抖动（见 rerasterIcon），这条测试钉住它。
+func TestCompactButtonIconReraster(t *testing.T) {
+	test.NewApp()
+	btn := newPanelButton(IconVideoOn, colorHoldBlue, callPanelButtonSize, nil)
+	w := test.NewWindow(btn)
+	defer w.Close()
+	w.Resize(fyne.NewSize(80, 80))
+	if btn.icon.Image == nil {
+		t.Fatal("图标未渲染，无法比较位图")
+	}
+	center := func() string {
+		b := btn.icon.Image.Bounds()
+		r, g, bl, a := btn.icon.Image.At(b.Dx()/2, b.Dy()/2).RGBA()
+		return fmt.Sprintf("%d,%d,%d,%d", r>>8, g>>8, bl>>8, a>>8)
+	}
+	on := center()
+	btn.SetIcon(IconVideoOff)
+	btn.SetAccent(colorDangerRed)
+	if off := center(); off == on {
+		t.Fatalf("换图标后位图没有重画（仍为 %s）", on)
+	}
+}
+
+// TestCTIDialAction 拨号复用模式只对自己的动作收尾（收起主窗体）：复用期间
+// 在主窗体上点坐席状态按钮（setBusy/setIdle）等，回执不能把窗口关掉。
+func TestCTIDialAction(t *testing.T) {
+	cases := []struct {
+		mode, action string
+		want         bool
+	}{
+		{"consult", "consult", true},
+		{"consult", "consultThreeWay", true},
+		{"consult", "setBusy", false},
+		{"consult", "listAgents", false},
+		{"transfer", "transfer", true},
+		{"transfer", "consultTransfer", true},
+		{"transfer", "consult", false},
+		{"conference", "addConferenceMembers", true},
+		{"conference", "setIdle", false},
+		{"", "consult", false},
+	}
+	for _, c := range cases {
+		if got := ctiDialAction(c.mode, c.action); got != c.want {
+			t.Errorf("ctiDialAction(%q, %q) = %v，期望 %v", c.mode, c.action, got, c.want)
+		}
+	}
+}
+
+// TestMonitorPeerLayoutKeepsNumbersFull 监听面板第二行：空间不够时**号码保持
+// 完整**，只截断名称；名称截断后文本带省略号（悬停显示全文由 hoverClipNote 负责）。
+func TestMonitorPeerLayoutKeepsNumbersFull(t *testing.T) {
+	test.NewApp()
+	leftNo := newThemedText("1381003", 14, false)
+	leftName := newHoverClipNote("张", 14, nil)
+	leftName.Hide()
+	arrow := canvas.NewRectangle(color.Transparent)
+	arrow.SetMinSize(fyne.NewSize(14, 14))
+	rightNo := newThemedText("2999", 14, false)
+	rightName := newHoverClipNote("吴正茂（市局）", 14, nil)
+
+	row := container.New(monitorPeerLayout{gap: 4},
+		leftNo, leftName, arrow, rightNo, rightName)
+	row.Resize(fyne.NewSize(170, 36))
+
+	if got, want := leftNo.Size().Width, leftNo.fullWidth(); got != want {
+		t.Fatalf("左号码应完整显示（宽度 %v），实际 %v", want, got)
+	}
+	if got, want := rightNo.Size().Width, rightNo.fullWidth(); got != want {
+		t.Fatalf("右号码应完整显示（宽度 %v），实际 %v", want, got)
+	}
+	if rightName.text.Size().Width >= rightName.fullWidth() {
+		t.Fatalf("空间不足时名称应被截断（宽度 %v，完整 %v）",
+			rightName.text.Size().Width, rightName.fullWidth())
+	}
+	if !strings.HasSuffix(rightName.text.text.Text, "…") {
+		t.Fatalf("截断后的名称应以省略号结尾，实际 %q", rightName.text.text.Text)
+	}
+}
+
+// TestConferenceLeadLayoutAlignsNumbers 会议成员行左侧：[首列][号码]。首列里
+// 放移除按钮、主持人标记或空位（三者同列），号码的起始位置与首列内容无关——
+// 保证各行号码左边缘对齐、且移除按钮与主持人图标在同一列。
+func TestConferenceLeadLayoutAlignsNumbers(t *testing.T) {
+	test.NewApp()
+	l := conferenceLeadLayout{slot: callPanelButtonSize, gap: 4}
+	textX := func(slotW, slotH float32) float32 {
+		slot := canvas.NewRectangle(color.Transparent)
+		slot.SetMinSize(fyne.NewSize(slotW, slotH))
+		text := newThemedText("2002 张三", 12, false)
+		c := container.New(l, slot, text)
+		l.Layout(c.Objects, fyne.NewSize(260, 36))
+		return text.Position().X
+	}
+	// 主持人标记（14px，居中对齐在首列里）与移除按钮（36px）下的号码位置一致
+	hostX, removeX := textX(14, 14), textX(callPanelButtonSize, callPanelButtonSize)
+	if hostX != removeX {
+		t.Fatalf("首列内容不同时号码应对齐：主持人行 x=%v，移除按钮行 x=%v", hostX, removeX)
+	}
+	if want := float32(callPanelButtonSize + 4); hostX != want {
+		t.Fatalf("号码应在首列之后（x=%v），实际 x=%v", want, hostX)
+	}
+}
+
+// TestHoverIconTap 顶栏的图形按钮（坐席/自动接听）用的是可点击的 hoverIcon：
+// 设置了 onTap 才能点，禁用后点击被拦下（applyMainCallMode 在通话中会禁用）。
+func TestHoverIconTap(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	h := newHoverIcon(IconAgentSeat, 16, newTooltipLayer())
+	if _, ok := interface{}(h).(fyne.Tappable); !ok {
+		t.Fatal("hoverIcon 应实现 fyne.Tappable（顶栏图形按钮可点击）")
+	}
+	n := 0
+	h.SetOnTap(func() { n++ })
+	h.Tapped(&fyne.PointEvent{})
+	if n != 1 {
+		t.Fatalf("点击应触发回调一次，实际 %d", n)
+	}
+	h.Disable()
+	h.Tapped(&fyne.PointEvent{})
+	if n != 1 {
+		t.Fatalf("禁用后点击不应触发回调，实际 %d", n)
+	}
+	h.Enable()
+	h.Tapped(&fyne.PointEvent{})
+	if n != 2 {
+		t.Fatalf("重新启用后点击应恢复，实际 %d", n)
+	}
+}
+
+// TestTrayIconBusy 图标颜色状态机（REQ-UI-011 修订）：未注册/注册中红、
+// 已注册且坐席置忙黄、已注册且空闲绿。
+func TestTrayIconBusy(t *testing.T) {
+	a := &App{}
+	if got := a.trayIcon(); got != IconPhoneRed {
+		t.Fatalf("未注册应为红色，实际 %v", got.Name())
+	}
+	a.setRegState("registering")
+	if got := a.trayIcon(); got != IconPhoneRed {
+		t.Fatalf("首次注册中应为红色，实际 %v", got.Name())
+	}
+	a.setRegState("registered")
+	if got := a.trayIcon(); got != IconPhoneGreen {
+		t.Fatalf("已注册且空闲应为绿色，实际 %v", got.Name())
+	}
+	a.agentBusy = true
+	if got := a.trayIcon(); got != IconPhoneYellow {
+		t.Fatalf("已注册且置忙应为黄色，实际 %v", got.Name())
+	}
+	a.setRegState("failed")
+	if got := a.trayIcon(); got != IconPhoneRed {
+		t.Fatalf("注册失败应为红色（置忙也不改），实际 %v", got.Name())
+	}
+}
+
+// TestStatusRowTwoIcons 顶栏状态行可以带两个图标（坐席 + 班长监听）：
+// 隐藏的不占位，显示时按顺序排在文字后面。
+func TestStatusRowTwoIcons(t *testing.T) {
+	app := test.NewApp()
+	defer app.Quit()
+	tip := newTooltipLayer()
+	label := newPlainText("已注册", 14, theme.ForegroundColor(), true)
+	agent := newHoverIcon(IconAgentSeat, 16, tip)
+	monitor := newHoverIcon(IconCTIMonitor, 16, tip)
+	objs := []fyne.CanvasObject{newStatusDot("registered"), label, agent, monitor}
+
+	monitor.Hide()
+	m1 := statusRowLayout{}.MinSize(objs)
+	statusRowLayout{}.Layout(objs, fyne.NewSize(m1.Width, 20))
+	agentRight := agent.Position().X + agent.Size().Width
+
+	monitor.Show()
+	m2 := statusRowLayout{}.MinSize(objs)
+	if m2.Width != m1.Width+3+monitor.MinSize().Width {
+		t.Fatalf("监听图标显示后 MinSize 应多出 3+图标宽：%v → %v", m1.Width, m2.Width)
+	}
+	statusRowLayout{}.Layout(objs, fyne.NewSize(m2.Width, 20))
+	if monitor.Position().X+hoverIconHitPad < agentRight {
+		t.Fatalf("监听图标应排在坐席图标右侧：坐席右缘 %.1f，监听 x=%.1f",
+			agentRight, monitor.Position().X)
 	}
 }

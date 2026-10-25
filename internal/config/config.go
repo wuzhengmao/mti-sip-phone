@@ -22,25 +22,31 @@ import (
 // Account SIP 账户配置。
 // Password 为运行时明文，仅存在于内存；落盘时加密为 PasswordEnc，不写明文。
 type Account struct {
-	Enabled     bool   `json:"enabled"`     // 是否启用该账户
-	Server      string `json:"server"`      // SIP 服务器地址，如 10.168.4.40
-	Port        int    `json:"port"`        // SIP 服务器端口，默认 5060
-	Expires     int    `json:"expires"`     // 注册到期时间（秒），默认 300（REQ-ACC-018）
-	RPort       bool   `json:"rport"`       // 启用 rport（NAT 穿透），默认 true（REQ-ACC-016）
-	ChkOpt      bool   `json:"optchk"`      // 启用服务端心跳检测：注册的 User-Agent 带 optchk，服务端据此发 OPTIONS，默认 true（REQ-ACC-020）
-	STUNEnabled bool   `json:"stunEnabled"` // 启用 STUN 公网地址探测（REQ-ACC-017）
-	STUNServer  string `json:"stunServer"`  // STUN 服务器地址，默认 stun.l.google.com:19302
-	Proxy       string `json:"proxy"`       // 出站 SIP 代理（host:port，可选，REQ-ACC-019）
-	Transport   string `json:"transport"`   // 传输协议：udp / tcp / tls（REQ-ACC-006）
-	TLSVerify   bool   `json:"tlsVerify"`   // 校验服务器证书（仅 transport=tls 生效）。默认 false = 跳过校验（REQ-ACC-006：内网自签证书场景）
-	SRTP        string `json:"srtp"`        // 媒体加密（SDES-SRTP，REQ-MEDIA-009）：off / supported / preferred / required，默认 supported（空值按默认）
-	Domain      string `json:"domain"`      // SIP 域名（可选）：From/To/R-URI 里的域。留空 = 用 Server（REQ-ACC-022）
-	PublicIP    string `json:"publicIP"`    // 对外声明的 IP（可选）：Via/Contact/SDP 里写的地址。留空 = 自动（STUN → 本机出口 IP），REQ-ACC-023
-	Account     string `json:"account"`     // 账号（AOR 用户部分）
-	AuthUser    string `json:"authUser"`    // 认证 ID，为空时使用 Account
-	DisplayName string `json:"displayName"` // 显示名
-	PasswordEnc string `json:"passwordEnc"` // 加密后的密码（base64，AES-256-GCM）
-	Password    string `json:"-"`           // 明文密码，仅内存，不落盘
+	// Enabled 启用账户（REQ-ACC-024 起也充当"是否注册"的总开关）：启动时
+	// 启用的账户自动注册；托盘菜单「退出账号」把它置 false（注销并停注册
+	// 周期）、「登录账号」置回 true（立即注册）；服务端 NOTIFY 注销同样置
+	// false。sip:// 拉起时强制置 true。
+	Enabled bool   `json:"enabled"`
+	Server  string `json:"server"`  // SIP 服务器地址，如 10.168.4.40
+	Port    int    `json:"port"`    // SIP 服务器端口，默认 5060
+	Expires int    `json:"expires"` // 注册到期时间（秒），默认 300（REQ-ACC-018）
+	// CTIHeartbeat CTI 心跳间隔（秒，默认 20）：进入坐席模式后周期性向 CTI 发
+	// MSP_HEARTBEAT，报文里的 expires = 间隔 × 2.5（协议 §10）。
+	CTIHeartbeat int    `json:"ctiHeartbeat"`
+	RPort        bool   `json:"rport"`       // 启用 rport（NAT 穿透），默认 true（REQ-ACC-016）
+	STUNEnabled  bool   `json:"stunEnabled"` // 启用 STUN 公网地址探测（REQ-ACC-017）
+	STUNServer   string `json:"stunServer"`  // STUN 服务器地址，默认 stun.l.google.com:19302
+	Proxy        string `json:"proxy"`       // 出站 SIP 代理（host:port，可选，REQ-ACC-019）
+	Transport    string `json:"transport"`   // 传输协议：udp / tcp / tls（REQ-ACC-006）
+	TLSVerify    bool   `json:"tlsVerify"`   // 校验服务器证书（仅 transport=tls 生效）。默认 false = 跳过校验（REQ-ACC-006：内网自签证书场景）
+	SRTP         string `json:"srtp"`        // 媒体加密（SDES-SRTP，REQ-MEDIA-009）：off / supported / preferred / required，默认 supported（空值按默认）
+	Domain       string `json:"domain"`      // SIP 域名（可选）：From/To/R-URI 里的域。留空 = 用 Server（REQ-ACC-022）
+	PublicIP     string `json:"publicIP"`    // 对外声明的 IP（可选）：Via/Contact/SDP 里写的地址。留空 = 自动（STUN → 本机出口 IP），REQ-ACC-023
+	Account      string `json:"account"`     // 账号（AOR 用户部分）
+	AuthUser     string `json:"authUser"`    // 认证 ID，为空时使用 Account
+	DisplayName  string `json:"displayName"` // 显示名
+	PasswordEnc  string `json:"passwordEnc"` // 加密后的密码（base64，AES-256-GCM）
+	Password     string `json:"-"`           // 明文密码，仅内存，不落盘
 }
 
 // WSConfig 本地 WebSocket 服务配置。
@@ -238,13 +244,13 @@ func Default() *Config {
 		Version:   1,
 		AutoStart: true,
 		Account: Account{
-			Enabled:    true,
-			Port:       5060,
-			Expires:    300,
-			RPort:      true,
-			ChkOpt:     true,
-			STUNServer: "stun.l.google.com:19302",
-			Transport:  "udp",
+			Enabled:      true,
+			Port:         5060,
+			Expires:      300,
+			CTIHeartbeat: 20,
+			RPort:        true,
+			STUNServer:   "stun.l.google.com:19302",
+			Transport:    "udp",
 		},
 		WS: WSConfig{
 			Port: 8765,

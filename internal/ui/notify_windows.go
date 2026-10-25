@@ -70,7 +70,7 @@ func ensureNotifyRegistered() {
 			return
 		}
 		defer k.Close()
-		_ = k.SetStringValue("DisplayName", "mti-sip-phone 软电话")
+		_ = k.SetStringValue("DisplayName", appDisplayName)
 		_ = k.SetDWordValue("ShowInSettings", 1)
 		_ = k.SetStringValue("IconBackgroundColor", "#2E7D32")
 		// 不写 IconUri：必须是真 PNG/JPG 的绝对路径（仓库图标是 SVG）；

@@ -10,7 +10,7 @@
 
 <!-- 顶栏：导航 + 连接/注册状态（任何视图都看得到） -->
 <header class="topbar">
-  <div class="brand">mti-sip-phone<small id="verShort">控制台</small></div>
+  <div class="brand">MTI 软电话<small id="verShort">控制台</small></div>
   <nav class="tabs">
     <a href="#/call" data-view="call">通话</a>
     <a href="#/history" data-view="history">通话记录</a>
@@ -19,6 +19,8 @@
     <a href="#/diag" data-view="diag">诊断</a>
   </nav>
   <div class="topstatus">
+    <!-- 坐席模式徽章（REQ-ACC-028 / REQ-ACC-034）：空闲绿、置忙黄，点击切换 -->
+    <span id="agentBadge" class="badge" hidden></span>
     <span id="connBadge" class="badge">未连接</span>
     <span id="regBadge" class="badge">未注册</span>
     <span class="acct" id="localAccount">—</span>
@@ -28,17 +30,13 @@
   </div>
 </header>
 
-<!-- 常驻通话条：来电/通话时出现在任何视图上方，随时能接听/挂断 -->
+<!-- 常驻通话条：多方话务按"每一方一个块"展示（咨询/三方/会议）。
+     有操作按钮的用图形按钮放在块右侧；会议只显示主持人块，悬停看成员列表。 -->
 <div class="call-bar" id="callBar" hidden>
-  <span class="who" id="barName">—</span>
-  <span class="st" id="barState"></span>
+  <div class="bar-parties" id="barParties"></div>
   <span class="st" id="barTimer"></span>
   <span class="spacer"></span>
-  <button id="barAnswer" class="green" hidden>接听</button>
-  <button id="barAnswerVideo" class="green" hidden>视频接听</button>
-  <button id="barReject" class="red" hidden>拒接</button>
-  <button id="barMute" class="yellow" hidden>保持</button>
-  <button id="barHangup" class="red" hidden>挂断</button>
+  <div class="bar-actions" id="barActions"></div>
 </div>
 
 <main>
@@ -60,29 +58,30 @@
       </div>
 
       <div class="card">
-        <h2>拨号</h2>
-        <div class="row">
-          <!-- 号码输入：输入时**同时查通信录**（拼音/音头/汉字/号码/备注，与通信录页同一套），
-               结果与"最近呼叫"一起出现在下面的下拉里（与桌面版逻辑一致） -->
-          <span class="suggest-wrap">
-            <input type="text" id="dialTarget" autocomplete="off"
-                   placeholder="输入号码或名称（支持拼音/首字母）">
-            <div id="dialSuggest" class="suggest" hidden></div>
-          </span>
-          <button id="btnDial">呼叫</button>
-          <button id="btnDialVideo" class="green">视频呼叫</button>
-        </div>
-        <div class="dtmf-pad" id="dialPad"></div>
-        <label class="chk"><input type="checkbox" id="chkKeyTone" checked> 按键音</label>
-        <p class="hint-text">未接通时点按填入号码；接通后同一组按键直接发 DTMF。</p>
-      </div>
-
-      <div class="card">
         <h2>通话控制</h2>
         <div id="callArea" style="display:none">
-          <div class="caller" id="callName"></div>
-          <div class="hint"><span id="callHint"></span> <span id="timer"></span></div>
-          <div class="row">
+          <!-- 第一行：状态 + 右侧计时 -->
+          <div class="call-head">
+            <span class="call-status" id="callStatus">—</span>
+            <span class="spacer"></span>
+            <span class="call-timer" id="callTimer"></span>
+          </div>
+          <!-- 第二行起：通话各方（咨询/三方/会议显示多方），每方的控制按钮在该行右侧 -->
+          <div class="call-parties" id="callParties"></div>
+          <!-- 最后一行：全局操作（拨号盘/咨询/转移/会议/保持/挂断…） -->
+          <div class="row call-bottom" id="callBottomRow">
+            <!-- 图形按钮只保留拨号盘（其余一律文字，用户要求） -->
+            <button id="btnDtmfPad" class="icon-btn" title="拨号盘（发送 DTMF）"></button>
+            <button id="btnConsult" class="dial-trigger">咨询</button>
+            <button id="btnTransfer" class="dial-trigger">转移</button>
+            <button id="btnConference">会议</button>
+            <button id="btnThreeWay">三方通话</button>
+            <button id="btnConsultTransferBtn">咨询转移</button>
+            <button id="btnWhisper">耳语</button>
+            <button id="btnIntervene">插话</button>
+            <button id="btnIntercept">强拦</button>
+            <button id="btnAddMember" class="dial-trigger">添加成员</button>
+            <button id="btnFinishConference" class="red">结束会议</button>
             <button id="btnAnswer" class="green">接听</button>
             <button id="btnAnswerVideo" class="green">视频接听</button>
             <button id="btnReject" class="red">拒接</button>
@@ -104,6 +103,10 @@
           </div>
         </div>
         <p id="noCall" class="state-line">当前没有进行中的通话</p>
+        <div class="row" id="idleDialRow">
+          <!-- 拨号入口：弹出拨号对话框（拨号盘 / 在线座席两个页签） -->
+          <button id="btnOpenDial" class="dial-trigger">呼叫</button>
+        </div>
         <label class="chk"><input type="checkbox" id="chkAutoAnswer"> 自动接听</label>
       </div>
     </div>
@@ -271,7 +274,6 @@
         <div class="field"><label>STUN 服务器</label><input type="text" id="accStunServer"></div>
       </div>
       <label class="chk"><input type="checkbox" id="accRPort"> 启用 rport（NAT 穿透）</label>
-      <label class="chk"><input type="checkbox" id="accOptChk"> 启用服务端心跳检测（仅 UDP）</label>
       <label class="chk"><input type="checkbox" id="accStunEnabled"> 启用 STUN 公网地址探测</label>
       <label class="chk"><input type="checkbox" id="accTLSVerify"> 校验服务器证书（仅 TLS）</label>
       <label class="chk"><input type="checkbox" id="accClearPassword"> 清除已保存的密码</label>
@@ -426,12 +428,51 @@
 </section>
 </main>
 
+<!-- 拨号对话框（REQ-WEB-006）：呼叫/咨询/转移/会议添加成员共用。
+     两个页签：拨号盘（输入 + 号码盘 + 动作按钮）、在线座席（仅坐席模式）。
+     无遮罩、跟随鼠标点击位置浮现；点对话框外面自动关闭。 -->
+<div class="popover dial-dialog" id="dialDialog" hidden>
+  <div class="dial-head">
+    <div class="dial-tabs">
+      <button id="dialTabPad" class="tab active">拨号盘</button>
+      <button id="dialTabAgents" class="tab" hidden>在线座席</button>
+    </div>
+    <button id="dialClose" class="popover-close" title="关闭"></button>
+  </div>
+  <div class="dial-pane" id="dialPanePad">
+    <div class="row">
+      <span class="suggest-wrap">
+        <input type="text" id="dialTarget" autocomplete="off"
+               placeholder="输入号码或名称（支持拼音/首字母）">
+        <div id="dialSuggest" class="suggest" hidden></div>
+      </span>
+    </div>
+    <div class="dtmf-pad" id="dialPad"></div>
+    <!-- 动作按钮由 JS 按模式重建：呼叫/视频呼叫、咨询/三方、直接转移/咨询转移、加入会议 -->
+    <div class="row dial-actions" id="dialActions"></div>
+  </div>
+  <div class="dial-pane" id="dialPaneAgents" hidden>
+    <div class="row">
+      <input type="text" id="dialAgentsSearch" placeholder="搜索座席号 / 名称 / 技能组">
+      <button id="dialAgentsRefresh" class="ghost">刷新</button>
+    </div>
+    <div class="dial-agent-list" id="dialAgentsList"></div>
+  </div>
+</div>
+
+<!-- 迷你拨号盘（通话中发送 DTMF）：无遮罩、点外面关闭 -->
+<div class="popover dtmf-dialog" id="dtmfDialog" hidden>
+  <div class="dtmf-pad" id="dtmfPad"></div>
+</div>
+
 <div id="toast"></div>
 
 <script src="/sdk/sip-phone-sdk.js"></script>
 <script src="js/common.js"></script>
 <script src="js/icons.js"></script>
 <script src="js/store.js"></script>
+<script src="js/callui.js"></script>
+<script src="js/dialpad.js"></script>
 <script src="js/callbar.js"></script>
 <script src="js/views/call.js"></script>
 <script src="js/views/history.js"></script>

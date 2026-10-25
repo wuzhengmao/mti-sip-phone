@@ -142,7 +142,16 @@ func (p *Phone) ensureTLSListener() {
 		p.tlsMu.Unlock()
 		return
 	}
-	port := FindFreeTLSPort()
+	// 探测即绑定（BindFreeTCPPort），消除"探测→释放→再绑定"的 TOCTOU 窗口
+	//（多实例几乎同时启动时可能撞同端口）；随后包一层 TLS 交给 ServeTLS。
+	ln, port, err := BindFreeTCPPort()
+	if err != nil {
+		logx.Logger().Warn("TLS 监听未启动：无空闲端口", "err", err)
+		p.tlsMu.Lock()
+		p.tlsStarted = false
+		p.tlsMu.Unlock()
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p.tlsMu.Lock()
 	p.tlsCancel = cancel
@@ -151,10 +160,12 @@ func (p *Phone) ensureTLSListener() {
 	p.localTLSPort = port
 	p.mu.Unlock()
 	logx.Logger().Info("TLS 信令监听已启动", "port", port, "cert", filepath.Join(dir, tlsCertFile))
+	tlsLn := tls.NewListener(ln, conf)
 	go func() {
-		addr := fmt.Sprintf("0.0.0.0:%d", port)
-		if err := p.server.ListenAndServeTLS(ctx, "tcp", addr, conf); err != nil && ctx.Err() == nil {
-			logx.Logger().Error("TLS SIP 监听失败", "addr", addr, "err", err)
+		stop := context.AfterFunc(ctx, func() { _ = tlsLn.Close() })
+		defer stop()
+		if err := p.server.ServeTLS(tlsLn); err != nil && ctx.Err() == nil {
+			logx.Logger().Error("TLS SIP 监听失败", "port", port, "err", err)
 		}
 	}()
 }
@@ -206,7 +217,7 @@ func loadOrCreateCert(dir string) (tls.Certificate, error) {
 
 // generateSelfSigned 生成 RSA 2048 自签证书：SAN 覆盖本机各网卡 IP、hostname 与
 // localhost——服务端按 IP 回连时，若它开启了对端校验，证书里得有这个 IP 才有东西可对
-//（默认不校验时这些只是让证书看起来正常）。RSA 而非 ECDSA：兼容性优先。
+// （默认不校验时这些只是让证书看起来正常）。RSA 而非 ECDSA：兼容性优先。
 func generateSelfSigned() (certPEM, keyPEM []byte, err error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

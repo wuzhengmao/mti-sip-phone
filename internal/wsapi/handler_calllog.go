@@ -31,12 +31,15 @@ type callRecordJSON struct {
 	Direction  string `json:"direction"` // incoming / outgoing
 	Remote     string `json:"remote"`
 	RemoteName string `json:"remoteName"`
-	StartedAt  int64  `json:"startedAt"`  // 毫秒
-	AnsweredAt int64  `json:"answeredAt"` // 0 = 未接通
-	EndedAt    int64  `json:"endedAt"`    // 0 = 进行中
-	HasVideo   bool   `json:"hasVideo"`
-	Missed     bool   `json:"missed"`
-	Reason     string `json:"reason"`
+	// DisplayName 座席显示名（在线座席列表直接呼出时记录）：页面展示名称时
+	// **优先于通信录名称**，为空再回退 contact / remoteName。
+	DisplayName string `json:"displayName"`
+	StartedAt   int64  `json:"startedAt"`  // 毫秒
+	AnsweredAt  int64  `json:"answeredAt"` // 0 = 未接通
+	EndedAt     int64  `json:"endedAt"`    // 0 = 进行中
+	HasVideo    bool   `json:"hasVideo"`
+	Missed      bool   `json:"missed"`
+	Reason      string `json:"reason"`
 	// Contact 号码命中通信录时的条目（口径同桌面通话记录页：号码规范化后查
 	// core 的内存快照）。页面据此显示"号码 + 名称 + ★"，并拿 note 做悬停提示。
 	Contact *core.ContactInfo `json:"contact,omitempty"`
@@ -63,16 +66,17 @@ func toCallRecordJSON(app *core.App, r core.CallRecord) callRecordJSON {
 
 func toCallRecordJSONPlain(r core.CallRecord) callRecordJSON {
 	return callRecordJSON{
-		CallID:     r.CallID,
-		Direction:  r.Direction,
-		Remote:     r.Remote,
-		RemoteName: r.RemoteName,
-		StartedAt:  millis(r.StartedAt),
-		AnsweredAt: millis(r.AnsweredAt),
-		EndedAt:    millis(r.EndedAt),
-		HasVideo:   r.HasVideo,
-		Missed:     r.Missed,
-		Reason:     r.Reason,
+		CallID:      r.CallID,
+		Direction:   r.Direction,
+		Remote:      r.Remote,
+		RemoteName:  r.RemoteName,
+		DisplayName: r.DisplayName,
+		StartedAt:   millis(r.StartedAt),
+		AnsweredAt:  millis(r.AnsweredAt),
+		EndedAt:     millis(r.EndedAt),
+		HasVideo:    r.HasVideo,
+		Missed:      r.Missed,
+		Reason:      r.Reason,
 	}
 }
 

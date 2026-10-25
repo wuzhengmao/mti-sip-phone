@@ -5,6 +5,8 @@ package ui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +15,7 @@ import (
 	"unsafe"
 
 	"fyne.io/fyne/v2"
+	"golang.org/x/sys/windows/registry"
 
 	"mti-sip-phone/internal/logx"
 )
@@ -53,9 +56,9 @@ func screenWorkArea() (float32, float32) {
 // setTopMost 设置主窗口是否置顶（REQ-UI-008）。
 // Fyne 的 RequestAlwaysOnTop 只有置顶没有取消，这里直接用 Win32
 // SetWindowPos 按窗口标题查找句柄，实现可撤销的置顶控制。
-// 主窗口标题为 "mti-sip-phone - 号码"，按前缀匹配。
+// 主窗口标题为 "MTI 软电话 - 号码"，按前缀匹配。
 func setTopMost(on bool) {
-	hwnd := findWindowByTitlePrefix("mti-sip-phone")
+	hwnd := findWindowByTitlePrefix(appDisplayName)
 	if hwnd == 0 {
 		return
 	}
@@ -655,7 +658,7 @@ func ringBorderFlash(hwnd uintptr, stop <-chan struct{}) {
 
 // findWindowByTitlePrefix 按标题前缀查找**本进程**的顶层窗口。
 // 进程过滤必不可少：其他进程窗口标题可能包含应用名（如浏览器标签页
-// "mti-sip-phone 测试页面 - Edge"），误匹配会导致可见性误判
+// "MTI 软电话 测试页面 - Edge"），误匹配会导致可见性误判
 // （主窗口隐藏却被判为可见——bug 修复）。
 func findWindowByTitlePrefix(prefix string) uintptr {
 	user32 := syscall.NewLazyDLL("user32.dll")
@@ -1092,3 +1095,119 @@ func stopVideoWindowWatch(w fyne.Window)  {}
 // （全屏切换这类由 GLFW 直接 SetWindowPos 的操作要用）。
 func suspendVideoWindowLockClamp() { videoProgMove.Store(true) }
 func resumeVideoWindowLockClamp()  { videoProgMove.Store(false) }
+
+// ---- 托盘图标"常显"（不被收进 ^ 溢出区）----
+
+// startTrayIconPromotion 尽力让托盘图标显示在通知区（而不是收进 ^）。
+//
+// Windows 没有官方 API：通知区哪些图标常显由外壳按用户设置决定（Windows 11
+// 存在 HKCU\Control Panel\NotifyIconSettings\<id> 的 IsPromoted 值）。这里等
+// 外壳登记完本程序的图标后，把对应项置成 IsPromoted=1。**尽力而为**：生效
+// 时机由外壳决定（通常下次启动资源管理器/重新登录时读取），失败只记日志。
+func startTrayIconPromotion() {
+	go func() {
+		time.Sleep(3 * time.Second) // 等外壳把托盘图标登记进通知区设置
+		matched, changed, err := promoteTrayIcon()
+		if err != nil {
+			logx.Logger().Debug("托盘图标常显设置失败", "err", err)
+			return
+		}
+		switch {
+		case matched == 0:
+			logx.Logger().Debug("未在通知区设置里找到本程序图标，跳过常显设置")
+		case changed > 0:
+			logx.Logger().Info("已把托盘图标设为常显（IsPromoted=1）", "条目", changed)
+		default:
+			logx.Logger().Info("托盘图标已是常显设置（IsPromoted=1）", "条目", matched)
+		}
+	}()
+}
+
+// promoteTrayIcon 把本程序在通知区设置里的 IsPromoted 置 1，返回匹配到的条目数
+// 与实际改动的条目数。Windows 10（<22000）的托盘设置是二进制 IconStreams 块，
+// 不去动它。
+func promoteTrayIcon() (matched, changed int, err error) {
+	if !windows11OrLater() {
+		return 0, 0, nil
+	}
+	exe, exeErr := os.Executable()
+	if exeErr != nil {
+		return 0, 0, exeErr
+	}
+	root, err := registry.OpenKey(registry.CURRENT_USER,
+		`Control Panel\NotifyIconSettings`, registry.READ)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer root.Close()
+	names, err := root.ReadSubKeyNames(-1)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, name := range names {
+		k, err := registry.OpenKey(root, name, registry.READ|registry.SET_VALUE)
+		if err != nil {
+			continue
+		}
+		raw, _, err := k.GetStringValue("ExecutablePath")
+		if err == nil && sameExecutable(raw, exe) {
+			matched++
+			if v, _, err := k.GetIntegerValue("IsPromoted"); err != nil || v != 1 {
+				if err := k.SetDWordValue("IsPromoted", 1); err == nil {
+					changed++
+				}
+			}
+		}
+		k.Close()
+	}
+	return matched, changed, nil
+}
+
+// sameExecutable 比较通知区设置里的可执行文件路径与当前程序是否一致。
+// 外壳可能把已知文件夹写成 GUID 前缀（如 {3EB685DB-…}\mti-sip-phone\…）。
+func sameExecutable(raw, exe string) bool {
+	if raw == "" {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(expandKnownFolder(raw)), filepath.Clean(exe))
+}
+
+// knownFolderPrefixes 外壳在通知区设置里使用的已知文件夹 GUID（只列会用到前缀）。
+var knownFolderPrefixes = []struct{ guid, env string }{
+	{"{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}", "APPDATA"},      // RoamingAppData
+	{"{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}", "LOCALAPPDATA"}, // LocalAppData
+	{"{6D809377-6AF0-444B-8957-A3773F02200E}", "ProgramFiles"}, // ProgramFilesX64
+	{"{905E63B6-C1BF-494E-B29C-65B732D3D21A}", "ProgramFiles"}, // ProgramFiles
+	{"{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}", "ProgramFiles(x86)"},
+}
+
+// expandKnownFolder 把路径开头的已知文件夹 GUID 换成实际目录。
+func expandKnownFolder(p string) string {
+	upper := strings.ToUpper(p)
+	for _, kf := range knownFolderPrefixes {
+		if strings.HasPrefix(upper, kf.guid) {
+			base := os.Getenv(kf.env)
+			if base == "" {
+				return p
+			}
+			return base + p[len(kf.guid):]
+		}
+	}
+	return p
+}
+
+// windows11OrLater 当前是否是 Windows 11（内部版本 ≥ 22000）。
+func windows11OrLater() bool {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.READ)
+	if err != nil {
+		return false
+	}
+	defer k.Close()
+	s, _, err := k.GetStringValue("CurrentBuildNumber")
+	if err != nil {
+		return false
+	}
+	n, err := strconv.Atoi(s)
+	return err == nil && n >= 22000
+}

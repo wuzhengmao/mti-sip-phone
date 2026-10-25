@@ -169,12 +169,9 @@ func topBarIconButton(icon fyne.Resource, fn func()) *widget.Button {
 	return b
 }
 
-// showContacts 切到通信录页（主窗体顶栏按钮，仅非通话状态可用）。
+// showContacts 切到通信录页（主窗体顶栏按钮）。**通话中也可以打开**：只浏览，
+// 行内操作按钮按当前话务/拨号复用状态显示（见 listRowActions，REQ-ACC-035）。
 func (a *App) showContacts() {
-	if a.activeCallID != "" {
-		a.showInfo("提示", "通话中无法查看通信录")
-		return
-	}
 	a.hideTip()         // 切页时收起备注提示
 	a.hideDialSuggest() // 拨号建议下拉同理
 	a.mainContent.Objects[0] = a.contactsPage
@@ -958,20 +955,16 @@ func newContactsRow(st *contactsState, e contactEntry) *contactsRow {
 
 	lines := container.New(panelRowsLayout{}, line1, line2) // 两行纵向居中（行距 2px）
 
-	// ---- 右侧：呼叫 / 视频呼叫（纵向居中跨两行）----
-	callBtn := newCompactButton(IconPhoneWhite, colorHoldBlue, contactsRowIconSize,
-		func() { a.onContactCall(e.c, false) })
-	callBtn.SetCornerRadius(contactsRowButtonRadius)
-	actions := container.NewHBox(callBtn)
-	// 视频呼叫按钮：视频功能不可用（本构建没有 / 用户在配置里关掉了，
-	// REQ-VIDEO-014）时不显示
+	// ---- 右侧：操作按钮（纵向居中跨两行）----
+	// 按钮随通话/拨号复用状态变化（空闲=呼叫/视频呼叫；通话中隐藏；咨询/转移/
+	// 会议复用=对应话务动作），见 listRowActions。
+	contact := e.c
+	var videoAct func()
 	if a.core != nil && a.core.VideoUsable() {
-		videoBtn := newCompactButton(IconVideoOn, colorHoldBlue, contactsRowIconSize,
-			func() { a.onContactCall(e.c, true) })
-		videoBtn.SetCornerRadius(contactsRowButtonRadius)
-		videoBtn.SetIconSize(historyVideoIconSize) // 摄像头图形单独放大一点
-		actions.Add(videoBtn)
+		videoAct = func() { a.onContactCall(contact, true) }
 	}
+	actions := a.listRowActions(contact.Number, contactsRowIconSize, contactsRowButtonRadius,
+		historyVideoIconSize, func() { a.onContactCall(contact, false) }, videoAct, false, "")
 	// 最右让出 historyScrollGap：滚动条压在列表右缘上，不留这一步会挡住按钮；
 	// 左侧留 contactsTextLeftPad：两行文字不贴着窗口左缘（用户要求）
 	content := container.NewBorder(nil, nil, nil,

@@ -14,7 +14,7 @@ import (
 //
 // 为什么改这里而不是重建 Client：sipgo 的 `Client.host` 是私有字段、无公开
 // setter，但它在**每次构建请求时**被 `clientRequestCreateVia` 读取
-//（Host: c.host），因此反射定位 + unsafe 写入即可运行中切换——与
+// （Host: c.host），因此反射定位 + unsafe 写入即可运行中切换——与
 // setClientRPort 同一手法、同一降级策略（版本不匹配时只告警，重启后仍生效）。
 //
 // ⚠️ 它只改**声明**：连接仍绑定本机真实网卡（transport 层只在 Via 未写主机时

@@ -246,10 +246,10 @@ func TestCallWheelThroughDispatch(t *testing.T) {
 		t.Fatalf("麦克风按钮上向上滚一格应为 105%%，实际 %d", a.micLevel.pct)
 	}
 	// 麦克风 105%：蓝色已满（100% 就是满蓝），超出的 5% 是橙色增益段
-	if got, want := a.micBtn.level, float32(1); got != want {
+	if got, want := a.micBtn.bar.level, float32(1); got != want {
 		t.Fatalf("105%% 时蓝色应满格 %v，实际 %v", want, got)
 	}
-	if got, want := a.micBtn.boost, float32(0.05); got != want {
+	if got, want := a.micBtn.bar.boost, float32(0.05); got != want {
 		t.Fatalf("105%% 时橙色增益段应为 %v，实际 %v", want, got)
 	}
 	// 向下滚扬声器：100% → 95%
@@ -262,19 +262,22 @@ func TestCallWheelThroughDispatch(t *testing.T) {
 	if a.speakerLevel.pct != 0 || a.speakerLevel.on() {
 		t.Fatalf("点击应关闭扬声器（0%%），实际 %d", a.speakerLevel.pct)
 	}
-	if a.speakerBtn.icon.Resource != IconSpeakerOff {
-		t.Fatal("0% 应换成红色关图标（禁用样式）")
+	if a.speakerBtn.baseBg != colorDangerRed {
+		t.Fatalf("0%% 时图标应变成红色（关闭状态），实际 %v", a.speakerBtn.baseBg)
 	}
-	if a.speakerBtn.level != 0 || a.speakerBtn.boost != 0 {
-		t.Fatalf("0%% 的填充比例应为 0，实际 level=%v boost=%v", a.speakerBtn.level, a.speakerBtn.boost)
+	if a.speakerBtn.iconSrc != IconSpeakerOff {
+		t.Fatal("0% 应换成带斜杠的禁用图标（与开状态同一字形，只多一条斜杠）")
+	}
+	if a.speakerBtn.bar.level != 0 || a.speakerBtn.bar.boost != 0 {
+		t.Fatalf("0%% 的填充比例应为 0，实际 level=%v boost=%v", a.speakerBtn.bar.level, a.speakerBtn.bar.boost)
 	}
 	// 从 0 往上滚一档：回到 5% 且恢复开图标
 	test.Scroll(w.Canvas(), center(a.speakerBtn), 0, wheelNotch)
 	if a.speakerLevel.pct != 5 {
 		t.Fatalf("从 0%% 上滚一档应为 5%%，实际 %d", a.speakerLevel.pct)
 	}
-	if a.speakerBtn.icon.Resource != IconSpeakerOn {
-		t.Fatal("非 0% 应恢复白色开图标")
+	if a.speakerBtn.baseBg != colorHoldBlue {
+		t.Fatalf("非 0%% 时图标应恢复蓝色，实际 %v", a.speakerBtn.baseBg)
 	}
 }
 

@@ -55,8 +55,8 @@ func (s *Server) dispatchConfig(c *wsConn, msg Message) (Message, bool) {
 			Server        *string `json:"server"`
 			Port          *int    `json:"port"`
 			Expires       *int    `json:"expires"`
+			CTIHeartbeat  *int    `json:"ctiHeartbeat"`
 			RPort         *bool   `json:"rport"`
-			ChkOpt        *bool   `json:"optchk"`
 			STUNEnabled   *bool   `json:"stunEnabled"`
 			STUNServer    *string `json:"stunServer"`
 			Proxy         *string `json:"proxy"`
@@ -76,7 +76,8 @@ func (s *Server) dispatchConfig(c *wsConn, msg Message) (Message, bool) {
 		}
 		snap, err := s.app.PatchAccount(core.AccountPatch{
 			Enabled: p.Enabled, Server: p.Server, Port: p.Port, Expires: p.Expires,
-			RPort: p.RPort, ChkOpt: p.ChkOpt, STUNEnabled: p.STUNEnabled,
+			CTIHeartbeat: p.CTIHeartbeat,
+			RPort:        p.RPort, STUNEnabled: p.STUNEnabled,
 			STUNServer: p.STUNServer, Proxy: p.Proxy, Transport: p.Transport,
 			TLSVerify: p.TLSVerify, SRTP: p.SRTP, Domain: p.Domain, PublicIP: p.PublicIP,
 			Account: p.Account, AuthUser: p.AuthUser, DisplayName: p.DisplayName,

@@ -201,7 +201,7 @@ func (e *Engine) SetSDPIP(ip string) {
 // NewEngine 创建媒体引擎并绑定 RTP/RTCP 连续端口（RTCP = RTP + 1）。
 // 初始编解码器为本地优先级最高的（PCMA），SDP 协商后切换。
 func NewEngine(localIP string) (*Engine, error) {
-	conn, rtcpConn, err := bindRTPRTCP(localIP)
+	conn, rtcpConn, err := bindRTPRTCP()
 	if err != nil {
 		return nil, err
 	}
@@ -232,13 +232,13 @@ func NewEngine(localIP string) (*Engine, error) {
 func (e *Engine) payloadType() uint8 { return uint8(e.activePT.Load()) }
 
 // SampleRate 当前 PCM 管线采样率（Hz）：协商前是本端首选编解码器的速率
-//（PCMA = 8000），协商到 G.722 之后是 16000。音频设备、播放缓冲、诊断 WAV
+// （PCMA = 8000），协商到 G.722 之后是 16000。音频设备、播放缓冲、诊断 WAV
 // 都按它工作。
 func (e *Engine) SampleRate() int { return int(e.sampleRate.Load()) }
 
 // SetSampleRateListener 注册采样率变更回调（audio.Manager 在 AttachEngine 时
 // 注入；nil 取消）。回调在**协商线程**上同步调用，实现方必须非阻塞
-//（音频层的做法是排进自己的 worker 队列）。
+// （音频层的做法是排进自己的 worker 队列）。
 func (e *Engine) SetSampleRateListener(fn func(rate int)) {
 	if fn == nil {
 		e.rateChange.Store(nil)
@@ -251,7 +251,7 @@ func (e *Engine) SetSampleRateListener(fn func(rate int)) {
 func (e *Engine) PayloadType() uint8 { return e.payloadType() }
 
 // SetSRTPPolicy 设置媒体加密策略（REQ-MEDIA-009）。必须在生成 SDP 之前调用
-//（呼出：生成 offer 之前；呼入：解析对端 offer 之前），零值 = 关闭。
+// （呼出：生成 offer 之前；呼入：解析对端 offer 之前），零值 = 关闭。
 func (e *Engine) SetSRTPPolicy(p SRTPPolicy) { e.crypto.setPolicy(p) }
 
 // SRTPActive 本次通话的音频媒体是否已加密。
@@ -265,10 +265,20 @@ func (e *Engine) SRTPSuite() string { return e.crypto.suiteName() }
 // RFC 3550 约定 **RTP 用偶数端口、RTCP = RTP + 1**：服务端/网关普遍按这个
 // 约定配对（奇数 RTP 会被判为不规范，个别实现直接不予互通），所以随机端口
 // 命中奇数时重选，直到拿到偶数端口对。
-func bindRTPRTCP(ip string) (*net.UDPConn, *net.UDPConn, error) {
-	ipAddr := net.ParseIP(ip)
+//
+// ⚠️ 绑定地址一律用**通配（0.0.0.0）**，不用具体网卡 IP。SDP 宣告地址是与
+// 绑定独立的 sdpIP（SetSDPIP；NAT 场景本来就与绑定地址不同），不受影响。
+// 原因：**「具体 IP」与「通配」在 Windows/Linux 上可以同端口共存**，而 sipgo
+// 的信令出站 socket 就是通配——内核随机端口一旦与媒体的具体绑定撞号，对端回
+// 给出站 socket 的响应（dst=具体IP:P）会被"绑定更具体"的媒体 socket **吸走**，
+// 出站"只出不进"（信令静默丢失；这是 internal/sip 测试 flakiness 与**多实例
+// 同时呼叫**时偶发异常的同一根因）。媒体自己也绑通配后，同端口**无法再共存**
+// （两个通配必冲突）：RTP 端口由内核分配——只会挑完全空闲的端口；RTCP 端口
+// （P+1）撞上就绑失败、继续换端口对——撞号在分配层被整体排除，不分实例、
+// 不分先后。
+func bindRTPRTCP() (*net.UDPConn, *net.UDPConn, error) {
 	for i := 0; i < 50; i++ {
-		c1, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ipAddr, Port: 0})
+		c1, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -277,7 +287,7 @@ func bindRTPRTCP(ip string) (*net.UDPConn, *net.UDPConn, error) {
 			_ = c1.Close()
 			continue // 奇数端口不合 RFC 3550 约定（>=65535 也无从再取 +1），重选
 		}
-		c2, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ipAddr, Port: port + 1})
+		c2, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port + 1})
 		if err != nil {
 			_ = c1.Close()
 			continue // RTCP 端口被占用，重新选 RTP 端口
@@ -304,7 +314,7 @@ func (e *Engine) Codec() Codec {
 func (e *Engine) SetMuted(muted bool) { e.muted.Store(muted) }
 
 // SetMicMuted 麦克风静音：纯本地停止/恢复发送，不发 SIP 信令
-//（通话面板麦克风开关用；区别于 Mute 的保持 re-INVITE）。
+// （通话面板麦克风开关用；区别于 Mute 的保持 re-INVITE）。
 func (e *Engine) SetMicMuted(muted bool) { e.micMuted.Store(muted) }
 
 // SetPlayMuted 扬声器静音：纯本地停止/恢复播放，接收侧不受影响。
@@ -314,7 +324,7 @@ func (e *Engine) SetPlayMuted(muted bool) { e.playMuted.Store(muted) }
 func (e *Engine) PlayMuted() bool { return e.playMuted.Load() }
 
 // SetMicGain 麦克风增益（纯本地，REQ-MEDIA-006）：1 = 原始电平，0–2
-//（界面显示 0–200%），超出范围会被夹取。
+// （界面显示 0–200%），超出范围会被夹取。
 // 0 与静音的差别只在于"发不发包"：界面把 0% 表达为 SetMicMuted(true)，
 // 增益本身不必（也不该）用 0 表达禁用。
 func (e *Engine) SetMicGain(gain float32) {
@@ -325,7 +335,7 @@ func (e *Engine) SetMicGain(gain float32) {
 func (e *Engine) MicGain() float32 { return float32(e.micGainOff.Load()+100) / 100 }
 
 // SetSpeakerVolume 扬声器音量（纯本地，REQ-MEDIA-006）：1 = 原始电平，0–1
-//（界面显示 0–100%），超出范围会被夹取。
+// （界面显示 0–100%），超出范围会被夹取。
 func (e *Engine) SetSpeakerVolume(vol float32) {
 	off := int32(clampPercent(vol*100)) - 100
 	if off > 0 {
@@ -650,7 +660,7 @@ func applyGain(buf []int16, g float32) {
 }
 
 // punchHole NAT 打洞：向对端发送一帧静音，让 NAT 建立端口映射
-//（对称 NAT 下对端媒体包必须先有出向包放行）。
+// （对称 NAT 下对端媒体包必须先有出向包放行）。
 func (e *Engine) punchHole() {
 	e.codecMu.RLock()
 	codec := e.codec
@@ -760,7 +770,7 @@ func (e *Engine) rtpTimestamp() uint32 {
 
 // --- rtcpEndpoint 实现（音频）---
 
-func (e *Engine) rtcpSSRC() uint32  { return e.ssrc }
+func (e *Engine) rtcpSSRC() uint32    { return e.ssrc }
 func (e *Engine) rtcpRTPTime() uint32 { return e.rtpTimestamp() }
 
 func (e *Engine) rtcpTxStats() (packets, bytes uint64) {
@@ -778,8 +788,8 @@ func (e *Engine) rtcpRecvState() (uint16, uint32, uint64, bool) {
 func (e *Engine) rtcpOnFeedback(rtcp.Packet) {}
 
 // RTCP 加解密（SRTP，REQ-MEDIA-009）。
-func (e *Engine) rtcpProtect(pkt []byte) []byte            { return protectRTCPPkt(&e.crypto, pkt) }
-func (e *Engine) rtcpUnprotect(pkt []byte) ([]byte, bool)  { return unprotectRTCPPkt(&e.crypto, pkt) }
+func (e *Engine) rtcpProtect(pkt []byte) []byte           { return protectRTCPPkt(&e.crypto, pkt) }
+func (e *Engine) rtcpUnprotect(pkt []byte) ([]byte, bool) { return unprotectRTCPPkt(&e.crypto, pkt) }
 
 // SendDTMF 发送一个 DTMF 音（RFC 2833 telephone-event，负载类型 101）。
 // 异步发送：起始包（M=1）→ 持续包 → 结束包（E=1），总时长约 200ms。
@@ -969,7 +979,7 @@ func (e *Engine) SDPOffer() string {
 }
 
 // SDPOfferWithDirection 生成指定媒体方向的 SDP offer
-//（保持 re-INVITE 用：保持 sendonly / 恢复 sendrecv）。
+// （保持 re-INVITE 用：保持 sendonly / 恢复 sendrecv）。
 // re-offer 必须**重复带上 a=crypto**：SDES 的口径是"重协商里不再出现 crypto
 // 就表示不再加密"，漏掉会让对端以为本端取消了加密（密钥沿用本通首次生成的）。
 func (e *Engine) SDPOfferWithDirection(dir string) string {
@@ -977,7 +987,7 @@ func (e *Engine) SDPOfferWithDirection(dir string) string {
 }
 
 // SDPNegotiatedAnswer 呼入接听时的 200 answer：仅含协商后的编解码器
-//（RFC 3264 answer 只列双方协商结果）。
+// （RFC 3264 answer 只列双方协商结果）。
 // 用 activePT（对端号）而非 codec.PayloadType()（本端号）——音频静态 PT
 // 两者相同，动态 PT（Opus）下必须用对端号。
 func (e *Engine) SDPNegotiatedAnswer() string {
@@ -991,7 +1001,7 @@ func (e *Engine) SDPAnswer(offer []byte) (string, error) {
 }
 
 // SDPAnswerWithDirection 解析远端 offer 并返回指定方向的 answer
-//（对端 re-INVITE 用：方向镜像，如对端 recvonly → 本端 sendonly）。
+// （对端 re-INVITE 用：方向镜像，如对端 recvonly → 本端 sendonly）。
 func (e *Engine) SDPAnswerWithDirection(offer []byte, dir string) (string, error) {
 	remote, codec, peerPT, rtcpPort, err := parseSDPOffer(offer)
 	if err != nil {
@@ -1224,7 +1234,7 @@ func negotiateMedia(sd *sdp.SessionDescription, kind string) (*net.UDPAddr, Code
 }
 
 // matchAudioCodec 按本地优先级在 offer 的负载类型中挑音频编解码器
-//（PCMA > PCMU > opus，opus 是动态 PT，只在对方也支持时才选中）。
+// （PCMA > PCMU > opus，opus 是动态 PT，只在对方也支持时才选中）。
 // 先按 rtpmap 名匹配，再回退到静态负载类型号（对端未写 a=rtpmap 的旧式实现）。
 func matchAudioCodec(info *MediaInfo) (Codec, uint8, bool) {
 	for _, c := range supportedCodecs {

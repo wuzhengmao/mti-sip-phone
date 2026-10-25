@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"image"
 	"image/color"
 	"math"
 	"time"
@@ -87,23 +86,26 @@ func (a *App) buildCallPanelIfNeeded() {
 
 	// 紧凑按钮（尺寸取平台常量，REQ-UI-025 修订）：fyne Button 跟随主题
 	// 内边距高达 48px，用自定义 compactButton 缩小面板按钮
-	a.hangupBtn = newCompactButton(IconStopWhite, colorDangerRed, callPanelButtonSize, func() {
+	a.hangupBtn = newPanelButton(IconStopWhite, colorDangerRed, callPanelButtonSize, func() {
 		if a.activeCallID != "" {
 			_ = a.core.Hangup(a.activeCallID)
 		}
 	})
+	a.hangupBtn.setTip(a.callTip, "挂断")
 
 	// 绿色电话：接听
-	a.answerBtn = newCompactButton(IconPhoneWhite, colorSuccessGreen, callPanelButtonSize, func() {
+	a.answerBtn = newPanelButton(IconPhoneWhite, colorSuccessGreen, callPanelButtonSize, func() {
 		if a.activeCallID != "" {
 			if err := a.core.Answer(a.activeCallID); err != nil {
 				logx.Logger().Warn("接听失败", "err", err)
 			}
 		}
 	})
+	a.answerBtn.setTip(a.callTip, "接听")
+	a.answerBtn.SetIconSize(16) // 稍微缩小（用户要求）
 
 	// 黄色 ||：通话保持切换（保持语义：本端停止发送音频，再次点击恢复）
-	a.holdBtn = newCompactButton(IconPauseWhite, colorHoldYellow, callPanelButtonSize, func() {
+	a.holdBtn = newPanelButton(IconPauseWhite, colorHoldYellow, callPanelButtonSize, func() {
 		if a.activeCallID == "" {
 			return
 		}
@@ -114,18 +116,21 @@ func (a *App) buildCallPanelIfNeeded() {
 			logx.Logger().Warn("保持切换失败", "err", err)
 		}
 	})
+	a.holdBtn.setTip(a.callTip, "保持")
 
 	// 扬声器开关（REQ-UI-023）+ 音量（REQ-MEDIA-006）：
 	// **滚轮**调节音量、底色横向填充，0% 即禁用（等同「关」）。
 	a.speakerBtn = newLevelButton(IconSpeakerOn, callPanelButtonSize,
 		func(steps int, pos fyne.Position) { a.onCallWheel(false, steps, pos) }, a.toggleSpeaker)
+	a.speakerBtn.setTip(a.callTip, "扬声器（滚轮调音量，0% 关闭）")
 
 	// 麦克风开关（REQ-UI-023）+ 增益（REQ-MEDIA-006）
 	a.micBtn = newLevelButton(IconMicOn, callPanelButtonSize,
 		func(steps int, pos fyne.Position) { a.onCallWheel(true, steps, pos) }, a.toggleMic)
+	a.micBtn.setTip(a.callTip, "麦克风（滚轮调音量，0% 静音）")
 
 	// 视频接听（REQ-VIDEO-004）：来电含视频时显示在「接听」左侧
-	a.videoAnswerBtn = newCompactButton(IconVideoAnswer, colorSuccessGreen, callPanelButtonSize, func() {
+	a.videoAnswerBtn = newPanelButton(IconVideoAnswer, colorSuccessGreen, callPanelButtonSize, func() {
 		if a.activeCallID == "" {
 			return
 		}
@@ -133,11 +138,17 @@ func (a *App) buildCallPanelIfNeeded() {
 			logx.Logger().Warn("视频接听失败", "err", err)
 		}
 	})
+	a.videoAnswerBtn.setTip(a.callTip, "视频接听")
+	a.videoAnswerBtn.SetIconSize(16) // 稍微缩小（用户要求）
 
 	// 关闭视频开关（REQ-VIDEO-008）：位于扬声器左侧
-	a.videoBtn = newCompactButton(IconVideoOn, colorHoldBlue, callPanelButtonSize, func() {
+	a.videoBtn = newPanelButton(IconVideoOn, colorHoldBlue, callPanelButtonSize, func() {
 		a.setVideoEnabled(!a.videoOn)
 	})
+	a.videoBtn.setTip(a.callTip, "视频")
+
+	// CTI 话务按钮（REQ-ACC-026）：咨询/转移/会议入口 + 各话务状态按钮。
+	a.buildCTIButtons()
 
 	// 三行内容容器：内容在每次进入状态时由 rebuildCallRows 重建。
 	// 用 Stack：振铃底色闪烁矩形与内容层平铺为兄弟、撑满整个窗口
@@ -245,32 +256,49 @@ func (a *App) updateCallWindowTitle() {
 	a.callW.SetTitle(callWindowTitle(a.core.State().Register.Account))
 }
 
-// rebuildCallRows 按状态重建通话面板三行内容：
-//   - 行1：对端号码（振铃加接听按钮、通话加保持按钮，靠右）
-//   - 行2：状态文字 + 挂断按钮（挂断恒在行2最右）
+// rebuildCallRows 按状态重建通话面板行内容（REQ-UI-008 + REQ-ACC-026 修订）：
+//   - 行1：状态文字（"通话中/来电/呼叫中"）+ 右侧按钮（振铃=接听；通话=咨询/转移/会议/保持）
+//   - 行2：对端号码（呼出时号码后跟绿色动态箭头）+ 挂断按钮
 //   - 行3：时长（通话中加扬声器/麦克风开关，靠右，REQ-UI-023）
+//
+// 注：REQ-ACC-026 第 4 点——号码与状态两行**对换**（只换文字，按钮位置不变）。
 func (a *App) rebuildCallRows(mode int) {
 	if a.callRows == nil {
 		return
 	}
 	a.callRows.Objects = nil
+	// 两方通话/拨号/振铃都是 3 行：从复杂话务（4 行及以上）回到这里要复位高度。
+	// **必须先清空 Objects 再调高度**：Fyne 的 SetFixedSize(true) 会按当前内容的
+	// 最小高把窗口顶回去，旧 4 行内容（最小高 170）还在时，144 的 3 行高度设不进去
+	// （用户实测：4 行面板关闭后重新来电，窗口停在 170 高、三行内容居中留白）。
+	a.setCallPanelHeight(3)
+	// 挂断按钮的提示与图标回到通用样式（话务面板会改提示/图标）
+	if a.hangupBtn != nil {
+		a.hangupBtn.setTip(a.callTip, "挂断")
+		a.hangupBtn.SetIcon(IconStopWhite)
+	}
 
-	row1 := container.New(panelRowLayout{}, a.callName)
-	row2 := container.New(panelRowLayout{}, a.callStateLabel, a.hangupBtn)
-	// 视频开关**只在本次通话确实协商了视频时**才出现（纯音频通话放一个点了
-	// 没反应的按钮没有意义）。
+	// 行1：状态文字（原来放号码，现换过来）；右侧按钮按状态在 switch 里加。
+	row1 := container.New(panelRowLayout{}, a.callStateLabel)
+	// 行3：时长 + 音量。视频开关**只在本次通话确实协商了视频时**才出现
+	//（纯音频通话放一个点了没反应的按钮没有意义）。
 	row3 := container.New(panelRowLayout{}, a.callTimerLabel)
 	if a.callHasVideo {
 		row3.Add(a.videoBtn)
 	}
-	row3.Add(a.speakerBtn)
+	// 顺序按用户定的布局：摄像头 → 麦克风 → 扬声器
 	row3.Add(a.micBtn)
+	row3.Add(a.speakerBtn)
 
 	switch mode {
 	case dialingButtons:
 		a.stopRingShake()
 		a.ringFlashRect = nil
 	case ringingButtons:
+		// 来电时第二行的红色按钮是「拒接」（挂断即 603 拒接）
+		if a.hangupBtn != nil {
+			a.hangupBtn.setTip(a.callTip, "拒接")
+		}
 		// REQ-VIDEO-004/005：来电 offer 含视频就显示「视频接听」——
 		// **摄像头禁用时同样要显示**：那样接听照样能看远端视频，只是不推送
 		// 本地（answer 里视频段为 recvonly）。
@@ -286,12 +314,36 @@ func (a *App) rebuildCallRows(mode int) {
 	case incallButtons:
 		a.stopRingShake()
 		a.ringFlashRect = nil
+		// 两方通话的状态文案（从咨询/三方/监听/会议回到两方时也要复位）
+		a.setTwoPartyStateLabel()
+		// REQ-ACC-028：**只有坐席模式**（CTI 推过 MSP_EVENT_AGENT_ONLINE）
+		// 才显示高级话务按钮；且只在这一分支（两方通话已接通）显示，
+		// 拨号中/振铃中都不显示。保持按钮不受影响。
+		// REQ-ACC-029：本通若是服务端推来的**咨询腿**（Call-Info call-type=consult），
+		// 第一排的咨询/转移/会议入口一律不显示——这通本身就是别人咨询的一方。
+		// REQ-ACC-031：另有咨询正在进行、而本机不是咨询发起方（CONSULT_STARTED
+		// 也发给原通话双方与被咨询方）时同样隐藏，CONSULT_FINISHED 后恢复。
+		noAgentButtons := a.activeCall != nil &&
+			(a.activeCall.Consult || a.activeCall.CTI.ConsultInProgress)
+		if a.agentOnline && !noAgentButtons {
+			row1.Add(a.consultBtn)
+			row1.Add(a.transferBtn)
+			row1.Add(a.conferenceBtn)
+			// 会议按钮图标随通话类型：普通通话 = 会议人员，视频通话 = 多人视频
+			if a.callHasVideo {
+				a.conferenceBtn.SetIcon(IconCTIVideoConference)
+			} else {
+				a.conferenceBtn.SetIcon(IconCTIConference)
+			}
+		}
 		row1.Add(a.holdBtn)
 		// 通话建立：把会话内记忆的开关状态下发到当前通话引擎
 		//（引擎按通话创建，每次通话建立需重新下发）
 		a.applySessionAudioState()
 		a.applyVideoButton()
 	}
+
+	row2 := container.New(panelRowLayout{}, a.callName, a.hangupBtn)
 
 	// 音量按钮的外观每次都按会话内记忆刷新（REQ-MEDIA-006）：面板首次创建时
 	// 靠它把填充条画出来（新按钮的 level 默认 0），网页改过开关后重开面板
@@ -363,9 +415,14 @@ func (panelRowLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 		o.Move(fyne.NewPos(x, (size.Height-m.Height)/2))
 		x -= panelColGap
 	}
-	// 首元素靠左（纵向居中：行高固定时文字才不会顶在上沿）
+	// 首元素靠左（纵向居中：行高固定时文字才不会顶在上沿）。
+	// 右侧按钮多到放不下时（如会议成员行有 4 个按钮），首元素按剩余宽度收窄——
+	// 不能让文字原样画到按钮底下（文字类控件在 Resize 时自行截断补省略号）。
 	if o := objs[0]; o.Visible() {
 		m := o.MinSize()
+		if x > 0 && m.Width > x {
+			m.Width = x
+		}
 		o.Resize(m)
 		o.Move(fyne.NewPos(0, (size.Height-m.Height)/2))
 	}
@@ -491,9 +548,13 @@ const dialCallButtonHeight = 32
 
 // 通话面板按钮配色（与主界面主题色观感一致）。
 var (
-	colorDangerRed     = color.NRGBA{R: 0xe5, G: 0x39, B: 0x35, A: 0xff} // 挂断
-	colorDangerDark    = color.NRGBA{R: 0xa8, G: 0x18, B: 0x18, A: 0xff} // 深红（通话记录页「清空通话记录」按钮）
-	colorSuccessGreen  = color.NRGBA{R: 0x43, G: 0xa0, B: 0x47, A: 0xff} // 接听/呼叫
+	colorDangerRed    = color.NRGBA{R: 0xe5, G: 0x39, B: 0x35, A: 0xff} // 挂断
+	colorDangerDark   = color.NRGBA{R: 0xa8, G: 0x18, B: 0x18, A: 0xff} // 深红（通话记录页「清空通话记录」按钮）
+	colorSuccessGreen = color.NRGBA{R: 0x43, G: 0xa0, B: 0x47, A: 0xff} // 接听/呼叫
+	// colorCallGreen 主窗体底部按钮（呼叫 / 视频呼叫 / 拨号复用的两个动作）
+	// 的**暗绿色**：比 colorSuccessGreen 深一档（Material Green 800），
+	// 白字白图标在上面更稳。
+	colorCallGreen     = color.NRGBA{R: 0x2e, G: 0x7d, B: 0x32, A: 0xff}
 	colorHoldYellow    = color.NRGBA{R: 0xfb, G: 0xc0, B: 0x2d, A: 0xff} // 保持
 	colorHoldBlue      = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff} // 取消保持/开关开
 	colorSwitchGray    = color.NRGBA{R: 0xbd, G: 0xbd, B: 0xbd, A: 0xff} // 开关关
@@ -518,131 +579,278 @@ var (
 // 由它决定），主窗体呼叫按钮固定 36。
 type compactButton struct {
 	widget.BaseWidget
-	bg       *canvas.Rectangle
-	icon     *canvas.Image
-	label    *canvas.Text // 可选文字
-	onTap    func()
-	baseBg   color.NRGBA // 正常态背景色（禁用时置灰，恢复时还原）
-	disabled bool
+	bg         *canvas.Rectangle
+	icon       *canvas.Image
+	label      *canvas.Text // 可选文字
+	labelColor color.NRGBA  // 文字正常色（禁用/恢复时切换）
+	onTap      func()
+	baseBg     color.NRGBA // 普通样式：正常态背景色；outline 样式：图标（强调）色
+	disabled   bool
+
+	// ---- 无底色图标按钮样式（outline，通话面板用；REQ-UI-043）----
+	// 平时背景完全透明（= 窗体背景），鼠标移上去才淡填充 + 1px 轮廓；
+	// 图标用 baseBg（原来的按钮底色）着色，禁用时变灰。
+	outline bool
+	hovered bool
+	iconSrc fyne.Resource // 原始图标（着色前的资源）
+	// iconDX / iconDY 图标位置微调（像素，正值右/下移）：个别图标在原始图片里
+	// 画得偏了，用它们在**显示层**对齐。
+	iconDX, iconDY float32
 
 	// ---- 音量按钮（REQ-MEDIA-006；普通按钮这些字段为 nil）----
-	// sweep 圆周填充层：按钮外观不变，只是底色按"从正上方顺时针"的角度填充
-	//（见 sweepImage）。level 蓝色部分比例 0–1，boost 橙色（增益）部分 0–1。
-	sweep *canvas.Raster
-	level float32
-	boost float32
+	// bar 竖直进度条：贴在按钮右缘内侧，高度 = 图标高度，从底部按百分比填充
+	//（麦克风 100%→200% 的增益段橙色叠在蓝色之上）。
+	bar *levelBar
 	// scroll 滚轮中继（只有音量按钮有，见 scrollRelay）
 	scroll *scrollRelay
+
+	// ---- 悬停提示（通话面板的每个按钮都有文字说明）----
+	// tip 是所在窗口的提示图层（通话面板用 a.callTip）；主窗体的按钮不设，
+	// 也就没有提示（那套按钮旁边都有文字）。
+	tip      *tooltipLayer
+	tipText  string
+	tipTimer *time.Timer
 }
 
 func newCompactButton(iconRes fyne.Resource, bgColor color.NRGBA, size float32, onTap func()) *compactButton {
-	b := &compactButton{onTap: onTap, baseBg: bgColor}
+	b := &compactButton{onTap: onTap, baseBg: bgColor, iconSrc: iconRes}
 	b.bg = canvas.NewRectangle(bgColor)
 	b.bg.CornerRadius = 6
 	b.bg.SetMinSize(fyne.NewSize(size, size))
 	b.icon = canvas.NewImageFromResource(iconRes)
 	b.icon.FillMode = canvas.ImageFillContain
-	// 图标按比例缩放（36 → 20px，与原值一致）
-	iconSize := float32(math.Round(float64(size) * 0.55))
+	// 图标按比例缩放（36 → 18px；PNG 图标细节多，视觉上偏大，故收小）
+	iconSize := float32(math.Round(float64(size) * 0.5))
 	b.icon.SetMinSize(fyne.NewSize(iconSize, iconSize))
 	b.ExtendBaseWidget(b)
 	return b
 }
 
-// newLevelButton 带「圆周填充底色」的紧凑按钮（通话面板的扬声器/麦克风，
-// REQ-MEDIA-006）：按钮外观不变，只是底色从**正上方**起按 level(0–1) **顺时针**
-// 扫过（12→3→6→9）；未填充部分是深灰轨道色。鼠标滚轮悬停其上可调值
-// （onScroll 收到的是**格数**，已按 wheelNotch 折算）。
-func newLevelButton(iconRes fyne.Resource, size float32, onScroll func(steps int, pos fyne.Position), onTap func()) *compactButton {
-	b := newCompactButton(iconRes, colorLevelTrack, size, onTap)
-	b.sweep = canvas.NewRaster(b.sweepImage)
-	b.sweep.ScaleMode = canvas.ImageScaleSmooth
-	b.scroll = newScrollRelay(onScroll)
+// newPanelButton 通话面板的图标按钮：**无底色**样式（透明底、hover 才显轮廓），
+// accent 即图标颜色（沿用原来的按钮底色，如挂断红、接听绿、功能蓝）。
+func newPanelButton(icon fyne.Resource, accent color.NRGBA, size float32, onTap func()) *compactButton {
+	b := newCompactButton(icon, accent, size, onTap)
+	b.SetOutline(true)
 	return b
 }
 
-// sweepCorner 圆周填充层的圆角半径（与按钮底色一致，满格时才完全重合）。
-const sweepCorner = 6
-
-// sweepImage 逐像素画"从正上方顺时针"的底色填充（REQ-MEDIA-006）：
-// 蓝色部分（level，0–1）打底，**橙色增益部分（boost，0–1）叠在蓝色之上**
-// ——麦克风 100% 时满蓝，100%→200% 再顺时针压一层橙，200% 时整块橙。
-//
-// 为什么用 Raster 而不是 canvas.Arc：Arc 画的是圆/扇形，满格时是个**圆**，
-// 方形按钮的四个角会露出轨道色（而按钮外观要求不变）。Fyne 没有"把图形裁剪到
-// 圆角矩形"的能力，于是这里逐像素自己判定：圆角矩形之内、且落在扫过角度内的
-// 像素填填充色，其余透明（透出下面的轨道色）。36×36 的小图 + 3×3 超采样，
-// 开销可忽略；像素坐标是设备像素（驱动按 DPI 放大后调用），所以按比例换算。
-func (b *compactButton) sweepImage(w, h int) image.Image {
-	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	if w <= 0 || h <= 0 || (b.level <= 0 && b.boost <= 0) {
-		return img
+// SetOutline 切换成无底色图标按钮样式（通话面板）；图标按 baseBg 着色。
+func (b *compactButton) SetOutline(on bool) {
+	b.outline = on
+	if on {
+		b.bg.FillColor = color.NRGBA{}
+		b.bg.StrokeWidth = 0
+	} else {
+		b.bg.FillColor = b.baseBg
 	}
-	dipW, dipH := b.Size().Width, b.Size().Height
-	if dipW <= 0 || dipH <= 0 {
-		dipW, dipH = float32(w), float32(h)
-	}
-	scale := float64(w) / float64(dipW)
-	radius := sweepCorner * scale
-	blueDeg := float64(b.level) * 360
-	boostDeg := float64(b.boost) * 360
-	cx, cy := float64(w)/2, float64(h)/2
-
-	const ss = 3 // 每个像素 3×3 超采样，抹掉角度边界与圆角的锯齿
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			blueCover, boostCover := 0, 0
-			for sy := 0; sy < ss; sy++ {
-				for sx := 0; sx < ss; sx++ {
-					px := float64(x) + (float64(sx)+0.5)/ss
-					py := float64(y) + (float64(sy)+0.5)/ss
-					if !inRoundRect(px, py, float64(w), float64(h), radius) {
-						continue
-					}
-					// 相对圆心的角度：正上方 0°，顺时针为正（atan2(右, 上)）
-					deg := math.Atan2(px-cx, cy-py) * 180 / math.Pi
-					if deg < 0 {
-						deg += 360
-					}
-					if deg <= blueDeg {
-						blueCover++
-					}
-					if deg <= boostDeg {
-						boostCover++
-					}
-				}
-			}
-			if blueCover == 0 {
-				continue
-			}
-			// 橙色只叠在蓝色之上（两者同起点、同方向，boost 段必在 blue 段内），
-			// 边界像素按覆盖率在蓝橙之间插值
-			col := colorHoldBlue
-			if boostCover > 0 {
-				t := float64(boostCover) / float64(blueCover)
-				col = color.NRGBA{
-					R: uint8(float64(colorHoldBlue.R)*(1-t) + float64(colorLevelBoost.R)*t + 0.5),
-					G: uint8(float64(colorHoldBlue.G)*(1-t) + float64(colorLevelBoost.G)*t + 0.5),
-					B: uint8(float64(colorHoldBlue.B)*(1-t) + float64(colorLevelBoost.B)*t + 0.5),
-				}
-			}
-			img.SetNRGBA(x, y, color.NRGBA{R: col.R, G: col.G, B: col.B,
-				A: uint8(blueCover * 255 / (ss * ss))})
-		}
-	}
-	return img
+	b.applyIconColor()
+	b.updateHoverBg()
+	b.bg.Refresh()
+	b.Refresh()
 }
 
-// inRoundRect 点 (x,y) 是否落在 w×h、圆角半径 r 的圆角矩形内。
-func inRoundRect(x, y, w, h, r float64) bool {
-	if x < 0 || y < 0 || x >= w || y >= h {
-		return false
+// SetAccent 更新强调色（outline 样式下即图标颜色，如静音=红、正常=蓝）。
+func (b *compactButton) SetAccent(c color.NRGBA) {
+	b.baseBg = c
+	if b.outline {
+		b.applyIconColor()
+		return
 	}
-	// 把点钳到"内矩形"上：角上距离圆心 > r 的在圆角之外
-	nx := math.Min(math.Max(x, r), w-r)
-	ny := math.Min(math.Max(y, r), h-r)
-	dx, dy := x-nx, y-ny
-	return dx*dx+dy*dy <= r*r
+	b.bg.FillColor = c
+	b.bg.Refresh()
+}
+
+// applyIconColor 按样式给图标着色：outline 用强调色（禁用时用主题禁用色），
+// 普通样式保持原图标（白图标画在彩色底上）。
+func (b *compactButton) applyIconColor() {
+	if b.icon == nil || b.iconSrc == nil {
+		return
+	}
+	switch {
+	case b.disabled:
+		// 禁用样式**两个窗口统一**：图标置灰、背景透明（同主窗体的配置按钮）
+		b.icon.Resource = tintIcon(b.iconSrc, disabledIconColor())
+	case b.outline:
+		b.icon.Resource = tintIcon(b.iconSrc, b.baseBg)
+	default:
+		b.icon.Resource = b.iconSrc
+	}
+	b.icon.Refresh()
+	b.rerasterIcon()
+}
+
+// rerasterIcon 强制 canvas.Image 重新栅格化当前图标。
+//
+// Fyne 的 canvas.Image 在**只换 Resource** 时 Refresh 不一定会重新渲染 SVG
+// （实测：视频图标从蓝换成红，Resource 已经变了、画布上却仍是蓝色），而
+// Image.Resize 到新尺寸会走 renderSVG 重新栅格化。图标尺寸微调 0.01 再改回来，
+// 对布局无影响（随后布局会按 MinSize 归一）。转圈动画每帧换资源也要靠它，
+// 否则"转了但画面不变"。
+func (b *compactButton) rerasterIcon() {
+	if b.icon == nil {
+		return
+	}
+	w, h := b.icon.Size().Width, b.icon.Size().Height
+	if w <= 0 || h <= 0 {
+		return
+	}
+	// 必须改变**整数像素**尺寸：renderSVG 取整后尺寸相同会命中旧的缓存位图
+	b.icon.Resize(fyne.NewSize(w+1, h+1))
+	b.icon.Resize(fyne.NewSize(w, h))
+}
+
+// updateHoverBg outline 样式：hover 时淡填充 + 1px 轮廓，平时全透明。
+func (b *compactButton) updateHoverBg() {
+	if !b.outline {
+		return
+	}
+	if b.hovered && !b.disabled {
+		b.bg.FillColor = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0x12}
+		b.bg.StrokeColor = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0x3c}
+		b.bg.StrokeWidth = 1
+	} else {
+		b.bg.FillColor = color.NRGBA{}
+		b.bg.StrokeColor = color.NRGBA{}
+		b.bg.StrokeWidth = 0
+	}
+	b.bg.Refresh()
+}
+
+// disabledIconColor 禁用态图标/文字颜色：**深色主题用浅灰、浅色主题用深灰**
+// （直接用主题的 ColorNameDisabled 在深色主题下是近黑的深灰，根本看不清）。
+func disabledIconColor() color.NRGBA {
+	if app := fyne.CurrentApp(); app != nil &&
+		app.Settings().ThemeVariant() == theme.VariantLight {
+		return color.NRGBA{R: 0x55, G: 0x55, B: 0x55, A: 0xff} // 浅色主题：深灰
+	}
+	return color.NRGBA{R: 0xb0, G: 0xb0, B: 0xb0, A: 0xff} // 深色主题：浅灰
+}
+
+// newLevelButton 音量按钮（通话面板的扬声器/麦克风，REQ-MEDIA-006 修订）：
+// 无底色图标按钮 + **竖直进度条**（贴在按钮右缘内侧，高度 = 图标高度，
+// 从底部按百分比填充；麦克风 100%→200% 的增益段橙色叠在蓝色之上）。
+// 鼠标滚轮悬停其上可调值（onScroll 收到的是**格数**，已按 wheelNotch 折算）。
+func newLevelButton(iconRes fyne.Resource, size float32, onScroll func(steps int, pos fyne.Position), onTap func()) *compactButton {
+	b := newCompactButton(iconRes, colorHoldBlue, size, onTap)
+	iconSize := float32(math.Round(float64(size) * 0.5))
+	b.bar = newLevelBar(iconSize)
+	b.scroll = newScrollRelay(onScroll)
+	// 样式**最后**再切：SetOutline 里的 Refresh 会立即创建并缓存渲染器
+	//（BaseWidget.Refresh 无条件 cache.Renderer），此时 bar 必须已经就位，
+	// 否则缓存下来的是"没有进度条"的那套渲染对象（滚轮也一起丢）。
+	b.SetOutline(true)
+	return b
+}
+
+// levelBarW 竖直进度条宽度。
+const levelBarW float32 = 3
+
+// levelBar 竖直进度条：轨道 + 蓝色填充 + 橙色增益段（麦克风 100%→200%）。
+// 高度由调用方给（= 按钮图标高度），从底部向上填充。
+type levelBar struct {
+	widget.BaseWidget
+	level      float32 // 0–1：蓝色段
+	boost      float32 // 0–1：橙色段（叠在蓝色之上）
+	trackColor color.NRGBA
+	w, h       float32
+}
+
+func newLevelBar(h float32) *levelBar {
+	l := &levelBar{w: levelBarW, h: h, trackColor: colorLevelTrack}
+	l.ExtendBaseWidget(l)
+	return l
+}
+
+func (l *levelBar) MinSize() fyne.Size { return fyne.NewSize(l.w, l.h) }
+
+func (l *levelBar) set(level, boost float32) {
+	level, boost = clampLevel(level), clampLevel(boost)
+	if l.level == level && l.boost == boost {
+		return
+	}
+	l.level, l.boost = level, boost
+	l.Refresh()
+}
+
+func (l *levelBar) setTrack(c color.NRGBA) {
+	if l.trackColor == c {
+		return
+	}
+	l.trackColor = c
+	l.Refresh()
+}
+
+func (l *levelBar) CreateRenderer() fyne.WidgetRenderer {
+	r := &levelBarRenderer{
+		bar:    l,
+		track:  canvas.NewRectangle(l.trackColor),
+		blue:   canvas.NewRectangle(colorHoldBlue),
+		orange: canvas.NewRectangle(colorLevelBoost),
+	}
+	for _, rect := range []*canvas.Rectangle{r.track, r.blue, r.orange} {
+		rect.CornerRadius = levelBarW / 2
+	}
+	r.Layout(l.Size())
+	return r
+}
+
+type levelBarRenderer struct {
+	bar                 *levelBar
+	track, blue, orange *canvas.Rectangle
+}
+
+func (r *levelBarRenderer) Layout(size fyne.Size) {
+	w := size.Width
+	if w <= 0 {
+		w = levelBarW
+	}
+	h := size.Height
+	r.track.Resize(fyne.NewSize(w, h))
+	r.track.Move(fyne.NewPos(0, 0))
+	bh := h * r.bar.level
+	r.blue.Resize(fyne.NewSize(w, bh))
+	r.blue.Move(fyne.NewPos(0, h-bh))
+	oh := h * r.bar.boost
+	r.orange.Resize(fyne.NewSize(w, oh))
+	r.orange.Move(fyne.NewPos(0, h-oh))
+}
+
+func (r *levelBarRenderer) MinSize() fyne.Size { return r.bar.MinSize() }
+
+func (r *levelBarRenderer) Refresh() {
+	r.track.FillColor = r.bar.trackColor
+	r.Layout(r.bar.Size())
+	r.track.Refresh()
+	r.blue.Refresh()
+	r.orange.Refresh()
+}
+
+func (r *levelBarRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.track, r.blue, r.orange}
+}
+
+func (r *levelBarRenderer) Destroy() {}
+
+// barRightLayout 音量按钮的内容布局：进度条贴右缘内侧、纵向居中（高度由进度条
+// 自己的 MinSize 决定 = 图标高度），图标**紧挨着进度条左侧**（gap，用户要求两者
+// 再靠近一点），纵向居中。
+type barRightLayout struct{ inset, gap float32 }
+
+func (l barRightLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	ic, bar := objs[0].MinSize(), objs[1].MinSize()
+	return fyne.NewSize(ic.Width+l.gap+bar.Width+l.inset, maxf(ic.Height, bar.Height))
+}
+
+func (l barRightLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	ic, bar := objs[0], objs[1]
+	bw := bar.MinSize().Width
+	bh := bar.MinSize().Height
+	bar.Resize(fyne.NewSize(bw, bh))
+	bar.Move(fyne.NewPos(size.Width-bw-l.inset, (size.Height-bh)/2))
+	iw := ic.MinSize().Width
+	ih := ic.MinSize().Height
+	ic.Resize(fyne.NewSize(iw, ih))
+	ic.Move(fyne.NewPos(size.Width-bw-l.inset-l.gap-iw, (size.Height-ih)/2))
 }
 
 // scrollRelay 透明的滚轮中继（REQ-MEDIA-006）：**只**实现 fyne.Scrollable 并
@@ -680,9 +888,10 @@ func (r *scrollRelay) Scrolled(ev *fyne.ScrollEvent) {
 // newCompactTextButton 带文字的紧凑按钮（主窗体呼叫按钮用）：
 // 文字颜色固定传入值，不随主题变化。尺寸固定 36，不随平台变化。
 func newCompactTextButton(text string, iconRes fyne.Resource, bgColor, labelColor color.NRGBA, onTap func()) *compactButton {
-	b := newCompactButton(iconRes, bgColor, 36, onTap)
+	b := newCompactButton(iconRes, bgColor, 32, onTap)
 	b.label = canvas.NewText(text, labelColor)
 	b.label.TextSize = 14
+	b.labelColor = labelColor
 	return b
 }
 
@@ -697,52 +906,80 @@ func newCompactTextOnlyButton(text string, bgColor, labelColor color.NRGBA, onTa
 	b.bg.CornerRadius = 3
 	b.label = canvas.NewText(text, labelColor)
 	b.label.TextSize = 14
+	b.labelColor = labelColor
 	b.ExtendBaseWidget(b)
 	return b
 }
 
 func (b *compactButton) CreateRenderer() fyne.WidgetRenderer {
-	if b.sweep != nil {
-		// 音量按钮：轨道（bg）+ 圆周填充层 + 图标 +
-		// 滚轮中继（必须排在**最后**：命中测试取遍历里最后一个匹配者）
-		return widget.NewSimpleRenderer(container.NewStack(b.bg, b.sweep,
-			container.NewCenter(b.icon), b.scroll))
+	if b.bar != nil {
+		// 音量按钮：透明底 + 图标（紧挨进度条）+ 右缘竖直进度条 + 滚轮中继
+		//（中继必须排在**最后**：命中测试取遍历里最后一个匹配者）
+		return widget.NewSimpleRenderer(container.NewStack(b.bg,
+			container.New(barRightLayout{inset: 3, gap: 4}, container.NewCenter(b.icon), b.bar),
+			b.scroll))
 	}
 	if b.label != nil && b.icon != nil {
 		return widget.NewSimpleRenderer(container.NewStack(b.bg,
-			container.NewCenter(container.NewHBox(
-				container.NewCenter(b.icon), container.NewCenter(b.label)))))
+			container.NewCenter(container.New(iconTextLayout{},
+				b.icon, b.label))))
 	}
 	if b.label != nil {
 		return widget.NewSimpleRenderer(container.NewStack(b.bg,
 			container.NewBorder(padRect(3), padRect(3), padRect(8), padRect(8), b.label)))
 	}
-	return widget.NewSimpleRenderer(container.NewStack(b.bg, container.NewCenter(b.icon)))
+	return widget.NewSimpleRenderer(container.NewStack(b.bg,
+		container.New(centerShiftLayout{dx: b.iconDX, dy: b.iconDY}, b.icon)))
 }
 
-// SetTrack 更新未填充部分的底色（音量按钮：0% 用浅灰=禁用样式，非 0 用深灰轨道）。
+// centerShiftLayout 单个子对象**水平居中**、纵向居中后偏移 dy（图标微调用）。
+// 不能用 shiftedLayout（那个是 x=0 靠左对齐，用于整行内容）。
+type centerShiftLayout struct {
+	dx, dy float32
+}
+
+func (centerShiftLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	if len(objs) == 0 {
+		return fyne.Size{}
+	}
+	return objs[0].MinSize()
+}
+
+func (l centerShiftLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	if len(objs) == 0 {
+		return
+	}
+	m := objs[0].MinSize()
+	objs[0].Resize(m)
+	objs[0].Move(fyne.NewPos((size.Width-m.Width)/2+l.dx, (size.Height-m.Height)/2+l.dy))
+}
+
+// SetIconOffset 图标位置微调（像素，正值右/下移）：个别图标原始画得偏了，用它对齐。
+func (b *compactButton) SetIconOffset(dx, dy float32) {
+	b.iconDX, b.iconDY = dx, dy
+	b.Refresh()
+}
+
+// SetIconOffsetY 只调纵向（等价 SetIconOffset(0, dy)）。
+func (b *compactButton) SetIconOffsetY(dy float32) { b.SetIconOffset(b.iconDX, dy) }
+
+// SetTrack 更新进度条的轨道色（音量按钮：0% 用浅灰=禁用样式，非 0 用深灰轨道）。
 func (b *compactButton) SetTrack(c color.NRGBA) {
-	b.baseBg = c
-	b.SetBg(c)
+	if b.bar != nil {
+		b.bar.setTrack(c)
+	}
 }
 
 // SetLevel 更新蓝色填充比例（0–1），不叠增益橙（扬声器用）。
 func (b *compactButton) SetLevel(level float32) { b.SetLevels(level, 0) }
 
-// SetLevels 更新圆周填充（0–1）：level 蓝色部分、boost 橙色增益部分
+// SetLevels 更新竖直进度条（0–1）：level 蓝色段、boost 橙色增益段
 // （叠在蓝色之上，麦克风 100%→200% 的那一段）。
-// （`Raster.Refresh` 会让驱动丢掉缓存纹理、重新调用生成器，见 gl 的 freeTexture。）
 func (b *compactButton) SetLevels(level, boost float32) {
-	if b.sweep == nil {
+	if b.bar == nil {
 		return
 	}
-	level = clampLevel(level)
-	boost = clampLevel(boost)
-	if b.level == level && b.boost == boost {
-		return
-	}
-	b.level, b.boost = level, boost
-	b.sweep.Refresh()
+	b.bar.set(level, boost)
 }
 
 // clampLevel 把填充比例夹取到 0–1。
@@ -790,7 +1027,8 @@ func (b *compactButton) SetIcon(res fyne.Resource) {
 	if b.icon == nil {
 		return
 	}
-	b.icon.Resource = res
+	b.iconSrc = res
+	b.applyIconColor()
 	b.icon.Refresh()
 }
 
@@ -811,7 +1049,19 @@ func (b *compactButton) SetLabelColor(c color.NRGBA) {
 }
 
 // SetBg 更新底色。
+// SetBg 更新底色。**同时更新 baseBg**：`Enable()` 按 baseBg 还原背景
+// （禁用时置灰），不更新的话"改过底色 → 禁用 → 启用"会回到构造时的旧色
+// （踩过：主窗体呼叫按钮设成蓝底后，`applyMainCallMode(false)` 的 Enable
+// 又把它变回绿色）。
 func (b *compactButton) SetBg(c color.NRGBA) {
+	b.baseBg = c
+	if b.disabled {
+		return // 禁用中：保持"透明底 + 灰图标"，恢复时用新底色
+	}
+	if b.outline { // 无底色样式：底色即图标颜色
+		b.applyIconColor()
+		return
+	}
 	b.bg.FillColor = c
 	b.bg.Refresh()
 }
@@ -857,9 +1107,24 @@ func (b *compactButton) Disabled() bool { return b.disabled }
 
 func (b *compactButton) setDisabled(v bool) {
 	b.disabled = v
-	if b.bg != nil {
+	b.applyIconColor()
+	if b.label != nil {
 		if v {
-			b.bg.FillColor = colorSwitchGray
+			b.label.Color = disabledIconColor()
+		} else {
+			b.label.Color = b.labelColor
+		}
+		b.label.Refresh()
+	}
+	if b.outline {
+		b.updateHoverBg()
+		b.Refresh()
+		return
+	}
+	if b.bg != nil {
+		// 禁用时背景透明（与主窗体配置按钮一致）；恢复时还原底色
+		if v {
+			b.bg.FillColor = color.NRGBA{}
 		} else {
 			b.bg.FillColor = b.baseBg
 		}
@@ -933,6 +1198,20 @@ func padRect(s float32) fyne.CanvasObject {
 // toggleSpeaker / toggleMic / applySpeakerButton / applyMicButton /
 // applySessionAudioState 与音量（REQ-MEDIA-006）一起放在 ui_call_volume.go。
 
+// setTwoPartyStateLabel 两方通话的状态文案（保持中 / 通话中）。
+// 从咨询/三方/监听/会议回到两方时状态行必须复位（否则会一直停在
+// "咨询中"/"三方通话中"…，用户实测）。
+func (a *App) setTwoPartyStateLabel() {
+	if a.callStateLabel == nil {
+		return
+	}
+	if a.activeCallID != "" && a.core.IsCallMuted(a.activeCallID) {
+		a.callStateLabel.SetText("通话保持中")
+		return
+	}
+	a.callStateLabel.SetText("通话中")
+}
+
 // setHoldButton 保持状态变化时更新保持按钮外观与状态文案。
 func (a *App) setHoldButton(muted bool) {
 	if a.holdBtn == nil {
@@ -940,14 +1219,21 @@ func (a *App) setHoldButton(muted bool) {
 	}
 	if muted {
 		a.holdBtn.SetIcon(IconReplayWhite) // 保持中：恢复图标
-		a.holdBtn.SetBg(colorHoldBlue)
-		if a.callStateLabel != nil {
-			a.callStateLabel.SetText("通话保持中")
-		}
+		// 取消保持仍用**黄色**（用户要求，不要变成蓝色）
+		a.holdBtn.SetBg(colorHoldYellow)
+		a.holdBtn.setTip(a.callTip, "取消保持")
 	} else {
 		a.holdBtn.SetIcon(IconPauseWhite)
 		a.holdBtn.SetBg(colorHoldYellow)
-		if a.callStateLabel != nil {
+		a.holdBtn.setTip(a.callTip, "保持")
+	}
+	// 状态文案只在**两方通话**时由保持状态决定：咨询/三方/监听/会议各有自己的
+	// 文案（咨询中/三方通话中/监听中/会议中），不能被保持事件冲掉
+	//（consult 期间通常要停掉原对端的媒体，call.muted 事件会把"咨询中"改成"通话中"）。
+	if a.talkState() == core.TalkTwoParty && a.callStateLabel != nil {
+		if muted {
+			a.callStateLabel.SetText("通话保持中")
+		} else {
 			a.callStateLabel.SetText("通话中")
 		}
 	}
@@ -996,6 +1282,12 @@ func (a *App) restoreIdle() {
 	a.stopTimer()
 	a.stopRingShake()
 	a.setHoldButton(false)
+	// CTI 状态复位（REQ-ACC-026）：话务结束清掉拨号复用模式与"在途"按钮
+	a.stopCTISpin()
+	if a.ctiDialMode != "" {
+		a.ctiDialMode = ""
+		a.updateCallButton()
+	}
 	a.hideLevelTip() // 收起可能还挂着的音量百分比数字（面板要收起来了）
 	a.activeCallID = ""
 	a.activeCall = nil
@@ -1289,6 +1581,44 @@ func (a *App) onCallPanelDragEnd() {
 	logx.Logger().Info("通话面板位置已保存", "x", x, "y", y)
 }
 
+// callSkillTag 通话面板上的技能组小标签（协议 §16.2 CALL_RINGING 的
+// skillGroup：外线呼入分配坐席时用的技能组），显示在对端号码右侧。
+// 与在线座席页的 tag 同一套外观（tagLayout + 圆角底色 + 小字）。
+type callSkillTag struct {
+	widget.BaseWidget
+	bg  *canvas.Rectangle
+	txt *plainText
+	box *fyne.Container
+}
+
+func newCallSkillTag() *callSkillTag {
+	size := fyne.CurrentApp().Settings().Theme().Size(theme.SizeNameText)
+	b := &callSkillTag{}
+	b.txt = newThemedText("", float32(size)-3, false)
+	b.bg = canvas.NewRectangle(theme.Color(theme.ColorNameButton))
+	b.bg.CornerRadius = 3
+	b.box = container.New(tagLayout{padX: 5, padY: 1}, b.bg, b.txt)
+	b.ExtendBaseWidget(b)
+	b.Hide()
+	return b
+}
+
+func (b *callSkillTag) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.box)
+}
+
+// Set 更新技能组；空串表示隐藏标签（该通话没有技能组）。
+func (b *callSkillTag) Set(s string) {
+	if s == "" {
+		b.Hide()
+		return
+	}
+	b.txt.SetText(s)
+	b.Show()
+	b.box.Refresh()
+	b.Refresh()
+}
+
 // callNameBox 通话面板行1的对端名称：号码 + 通信录名称 + ★（常用），
 // 名称上可悬停出备注提示（REQ-UI-037）。
 //
@@ -1300,6 +1630,7 @@ type callNameBox struct {
 
 	note *hoverNote
 	star *canvas.Image
+	tag  *callSkillTag
 	box  *fyne.Container
 }
 
@@ -1311,7 +1642,8 @@ func newCallNameBox(tip *tooltipLayer) *callNameBox {
 	b.star.FillMode = canvas.ImageFillContain
 	b.star.SetMinSize(fyne.NewSize(contactsStarSize, contactsStarSize))
 	b.star.Hide()
-	b.box = container.New(markAfterLayout{gap: 4}, b.note, b.star)
+	b.tag = newCallSkillTag()
+	b.box = container.New(markAfterLayout{gap: 4}, b.note, b.star, b.tag)
 	b.ExtendBaseWidget(b)
 	return b
 }
@@ -1321,16 +1653,29 @@ func (b *callNameBox) CreateRenderer() fyne.WidgetRenderer {
 }
 
 // MinSize 限制宽度：面板窄，长号码/长名字只能截断显示。
+//
+// **宽度必须按原始文本算**（`note.fullWidth()`），不能拿 `box.MinSize()`：
+// plainText 被截断后 MinSize 只剩省略号的宽度，面板行又按 MinSize 分配宽度，
+// 于是"号码永远显示成 …"，再也恢复不了（用户实测：拨号时前面的号码变成 …）。
 func (b *callNameBox) MinSize() fyne.Size {
-	m := b.box.MinSize()
-	if m.Width > callNameMaxW {
-		m.Width = callNameMaxW
+	w := b.note.fullWidth()
+	h := b.note.MinSize().Height
+	if b.star.Visible() {
+		w += 4 + b.star.MinSize().Width // 4 = newCallNameBox 里 markAfterLayout 的间距
+		h = fyne.Max(h, b.star.MinSize().Height)
 	}
-	return m
+	if b.tag.Visible() {
+		w += 4 + b.tag.MinSize().Width
+		h = fyne.Max(h, b.tag.MinSize().Height)
+	}
+	if w > callNameMaxW {
+		w = callNameMaxW
+	}
+	return fyne.NewSize(w, h)
 }
 
-// Set 更新对端展示：文本、是否常用（★）、备注（悬停提示）。
-func (b *callNameBox) Set(text string, starred bool, note string) {
+// Set 更新对端展示：文本、是否常用（★）、备注（悬停提示）、技能组标签。
+func (b *callNameBox) Set(text string, starred bool, note, skill string) {
 	b.note.SetText(text)
 	b.note.SetNote(note)
 	if starred {
@@ -1338,6 +1683,7 @@ func (b *callNameBox) Set(text string, starred bool, note string) {
 	} else {
 		b.star.Hide()
 	}
+	b.tag.Set(skill)
 	b.box.Refresh()
 	b.Refresh()
 }
@@ -1351,31 +1697,37 @@ func (a *App) contactFor(remote string) (core.Contact, bool) {
 }
 
 // callDisplay 对端展示文案（通话面板与视频窗口标题共用，REQ-UI-037）：
-//   - 命中通信录：号码在前、名称在后（用户要求"号码右边显示名称"）；
-//   - 未命中：沿用原行为（SIP 显示名优先，其次号码）。
+//   - Call-Info 给了 display-name（`call.PeerName`）：**它优先于通信录**；
+//   - 否则命中通信录：号码在前、名称在后（用户要求"号码右边显示名称"）；
+//   - 都没有：沿用原行为（SIP 显示名优先，其次号码）。
 //
 // 同时返回是否常用（★）与备注（悬停提示用）。
 func (a *App) callDisplay(call *core.Call) (text string, starred bool, note string) {
 	if call == nil {
 		return "", false, ""
 	}
-	remote, sipName := call.Remote, call.RemoteName
-	if c, ok := a.contactFor(remote); ok {
-		name := c.Name
-		if name == "" {
-			name = sipName
-		}
-		switch {
-		case name == "" || name == remote:
-			text = remote
-		case remote == "":
-			text = name
-		default:
-			text = remote + " " + name
-		}
-		return text, c.Starred, c.Note
+	remote := call.Remote
+	c, hasContact := a.contactFor(remote)
+	if hasContact {
+		starred, note = c.Starred, c.Note
 	}
-	return callRemoteName(call), false, ""
+	// 名字优先级：Call-Info 的 display-name > 通信录名称 > SIP 显示名
+	name := call.PeerName
+	if name == "" && hasContact {
+		name = c.Name
+	}
+	if name == "" {
+		name = call.RemoteName
+	}
+	switch {
+	case name == "" || name == remote:
+		text = remote
+	case remote == "":
+		text = name
+	default:
+		text = remote + " " + name
+	}
+	return text, starred, note
 }
 
 // setCallName 更新通话面板的对端展示。
@@ -1384,13 +1736,49 @@ func (a *App) setCallName(call *core.Call) {
 		return
 	}
 	text, starred, note := a.callDisplay(call)
-	a.callName.Set(text, starred, note)
+	// 技能组（协议 §16.2 CALL_RINGING 的 skillGroup）：对端号码右侧的小标签
+	skill := ""
+	if call != nil {
+		skill = call.CTI.SkillGroup
+	}
+	a.callName.Set(text, starred, note, skill)
 }
 
-// callRemoteName 通话对象的展示名称（显示名优先，其次号码）。
+// callRemoteName 通话对象的展示名称（Call-Info 名称优先，其次 SIP 显示名，最后号码）。
 func callRemoteName(call *core.Call) string {
+	if call.PeerName != "" {
+		return call.PeerName
+	}
 	if call.RemoteName != "" {
 		return call.RemoteName
 	}
 	return call.Remote
+}
+
+// iconTextGap 图标按钮里「图标 - 文字」的间距（用户要求比默认的 4px 再分开点）。
+const iconTextGap = 7
+
+// iconTextLayout 图标 + 文字的紧凑水平布局：图标在前、文字在后、纵向居中。
+type iconTextLayout struct{}
+
+func (iconTextLayout) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	ic, lb := objs[0].MinSize(), objs[1].MinSize()
+	return fyne.NewSize(ic.Width+iconTextGap+lb.Width, maxf(ic.Height, lb.Height))
+}
+
+func (l iconTextLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	ic, lb := objs[0], objs[1]
+	im := ic.MinSize()
+	lm := lb.MinSize()
+	ic.Resize(im)
+	ic.Move(fyne.NewPos(0, (size.Height-im.Height)/2))
+	lb.Resize(lm)
+	lb.Move(fyne.NewPos(im.Width+iconTextGap, (size.Height-lm.Height)/2))
+}
+
+func maxf(a, b float32) float32 {
+	if a > b {
+		return a
+	}
+	return b
 }

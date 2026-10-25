@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,6 +58,10 @@ func (s *Server) serveConn(ctx context.Context, conn *websocket.Conn) {
 		defer c.wmu.Unlock()
 		msg := Message{Type: "event", Event: "system.state", Data: s.app.State()}
 		_ = writeMsg(connCtx, conn, msg)
+		// 通话面板快照（REQ-WS-023）：让刚连上的页面立刻有面板可渲染，
+		// 不用等下一次话务事件。
+		panelMsg := Message{Type: "event", Event: "call.panel", Data: s.app.PanelState()}
+		_ = writeMsg(connCtx, conn, panelMsg)
 	}()
 
 	// 心跳：定期 Ping 探测连接活性并保持链路畅通。
@@ -135,6 +140,9 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		var p struct {
 			Target string `json:"target"`
 			Video  bool   `json:"video"` // 可选：true 发起视频呼叫（REQ-VIDEO-001）
+			// Name 可选的**对端显示名**（如在线座席列表里的 displayName）：
+			// 呼叫期间优先于通信录名称显示，为空时行为不变。
+			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil || p.Target == "" {
 			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 target"))
@@ -144,9 +152,15 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 			callID string
 			err    error
 		)
-		if p.Video {
+		name := strings.TrimSpace(p.Name)
+		switch {
+		case p.Video && name != "":
+			callID, err = s.app.DialVideoNamed(ctx, p.Target, name)
+		case p.Video:
 			callID, err = s.app.DialVideo(ctx, p.Target)
-		} else {
+		case name != "":
+			callID, err = s.app.DialNamed(ctx, p.Target, name)
+		default:
 			callID, err = s.app.Dial(ctx, p.Target)
 		}
 		if err != nil {
@@ -358,6 +372,23 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		}
 		resp = okMessage(msg.ID, map[string]any{"enabled": p.Enabled})
 
+	case MethodRegister, MethodUnregister:
+		// 登录 / 退出账号（REQ-ACC-024 / REQ-WS-021）：与托盘菜单一致——
+		// **共用「启用账户」这一个配置项**并落盘：
+		//   register   → 启用账户 → 立即发起注册；
+		//   unregister → 禁用账户 → 发 expires=0、停注册周期。
+		// 注册/注销在后台进行，结果经 register.state 事件回显（这里只回
+		// 已接受的配置状态，不等待网络结果）。
+		on := msg.Method == MethodRegister
+		if err := s.app.SetRegistered(on); err != nil {
+			resp = errMessage(msg.ID, codeOf(err), err)
+			break
+		}
+		resp = okMessage(msg.ID, map[string]any{
+			"enabled": on,
+			"state":   string(s.app.State().Register.State),
+		})
+
 	case MethodSetUpdateConfig:
 		// 自动更新配置（REQ-UPD-018）：网页可写入站点/应用 ID/周期/预览版，
 		// 软电话据此自己定时检查（配了站点才查）。字段**都是可选的**，
@@ -425,6 +456,10 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 	default:
 		// 分组的子分发器（各文件一组方法，主 switch 不再无限膨胀）：
 		// 依次询问，谁认领谁返回响应。
+		if r, ok := s.dispatchCTI(ctx, msg); ok {
+			resp = r
+			break
+		}
 		if r, ok := s.dispatchCallLog(msg); ok {
 			resp = r
 			break
@@ -501,6 +536,10 @@ func codeOf(err error) string {
 		return CodeConfigUnavailable
 	case errors.Is(err, core.ErrConfigInvalid):
 		return CodeInvalidParams
+	case errors.Is(err, core.ErrCTIBusy):
+		return CodeCTIBusy
+	case errors.Is(err, errCTITimeout):
+		return CodeCTITimeout
 	default:
 		return CodeInternal
 	}

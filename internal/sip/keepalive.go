@@ -40,7 +40,7 @@ const (
 func (p *Phone) keepaliveLoop(ctx context.Context, acc config.Account) {
 	tr := config.NormalizeTransport(acc.Transport)
 	if tr == config.TransportUDP {
-		return // UDP 没有连接可保活（NAT 映射由注册与媒体/optchk 心跳维持）
+		return // UDP 没有连接可保活（NAT 映射由注册续期与媒体/CRLF 保活维持）
 	}
 	tk := time.NewTicker(connKeepaliveInterval)
 	defer tk.Stop()

@@ -1091,3 +1091,6 @@ func (vw *videoWatchSession) run(w fyne.Window) {
 // （锁定靠轮询回拉），全屏切换期间标记静默期即可。
 func suspendVideoWindowLockClamp() { markVideoProgMove() }
 func resumeVideoWindowLockClamp()  {}
+
+// startTrayIconPromotion 其他平台没有"通知区常显"的设置项（托盘由桌面环境管理）。
+func startTrayIconPromotion() {}

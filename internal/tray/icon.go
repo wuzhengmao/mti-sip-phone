@@ -9,7 +9,8 @@ import (
 	"image/png"
 	"strings"
 
-	"mti-sip-phone/internal/appicon"
+	"golang.org/x/image/draw"
+
 	"mti-sip-phone/internal/logx"
 )
 
@@ -17,14 +18,13 @@ import (
 // 侧完全一致（fyne.io/fyne/v2 的 driver 用 64 渲染后交给同一个 systray）。
 const iconSize = 64
 
-// loadIcon 把 SVG 光栅化并转成本平台 systray 要的图标格式：
-// Windows 要 ICO、其余平台（Linux 的 StatusNotifier）要 PNG。
+// loadIcon 把话机图标 PNG（iconfont 导出的 256×256）解码、缩放到 iconSize，
+// 再转成本平台 systray 要的图标格式：Windows 要 ICO、其余平台要 PNG。
 //
-// 光栅化用的是 Fyne 内部同一套库（fyne-io/oksvg + srwiley/rasterx），观感与
-// 桌面版托盘一致。任何一步失败都退化为纯色圆点并记日志——托盘图标缺失会让
-// 用户连右键菜单都点不到（没有别的退出入口），必须保证有东西显示。
-func loadIcon(svg string, colorHex string) []byte {
-	img, err := rasterizeSVG(svg)
+// 任何一步失败都退化为纯色圆点并记日志——托盘图标缺失会让用户连右键菜单都
+// 点不到（没有别的退出入口），必须保证有东西显示。
+func loadIcon(pngBytes []byte, colorHex string) []byte {
+	img, err := decodeAndResize(pngBytes)
 	if err != nil {
 		logx.Logger().Warn("托盘图标渲染失败，退化为纯色圆点", "err", err)
 		img = fallbackIcon(colorHex)
@@ -40,9 +40,20 @@ func loadIcon(svg string, colorHex string) []byte {
 	return data
 }
 
-// rasterizeSVG 把 SVG 渲染成 iconSize×iconSize 的位图（共用 appicon.Rasterize）。
-func rasterizeSVG(svg string) (image.Image, error) {
-	return appicon.Rasterize(svg, iconSize)
+// decodeAndResize 解码 PNG 并用 CatmullRom 缩放到 iconSize×iconSize（256→64
+// 平滑缩小，托盘小图标边缘不发虚）。
+func decodeAndResize(data []byte) (image.Image, error) {
+	src, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	b := src.Bounds()
+	if b.Dx() == iconSize && b.Dy() == iconSize {
+		return src, nil
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, iconSize, iconSize))
+	draw.CatmullRom.Scale(dst, dst.Bounds(), src, b, draw.Over, nil)
+	return dst, nil
 }
 
 // fallbackIcon 兜底图标：纯色实心圆（渲染失败时至少让托盘有条目可点）。

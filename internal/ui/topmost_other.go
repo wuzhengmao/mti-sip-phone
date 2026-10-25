@@ -117,3 +117,6 @@ func setForegroundWindow(hwnd uintptr)   {}
 func forceForegroundWindow(hwnd uintptr) {}
 
 func ringBorderFlash(hwnd uintptr, stop <-chan struct{}) {}
+
+// startTrayIconPromotion 其他平台没有"通知区常显"的设置项（托盘由桌面环境管理）。
+func startTrayIconPromotion() {}

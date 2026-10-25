@@ -30,11 +30,48 @@ type stubTel struct {
 	mu   sync.Mutex // 记录发给电话层的 DTMF，供测试断言（handler 在自己的 goroutine 里跑）
 	dtmf []string
 
+	// CTI 指令桩（REQ-ACC-026 / REQ-ACC-035）：记录动作与参数，可选地
+	// 异步回一条 MSP_RESULT（不设就等 3 秒超时）。
+	ctiAction string
+	ctiParams map[string]any
+	ctiReply  *core.CTIResult
+
 	videoDisabled atomic.Bool // 「启用视频通话」总开关（默认 false = 启用，REQ-VIDEO-014）
 }
 
-func (s *stubTel) Register(ctx context.Context, acc config.Account) error { return nil }
-func (s *stubTel) Unregister(ctx context.Context) error                   { return nil }
+func (s *stubTel) SendCTICommand(action string, params map[string]any) (string, error) {
+	s.mu.Lock()
+	s.ctiAction = action
+	s.ctiParams = params
+	reply := s.ctiReply
+	s.mu.Unlock()
+	if reply != nil {
+		res := *reply
+		if res.Action == "" {
+			res.Action = action
+		}
+		go s.app.OnCTIResult(res)
+	}
+	return "1", nil
+}
+
+// setCTIReply 设置下一次 CTI 指令的结果回执。
+func (s *stubTel) setCTIReply(res core.CTIResult) {
+	s.mu.Lock()
+	s.ctiReply = &res
+	s.mu.Unlock()
+}
+
+// lastCTI 最近一次收到的 CTI 动作与参数。
+func (s *stubTel) lastCTI() (string, map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ctiAction, s.ctiParams
+}
+
+func (s *stubTel) SendHeartbeat(string, bool, string, string, time.Duration) error { return nil }
+func (s *stubTel) Register(ctx context.Context, acc config.Account) error          { return nil }
+func (s *stubTel) Unregister(ctx context.Context) error                            { return nil }
 func (s *stubTel) Dial(ctx context.Context, target string) (string, error) {
 	id := "stub-1"
 	go func() {
@@ -356,7 +393,7 @@ func TestCallFailedCarriesReason(t *testing.T) {
 	conn := dialWS(t, ts.URL)
 	waitEvent(t, conn, "system.state")
 
-	app.OnIncoming("c1", "1002", "1002", false)
+	app.OnIncoming("c1", core.IncomingCall{Remote: "1002", RemoteName: "1002"})
 	ev := waitEvent(t, conn, "call.incoming")
 	if d, _ := ev.Data.(map[string]any); d["callId"] != "c1" {
 		t.Fatalf("来电事件异常: %+v", d)
@@ -369,7 +406,7 @@ func TestCallFailedCarriesReason(t *testing.T) {
 		t.Fatalf("call.failed 应带 reason，实际: %+v", d)
 	}
 
-	app.OnIncoming("c2", "1003", "1003", false)
+	app.OnIncoming("c2", core.IncomingCall{Remote: "1003", RemoteName: "1003"})
 	waitEvent(t, conn, "call.incoming")
 	app.OnTerminated("c2", "remote_hangup")
 	ev = waitEvent(t, conn, "call.terminated")

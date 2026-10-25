@@ -43,6 +43,29 @@ window.SipApp = window.SipApp || {};
     show(hash || 'call');
   }
 
+  /**
+   * 顶栏坐席徽章（REQ-ACC-028 / REQ-ACC-034）：坐席模式下显示模式 + 空闲/置忙，
+   * 点击切换 setBusy/setIdle（与桌面顶栏的座席按钮一致）；非坐席模式隐藏。
+   * 在线座席列表只在拨号对话框的「在线座席」页签里（导航栏不再单独入口）。
+   */
+  function refreshAgent() {
+    const ag = store.state.agent || { online: false };
+    const badge = $('agentBadge');
+    if (!badge) return;
+    // 未连接话机时不显示坐席状态：此时留的是断线前的快照，点了也发不出去。
+    if (!store.isConnected() || !ag.online) {
+      badge.hidden = true;
+      return;
+    }
+    const modeText = { normal: '普通', dial_out: '外呼', monitor: '班长' }[ag.mode] || '';
+    const stateText = ag.busy ? '置忙' : '空闲';
+    badge.textContent = '坐席' + (modeText ? '·' + modeText : '') + '·' + stateText;
+    badge.className = 'badge ' + (ag.busy ? 'warn' : 'ok');
+    badge.title = '坐席' + (ag.displayName ? '：' + ag.displayName : '') +
+      '（' + stateText + '，点击' + (ag.busy ? '置闲' : '置忙') + '）';
+    badge.hidden = false;
+  }
+
   function refreshTop() {
     const st = store.state;
     const conn = $('connBadge');
@@ -59,7 +82,10 @@ window.SipApp = window.SipApp || {};
     const info = map[st.register.state] || ['未注册', ''];
     reg.textContent = info[0];
     reg.className = 'badge ' + info[1];
-    reg.title = st.register.reason || '';
+    // 点击提示（REQ-ACC-024）：注册原因在前，动作提示在后（徽章可点击）
+    const actHint = st.register.state === 'registered' ? '点击退出账号'
+      : st.register.state === 'registering' ? '点击停止登录' : '点击登录账号';
+    reg.title = (st.register.reason ? st.register.reason + ' · ' : '') + actHint;
 
     const acct = st.register.account || '—';
     $('localAccount').textContent = acct;
@@ -130,17 +156,54 @@ window.SipApp = window.SipApp || {};
         }
       }, 80);
     });
+    // 顶栏注册状态徽章可点击（REQ-ACC-024，与桌面托盘菜单的
+    // 「登录账号 / 退出账号」一致）：已注册/注册中 → 退出账号（发 expires=0、
+    // 停注册周期、启用账户=false）；未注册/注册失败 → 登录账号（启用并注册）。
+    // 结果经 register.state 事件回显（徽章/托盘/桌面同步）。
+    $('regBadge').style.cursor = 'pointer';
+    $('regBadge').addEventListener('click', function () {
+      if (!store.isConnected()) { return; } // 没连上时不做任何事（SDK 会重连）
+      const st = store.state.register.state;
+      const unregistering = (st === 'registered' || st === 'registering');
+      const p = unregistering ? store.sdk.unregister() : store.sdk.register();
+      p.then(function () {
+        App.ui.toast(unregistering ? '已退出账号' : '正在登录', 'ok');
+      }).catch(function (e) {
+        if (!App.util.isOfflineErr(e)) { App.ui.toast(e.message || '操作失败', 'err'); }
+      });
+    });
     store.on('state', refreshTop);
     store.on('state', refreshUpdateBadge);   // 连上时状态快照里就带着更新状态
+    store.on('state', refreshAgent);         // 坐席状态也在快照里
+    store.on('agent', refreshAgent);
     store.on('update', refreshUpdateBadge);  // 之后按 system.update 事件刷新
     store.on('register', refreshTop);
     store.on('connected', refreshTop);
     store.on('disconnected', refreshTop);
+    store.on('disconnected', refreshAgent);  // 断线后收起坐席状态徽章
+
+    // 坐席徽章点击 = 置忙/置闲（与桌面顶栏的座席按钮同一动作；
+    // 生效状态由 cti.agent 事件回显，不在本地乐观更新）
+    $('agentBadge').style.cursor = 'pointer';
+    $('agentBadge').addEventListener('click', function () {
+      if (!store.isConnected()) return;
+      const ag = store.state.agent || {};
+      if (!ag.online) return;
+      const busy = !ag.busy;
+      store.sdk.setAgentBusy(busy).then(function () {
+        App.ui.toast(busy ? '已置忙' : '已置闲', 'ok');
+        refreshAgent();
+      }).catch(function (e) {
+        if (!App.util.isOfflineErr(e)) { App.ui.toast(App.util.errText(e), 'err'); }
+      });
+    });
 
     Object.keys(views).forEach(function (k) { if (views[k].mount) views[k].mount(); });
     route();
     refreshTop();
+    refreshAgent();
     refreshUpdateBadge();
+    App.dialpad.bind();
     App.callbar.bind();
     App.callbar.render(null);
 

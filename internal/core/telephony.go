@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"image"
+	"time"
 
 	"mti-sip-phone/internal/config"
 )
@@ -80,6 +81,22 @@ type Telephony interface {
 	// CameraSupported 本构建/平台是否有摄像头采集（darwin 这类没有采集后端的
 	// 目标：编解码可用但不采集，界面据此把摄像头选择置灰、把视频呼叫降级为只收不发）。
 	CameraSupported() bool
+
+	// ---- CTI 话务控制（反向 NOTIFY，REQ-ACC-026，协议见 docs/cti-sip-phone-protocol.md 第二部分）----
+
+	// SendCTICommand 发送一条 CTI 控制指令（Event: MSP_ACTION，consult /
+	// transfer / whisper / addConferenceMembers 等，见协议 §9）。params 为该动作
+	// 的参数（target、members、member 等）。**不要求正在通话**。返回指令序号
+	// seq（**字符串**，协议 1.0.18 修订），结果经 EventSink.OnCTIResult 异步
+	// 回调（按 seq 对齐）。同一时间只允许一条在途（否则返回 ErrCTIBusy）。
+	SendCTICommand(action string, params map[string]any) (string, error)
+
+	// SendHeartbeat 发送一次坐席心跳（Event: MSP_HEARTBEAT，协议 §10）：
+	// agentMode（none/normal/dial_out/monitor）、isBusy、displayName 与 status
+	// 上报本地坐席/话务状态，expires 为 CTI 判定"不可用"的有效期
+	//（心跳间隔 × 2.5）。心跳没有业务回执，但 SIP 响应不是 200 时返回
+	// ErrCTINotifyUnsupported（服务端不支持 NOTIFY，话机应停止心跳并退出坐席）。
+	SendHeartbeat(agentMode string, isBusy bool, displayName, status string, expires time.Duration) error
 }
 
 // AudioDevice 音频设备。
@@ -117,11 +134,53 @@ type VideoSink interface {
 	OnVideoFrame(callID string, local bool, img *image.RGBA)
 }
 
+// RemoteCommand 服务端 NOTIFY 控制指令（REQ-ACC-025，协议见
+// docs/cti-sip-phone-protocol.md）。Kind 是事件名去掉 MSP_ 前缀的小写形式：
+//
+//	"dial"       MSP_DIAL         DestNo / WithVideo
+//	"answer"     MSP_ANSWER       WithVideo
+//	"hangup"     MSP_HANGUP       （无参数）
+//	"autoanswer" MSP_SET_AUTOANSWER AutoAnswer
+//	"unregister" MSP_UNREGISTER   Reason（Agent 为兼容可选的附加字段）
+type RemoteCommand struct {
+	Kind       string
+	DestNo     string // dial：被叫号码
+	WithVideo  bool   // dial / answer：是否要视频（不可用时静默降级为纯音频）
+	AutoAnswer *bool  // autoanswer：nil = 未指定（忽略）
+	Reason     string // unregister：注销原因（记日志）
+	Agent      string // unregister：可选的坐席号（协议未定义，兼容记录）
+}
+
+// CTIResult CTI 指令的结果回执（MSP_RESULT，REQ-ACC-026）。与 SendCTICommand
+// 返回的 seq 对齐；超时/失败也走这里（Success=false）。
+type CTIResult struct {
+	Seq     string `json:"seq"`
+	Success bool   `json:"success"`
+	Code    string `json:"code"`    // 失败时的错误码（如 AGENT_NOT_IN_CALL）；超时为 "TIMEOUT"
+	Message string `json:"message"` // 失败信息
+	// Action CTI 回显的动作名（协议 §11），便于按动作分发结果（如 listAgents）。
+	Action string `json:"action,omitempty"`
+	// Data 带返回值的动作的结果（目前只有 listAgents：坐席数组）。
+	Data any `json:"data,omitempty"`
+}
+
+// IncomingCall 呼入 INVITE 解析出的来电信息（EventSink.OnIncoming 的参数）。
+type IncomingCall struct {
+	Remote     string // 主叫号码（From 的 user 部分）
+	RemoteName string // From 的显示名（可能为空）
+	// PeerName INVITE 的 Call-Info 头里 display-name 参数（URL 解码后）：
+	// 服务端明确告诉话机的对端名称，显示时**优先于通信录**；为空表示没给。
+	PeerName string
+	// Consult Call-Info 的 call-type=consult：这是服务端推来的咨询腿。
+	// 接通后通话面板第一行不显示咨询/转移/会议入口（这通本身就是咨询的一方）。
+	Consult  bool
+	HasVideo bool // 对端 offer 里含可用的视频段（决定是否显示「视频接听」）
+}
+
 // EventSink 电话层向核心层上报事件的回调接口，由 App 实现。
 type EventSink interface {
 	// OnIncoming 呼入（收到 INVITE），进入振铃状态。
-	// hasVideo 表示对端 offer 里含可用的视频段（决定是否显示「视频接听」按钮）。
-	OnIncoming(callID, remote, remoteName string, hasVideo bool)
+	OnIncoming(callID string, info IncomingCall)
 	// OnRinging 呼出已振铃（收到 180/183）。
 	// earlyMedia 表示本次振铃**带着早期媒体**（183 + SDP，回铃音由对端下发）——
 	// 界面据此决定要不要放本地回铃音（有早期媒体就不放，免得两种铃音重叠加）。
@@ -134,7 +193,18 @@ type EventSink interface {
 	OnFailed(callID, reason string)
 	// OnRegisterState 注册状态变化。
 	OnRegisterState(state RegisterState, reason string)
+	// OnRemoteCommand 服务端通过 NOTIFY 下发控制指令（REQ-ACC-025，协议见
+	// docs/cti-sip-phone-protocol.md）：拨号/接听/挂断/设置自动接听/注销。
+	// 由 sip 层的 NOTIFY handler 在独立 goroutine 里调用（不阻塞信令事务）。
+	OnRemoteCommand(cmd RemoteCommand)
 	// OnVideoState 视频状态变化（协商成功、开关切换、拿到对端分辨率）。
 	// 低频事件，走事件总线没问题；**视频帧不走这里**（见 VideoSink）。
 	OnVideoState(callID string, st VideoState)
+	// OnCTIResult CTI 指令结果（MSP_RESULT，REQ-ACC-026）：按 seq 与
+	// SendCTICommand 的返回对齐。由 sip 层在收到回执或超时后调用。
+	OnCTIResult(res CTIResult)
+	// OnMSPEvent 通话面板事件（MSP_EVENT_*，REQ-ACC-026）：event 为去掉
+	// MSP_EVENT_ 前缀、转小写的事件名（如 "consult_started"），body 为解析后的
+	// JSON 对象（字段见协议 §15）。由 sip 层 NOTIFY handler 异步调用。
+	OnMSPEvent(event string, body map[string]any)
 }

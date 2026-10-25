@@ -1,5 +1,9 @@
-// 通话视图：拨号盘（含按键音）、最近呼叫、通信录快搜、通话控制、视频订阅、
-// 更新提示条。由原测试页（web/test.html）的对应功能改造而来。
+// 通话视图：多方通话面板（咨询/三方/监听/会议）、拨号对话框入口、视频订阅、
+// 更新提示条。
+//
+// 通话控制卡片第一行 = 状态 + 计时；第二行起 = 通话各方（每方按钮在该行右侧）；
+// 最后一行 = 全局操作（拨号盘/咨询/转移/会议/保持/挂断…）。按钮显隐参考桌面
+// 通话面板（REQ-ACC-026）。
 window.SipApp = window.SipApp || {};
 window.SipApp.views = window.SipApp.views || {};
 
@@ -11,131 +15,25 @@ window.SipApp.views = window.SipApp.views || {};
   const sdk = store.sdk;
 
   let videoSubscribed = false;
+  let timerHandle = null;
+  let establishedAt = 0;
 
-  // ---------------- 拨号 ----------------
+  // ---------------- 计时 ----------------
 
-  function dial(video) {
-    const target = $('dialTarget').value.trim();
-    if (!target) { App.ui.toast('请输入号码', 'err'); return; }
-    const p = video ? sdk.dialVideo(target) : sdk.dial(target);
-    p.catch(function (e) { App.ui.toast(App.util.errText(e), 'err'); });
+  function stopTimer() {
+    if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
+    $('callTimer').textContent = '';
   }
 
-  /**
-   * 拨号输入框的下拉建议（与桌面版同一套逻辑）：
-   *   - 输入为空 → 只列"最近呼叫"（去重最多 5 个，来自 system.state.recentDial）；
-   *   - 输入非空 → **同时查通信录**（走服务端 contact.list 的 query，拼音/音头/汉字/
-   *     号码/备注都能命中，与通信录页的搜索完全一样）+ 最近呼叫里包含该串的；
-   *   - 点某一项就把号码填进输入框（不直接拨号）。
-   */
-  let suggestTimer = null;
-
-  function renderSuggest(query) {
-    const box = $('dialSuggest');
-    const q = (query || '').trim();
-    // 最近呼叫：空查询全列，有查询则按子串过滤
-    const recents = (store.state.recentDial || []).filter(function (n) {
-      return !q || n.toLowerCase().indexOf(q.toLowerCase()) >= 0;
-    }).slice(0, 5);
-
-    const paint = function (contacts) {
-      const box2 = $('dialSuggest');
-      App.dom.clear(box2);
-      if (!recents.length && !contacts.length) { box2.hidden = true; return; }
-      const addGroup = function (title) {
-        box2.appendChild(App.dom.el('div', { class: 'grp' }, title));
-      };
-      const addItem = function (number, name, note, starred) {
-        const row = App.dom.el('div', { class: 'item' });
-        row.appendChild(App.dom.el('span', { class: 'num' }, number));
-        if (name) row.appendChild(App.dom.el('span', { class: 'name' }, name));
-        if (note) row.appendChild(App.dom.el('span', { class: 'name' }, '- ' + note));
-        if (starred) row.appendChild(App.dom.el('span', { class: 'star-mark ro' }, '★'));
-        // mousedown 而不是 click：input 的 blur 会把列表先藏掉
-        row.addEventListener('mousedown', function (e) {
-          e.preventDefault(); // 别让输入框失焦
-          $('dialTarget').value = number;
-          App.dom.clear(box2);
-          box2.hidden = true;
-        });
-        box2.appendChild(row);
-      };
-      if (contacts.length) {
-        addGroup('通信录');
-        contacts.forEach(function (c) { addItem(c.number, c.name, c.note, c.starred); });
-      }
-      if (recents.length) {
-        addGroup('最近呼叫');
-        recents.forEach(function (n) { addItem(n, '', '', false); });
-      }
-      box2.hidden = false;
+  function startTimer() {
+    if (timerHandle) return; // 已在计时
+    establishedAt = Date.now();
+    const tick = function () {
+      $('callTimer').textContent = App.fmt.dur((Date.now() - establishedAt) / 1000);
     };
-
-    if (!q) { paint([]); return; }
-    // 通信录匹配走服务端（网页没有拼音字典），防抖 200ms
-    if (suggestTimer) clearTimeout(suggestTimer);
-    suggestTimer = setTimeout(function () {
-      if (!store.isConnected()) { paint([]); return; }
-      sdk.listContacts({ query: q }).then(function (res) {
-        paint((res.contacts || []).slice(0, 6));
-      }).catch(function () { paint([]); });
-    }, 200);
-    paint([]); // 先只显示最近呼叫，通信录结果到了再补
+    tick();
+    timerHandle = setInterval(tick, 1000);
   }
-
-  function hideSuggest() { $('dialSuggest').hidden = true; }
-
-  /** 状态快照更新后（如拨完号 recentDial 变了）：下拉开着就按当前输入重画一次。 */
-  function refreshSuggestOnState() {
-    if (!$('dialSuggest').hidden) renderSuggest($('dialTarget').value);
-  }
-
-  // ---------------- 按键音（本地合成，不经过软电话） ----------------
-
-  let audioCtx = null;
-  // DTMF 双音频率（行 × 列）
-  const TONES = {
-    '1': [697, 1209], '2': [697, 1336], '3': [697, 1477],
-    '4': [770, 1209], '5': [770, 1336], '6': [770, 1477],
-    '7': [852, 1209], '8': [852, 1336], '9': [852, 1477],
-    '*': [941, 1209], '0': [941, 1336], '#': [941, 1477],
-  };
-
-  function playTone(digit) {
-    if (!$('chkKeyTone').checked) return;
-    const freq = TONES[digit];
-    if (!freq) return;
-    try {
-      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-      const now = audioCtx.currentTime;
-      const gain = audioCtx.createGain();
-      gain.gain.setValueAtTime(0.12, now);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
-      gain.connect(audioCtx.destination);
-      freq.forEach(function (f) {
-        const osc = audioCtx.createOscillator();
-        osc.type = 'sine';
-        osc.frequency.value = f;
-        osc.connect(gain);
-        osc.start(now);
-        osc.stop(now + 0.12);
-      });
-    } catch (e) { /* 浏览器不允许播放时静默 */ }
-  }
-
-  const PAD_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
-
-  function buildPad(container, onKey) {
-    App.dom.clear(container);
-    PAD_KEYS.forEach(function (k) {
-      const btn = App.dom.el('button', { class: 'ghost', text: k }, k);
-      btn.addEventListener('click', function () { onKey(k); });
-      container.appendChild(btn);
-    });
-  }
-
-  // ---------------- 通信录快搜 ----------------
-
 
   // ---------------- 通话控制 ----------------
 
@@ -144,7 +42,7 @@ window.SipApp.views = window.SipApp.views || {};
   }
 
   function setSliderValue(el, valEl, value) {
-    if (!el || document.activeElement === el) return; // 正在拖动的不覆盖
+    if (!el || document.activeElement === el) return;
     el.value = String(value);
     valEl.textContent = value + '%';
   }
@@ -161,40 +59,69 @@ window.SipApp.views = window.SipApp.views || {};
       (call.micMuted || !call.micGain) ? 0 : call.micGain);
   }
 
+  function show(id, on) { $(id).style.display = on ? '' : 'none'; }
+
+  /** 通话卡片里的全部操作按钮（显隐由面板事件的 state 决定）。 */
+  const ACTION_BUTTONS = [
+    'btnDtmfPad', 'btnConsult', 'btnTransfer', 'btnConference', 'btnThreeWay',
+    'btnConsultTransferBtn', 'btnWhisper', 'btnIntervene', 'btnIntercept',
+    'btnAddMember', 'btnFinishConference', 'btnAnswer', 'btnAnswerVideo',
+    'btnReject', 'btnMute', 'btnHangup',
+  ];
+
+  /** 按面板快照（call.panel）决定显示哪些操作按钮、以及挂断/保持的文案与图标。 */
+  function renderActions(call) {
+    const byId = {};
+    App.callui.panelControls(call).forEach(function (sp) { byId[sp.id] = sp; });
+    ACTION_BUTTONS.forEach(function (id) { show(id, !!byId[id]); });
+    Object.keys(byId).forEach(function (id) {
+      const sp = byId[id];
+      const btn = $(id);
+      if (!btn) return;
+      if (sp.label) {
+        btn.textContent = sp.label; // 会清掉子节点：图标必须在设置文字之后再补
+        btn.title = sp.label;
+      }
+      if (id !== 'btnDtmfPad' && sp.icon) App.callui.decorateButton(btn, sp.icon);
+      // 该动作仍在途（面板在点击后重画过）：把转圈贴回这个静态按钮
+      App.callui.attachPending(id, btn);
+    });
+  }
+
+  function renderParties(call) {
+    const box = $('callParties');
+    App.dom.clear(box);
+    // 面板行（callList / 会议成员）优先，与话务条同一套 DOM
+    App.callui.displayRows(call).forEach(function (p) {
+      box.appendChild(App.callui.partyRowEl(p));
+    });
+  }
+
   function showCall(call) {
     $('callArea').style.display = 'block';
     $('noCall').style.display = 'none';
+    $('idleDialRow').style.display = 'none';
 
-    // 号码 名称 - 备注★（与通话条、通话记录同一套；备注直接显示，不做悬停）
-    $('callName').textContent = call.direction === 'incoming' ? '来电：' : '去电：';
-    const who = App.dom.el('span');
-    App.display.into(who, call);
-    $('callName').appendChild(who);
-    $('callName').removeAttribute('title');
+    // 标题优先用面板快照的 title（拨号中/振铃中/咨询呼叫中…）
+    $('callStatus').textContent = App.callui.displayStatus(call);
+    renderParties(call);
+    renderActions(call);
 
-    const ringing = call.state === 'ringing';
-    const incoming = call.direction === 'incoming';
     const established = call.state === 'established';
-
-    $('callHint').textContent = established ? '通话中'
-      : (ringing ? (incoming ? '对方正在呼叫您' : '正在呼叫对方...') : call.state);
-
-    $('btnAnswer').style.display = (ringing && incoming) ? '' : 'none';
-    $('btnAnswerVideo').style.display = (ringing && incoming && call.hasVideo) ? '' : 'none';
-    $('btnReject').style.display = (ringing && incoming) ? '' : 'none';
-    $('btnMute').style.display = established ? '' : 'none';
-    $('btnMute').textContent = call.muted ? '取消保持' : '保持';
     $('mediaRows').style.display = established ? '' : 'none';
-    $('btnVideoToggle').style.display = (established && call.hasVideo) ? '' : 'none';
-    $('btnHangup').style.display = (ringing && incoming) ? 'none' : '';
+    show('btnVideoToggle', established && call.hasVideo);
+    if (established) startTimer(); else stopTimer();
     applyMediaButtons(call);
   }
 
   function resetCall() {
     $('callArea').style.display = 'none';
     $('noCall').style.display = '';
+    $('idleDialRow').style.display = '';
     $('mediaRows').style.display = 'none';
-    $('btnMute').textContent = '保持';
+    $('callStatus').textContent = '';
+    App.dom.clear($('callParties'));
+    stopTimer();
     resetStats();
   }
 
@@ -236,11 +163,6 @@ window.SipApp.views = window.SipApp.views || {};
     $('videoBadge').className = on ? 'badge ok' : 'badge';
   }
 
-  /**
-   * 订阅按钮外观。noUI 下**不允许取消订阅**（订阅成功后按钮变成不可点的
-   * 「已自动订阅」），但按钮本身**保留**：万一自动订阅没成功（页面是旧版 JS、
-   * 或那次订阅失败），用户还能手动点一下补上——比把按钮藏起来更好救。
-   */
   function refreshSubButton() {
     const btn = $('btnSubVideo');
     if (store.state.noUI) {
@@ -257,13 +179,6 @@ window.SipApp.views = window.SipApp.views || {};
     btn.className = videoSubscribed ? 'ghost' : 'green';
   }
 
-  /**
-   * 仅托盘无 UI 版（store.state.noUI）没有软电话视频窗口，所以：
-   *   - 隐藏「本地画面」与「保留软电话窗口」两个勾选（前者固定为开、后者没有窗口可保留），
-   *     连同两处窗口相关提示一起去掉；
-   *   - 连上就**自动订阅本地 + 远端**（页面打开即有画面，不用手点）；
-   *   - **不允许取消订阅**（订阅按钮隐藏）——要停就关掉配置页的「启用视频通话」。
-   */
   let autoSubscribed = false;
   function applyNoUIVideoMode() {
     if (!store.state.noUI) return;
@@ -274,12 +189,11 @@ window.SipApp.views = window.SipApp.views || {};
     refreshSubButton();
     if (!autoSubscribed && !videoSubscribed) {
       autoSubscribed = true;
-      subscribeVideoNow(true); // noUI 固定订本地 + 远端
+      subscribeVideoNow(true);
     }
   }
 
   function toggleVideoSubscribe() {
-    // noUI：只能订阅（不能取消）
     if (store.state.noUI) {
       if (!videoSubscribed) subscribeVideoNow(true);
       return;
@@ -297,10 +211,6 @@ window.SipApp.views = window.SipApp.views || {};
     subscribeVideoNow();
   }
 
-  /**
-   * 按当前参数订阅视频（手动点按钮与 noUI 自动订阅共用）。
-   * forceLocal = true 时无视「本地画面」勾选、一定订上本地（noUI 用）。
-   */
   function subscribeVideoNow(forceLocal) {
     const opts = {
       remote: $('remoteVideo'),
@@ -320,7 +230,7 @@ window.SipApp.views = window.SipApp.views || {};
       resetStats();
       App.ui.toast('视频已订阅', 'ok');
     }).catch(function (e) {
-      autoSubscribed = false; // 失败（如视频总开关关着）：下次连接再试
+      autoSubscribed = false;
       if (!App.util.isOfflineErr(e)) App.ui.errToast('视频订阅失败', e);
     });
   }
@@ -336,7 +246,6 @@ window.SipApp.views = window.SipApp.views || {};
     });
   }
 
-  // 订阅参数下拉（"自动" = 不传，由软电话按元素尺寸定）
   function fillSelect(id, values, unit) {
     const sel = $(id);
     App.dom.clear(sel);
@@ -372,6 +281,20 @@ window.SipApp.views = window.SipApp.views || {};
     $('btnUpdApply').hidden = st.phase !== 'ready';
   }
 
+  // ---------------- 通话结束提示 ----------------
+
+  /** 通话结束：**SIP 呼叫失败**（call.failed）把原因提示出来，与桌面版
+   *  showCallFailed 一致（如「486 Busy Here」）；正常挂断不提示。
+   *  CTI 接管的话务（收到过 CALL_RINGING，事件带 ctiManaged）不显示 SIP 原因——
+   *  CTI 随后会下发 CALL_FAILED，由 cti.failed 给出统一的中文消息，
+   *  否则「603 …」和「呼叫未接通」会同时出现（用户实测）。 */
+  function noticeCallEnded(info) {
+    if (!info || info.event !== 'call.failed') return;
+    if (info.data && info.data.ctiManaged) return;
+    const reason = (info.data && info.data.reason) || '';
+    App.ui.toast('呼叫失败：' + (reason || '未知原因'), 'err');
+  }
+
   // ---------------- 挂载 ----------------
 
   App.views.call = {
@@ -380,30 +303,50 @@ window.SipApp.views = window.SipApp.views || {};
       const call = function () { return store.state.call; };
       const id = function () { return store.callID(); };
 
-      $('btnDial').addEventListener('click', function () { dial(false); });
-      $('btnDialVideo').addEventListener('click', function () { dial(true); });
-      $('dialTarget').addEventListener('keydown', function (e) {
-        if (e.key === 'Enter') dial(false);
+      // 拨号入口：弹出拨号对话框（拨号盘 / 在线座席），位置跟随鼠标点击处
+      $('btnOpenDial').addEventListener('click', function (e) {
+        App.dialpad.open('call', e.clientX, e.clientY);
       });
-      // 输入即查（最近呼叫 + 通信录），结果落在输入框下方的下拉里
-      $('dialTarget').addEventListener('input', function () { renderSuggest(this.value); });
-      $('dialTarget').addEventListener('focus', function () { renderSuggest(this.value); });
-      $('dialTarget').addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') hideSuggest();
+      $('btnDtmfPad').addEventListener('click', function (e) {
+        App.dialpad.openDtmf(e.clientX, e.clientY);
       });
-      // 失焦稍后再收，给下拉项的 mousedown 留出点击时间
-      $('dialTarget').addEventListener('blur', function () { setTimeout(hideSuggest, 150); });
 
-      // 拨号盘：未接通时填号码（带按键音），接通后发 DTMF（REQ-CALL-006）
-      buildPad($('dialPad'), function (k) {
-        playTone(k);
-        const c = call();
-        if (c && c.state === 'established') {
-          sdk.sendDTMF(c.id, k).catch(fail);
-        } else {
-          $('dialTarget').value += k;
-        }
+      // 两方通话入口：咨询/转移/会议（打开对话框，按钮按模式调整）
+      $('btnConsult').addEventListener('click', function (e) {
+        App.dialpad.open('consult', e.clientX, e.clientY);
       });
+      $('btnTransfer').addEventListener('click', function (e) {
+        App.dialpad.open('transfer', e.clientX, e.clientY);
+      });
+      // 会议：与桌面 UI 一致——直接把当前两方通话转成会议（空成员），
+      // 进入会议模式后才显示「添加成员」（点它才打开拨号对话框）。
+      $('btnConference').addEventListener('click', function () {
+        App.callui.runCTI($('btnConference'), function () { return sdk.addConferenceMembers([]); }, undefined, 'btnConference');
+      });
+      $('btnAddMember').addEventListener('click', function (e) {
+        App.dialpad.open('conference', e.clientX, e.clientY);
+      });
+
+      // MSP_ACTION 类按钮：统一 runCTI（转圈 + 在途期间不可再点）
+      const ctiBtn = function (id, fn) {
+        $(id).addEventListener('click', function () {
+          App.callui.runCTI($(id), fn, undefined, id);
+        });
+      };
+      // 咨询接通后的三方/咨询转移（不带 target：沿用当前咨询）
+      ctiBtn('btnThreeWay', function () { return sdk.consultThreeWay(); });
+      ctiBtn('btnConsultTransferBtn', function () { return sdk.consultTransfer(); });
+      // 监听
+      // 耳语态同一个按钮是「监听」：调用 stopWhisper 回到静默监听
+      ctiBtn('btnWhisper', function () {
+        const cp = App.callui.panelCall();
+        if (cp && cp.state === 'whispering') return sdk.stopWhisper();
+        return sdk.whisper();
+      });
+      ctiBtn('btnIntervene', function () { return sdk.intervene(); });
+      ctiBtn('btnIntercept', function () { return sdk.intercept(); });
+      // 会议
+      ctiBtn('btnFinishConference', function () { return sdk.finishConference(); });
 
       $('btnAnswer').addEventListener('click', function () { sdk.answer(id()).catch(fail); });
       $('btnAnswerVideo').addEventListener('click', function () { sdk.answerVideo(id()).catch(fail); });
@@ -426,7 +369,6 @@ window.SipApp.views = window.SipApp.views || {};
         sdk.setVideo(id(), !(c && c.video && c.video.enabled)).catch(fail);
       });
 
-      // 音量滑块：拖动防抖 120ms 后下发，松手立即生效（0% = 禁用）
       const bindSlider = function (el, valEl, send) {
         let timer = null;
         el.addEventListener('input', function () {
@@ -477,25 +419,58 @@ window.SipApp.views = window.SipApp.views || {};
         });
       });
 
-      // 事件订阅
+      // 图形按钮（拨号盘）与文字按钮的图标（与 UI 同一套图标、颜色随文字=白色）
+      $('btnDtmfPad').innerHTML = App.icons.svg(App.icons.PATH.dialpad, '#ffffff', 16);
+      const dec = App.callui.decorateButton;
+      dec($('btnOpenDial'), { img: '/img/phone-out.png' });
+      dec($('btnConsult'), { img: '/img/consult.png' });
+      dec($('btnTransfer'), { img: '/img/transfer.png' });
+      dec($('btnConference'), { img: '/img/conference.png' });
+      dec($('btnThreeWay'), { img: '/img/threeway.png' });
+      dec($('btnConsultTransferBtn'), { img: '/img/consult-transfer.png' });
+      dec($('btnWhisper'), { img: '/img/whisper.png' });
+      dec($('btnIntervene'), { img: '/img/intervene.png' });
+      dec($('btnIntercept'), { img: '/img/intercept.png' });
+      dec($('btnAddMember'), { img: '/img/add-member.png' });
+      dec($('btnFinishConference'), { img: '/img/end-conference.png' });
+      dec($('btnAnswer'), { img: '/img/phone-out.png' });
+      dec($('btnAnswerVideo'), { img: '/img/video-out.png' });
+      dec($('btnReject'), { svg: 'stop' });
+      dec($('btnHangup'), { svg: 'stop' });
+      dec($('btnMute'), { svg: 'pause' });
+
+      // CTI 指令结束：按钮按当前面板重新渲染（在途期间面板可能已变化，
+      // 不能恢复点击前的文案/图标）
+      App.callui.onRender(function () {
+        if (store.state.call) renderActions(store.state.call);
+      });
+
       store.on('call', function (c) {
-        if (c) showCall(c);
-        // 兜底：noUI 下视频一旦协商成功就确保订阅还在（例如订阅此前失败过、
-        // 或页面是从旧版本 JS 起来后重连的）
+        // null = 没有进行中的通话（含重连快照里只剩已结束通话）：收起卡片，
+        // 否则上一通电话的"呼叫中"会一直挂在那里
+        if (c) showCall(c); else resetCall();
         if (c && c.video && c.video.negotiated) applyNoUIVideoMode();
       });
-      store.on('callEnded', resetCall);
+      store.on('callEnded', function (info) {
+        resetCall();
+        noticeCallEnded(info);
+      });
+      // 面板快照变化（call.panel）：标题/各方/按钮都以它为准
+      store.on('panel', function () {
+        if (store.state.call) showCall(store.state.call); else resetCall();
+      });
       store.on('update', renderUpdate);
       store.on('state', function () {
-        refreshSuggestOnState();
         $('chkAutoAnswer').checked = !!store.state.autoAnswer;
         renderUpdate(store.state.update);
         refreshTransformButtons();
         applyNoUIVideoMode();
+        if (store.state.call) showCall(store.state.call); else resetCall();
+      });
+      store.on('agent', function () {
+        if (store.state.call) renderActions(store.state.call);
       });
       store.on('connected', applyNoUIVideoMode);
-      // 断线时把视频状态打回"未订阅"：否则界面还显示"已订阅"、实际连接已死，
-      // 视频不来、按钮却像能用（用户实测过这种错觉）
       store.on('disconnected', function () {
         videoSubscribed = false;
         autoSubscribed = false;
@@ -505,16 +480,19 @@ window.SipApp.views = window.SipApp.views || {};
       });
       store.on('autoAnswer', function (on) { $('chkAutoAnswer').checked = on; });
       sdk.on('video.transform', refreshTransformButtons);
+      // CTI 话务失败（协议 §16.2/§16.3）：CALL_FAILED 的 refuse/cancel/takeover
+      // 与 CONSULT_FAILED 的 refuse/cancel——软电话已把原因翻成中文，直接提示。
+      sdk.on('cti.failed', function (data) {
+        if (!data || !data.message) return;
+        App.ui.toast(data.message, data.kind === 'call' ? 'err' : '');
+      });
 
-      // mount 只绑事件、不拉数据：那时 WS 还没连上，请求必然失败。
-      // 最近呼叫来自状态快照，连上后 app.js 会重跑本页。
       refreshTransformButtons();
+      resetCall();
     },
     onShow: function () {
-      refreshSuggestOnState();
+      if (store.state.call) showCall(store.state.call);
     },
-    onHide: function () {
-      hideSuggest();
-    },
+    onHide: function () { App.dialpad.close(); },
   };
 })(window.SipApp);

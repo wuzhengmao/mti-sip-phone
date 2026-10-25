@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,18 +17,44 @@ import (
 	"mti-sip-phone/internal/core"
 )
 
-// testSink 收集 Phone 上报的事件，供断言。
-type testSink struct {
-	mu     sync.Mutex
-	regs   []core.RegisterState
-	events []string
-	calls  []string
+// contactHeaderValue REGISTER 的 Contact 头原文（测试断言用）。
+func contactHeaderValue(req *sip.Request) string {
+	if h := req.GetHeader("Contact"); h != nil {
+		return h.Value()
+	}
+	return ""
 }
 
-func (s *testSink) OnIncoming(callID, remote, remoteName string, hasVideo bool) {
+// testSink 收集 Phone 上报的事件，供断言。
+type testSink struct {
+	mu           sync.Mutex
+	regs         []core.RegisterState
+	events       []string
+	remoteCmds   []core.RemoteCommand
+	ctiResults   []core.CTIResult
+	mspEvents    []mspEventRec
+	calls        []string
+	lastIncoming core.IncomingCall
+}
+
+// mspEventRec 记录一条 MSP_EVENT（event 名 + body）。
+type mspEventRec struct {
+	event string
+	body  map[string]any
+}
+
+func (s *testSink) OnIncoming(callID string, info core.IncomingCall) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, "incoming:"+callID)
+	s.lastIncoming = info
+}
+
+// lastIncomingInfo 最近一次来电的解析结果（Call-Info 名称/类型等，REQ-ACC-029）。
+func (s *testSink) lastIncomingInfo() core.IncomingCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastIncoming
 }
 
 func (s *testSink) OnVideoState(callID string, st core.VideoState) {
@@ -60,6 +88,68 @@ func (s *testSink) OnRegisterState(state core.RegisterState, reason string) {
 	s.regs = append(s.regs, state)
 }
 
+// OnRemoteCommand 记录服务端控制指令（REQ-ACC-025），供 NOTIFY 测试断言。
+func (s *testSink) OnRemoteCommand(cmd core.RemoteCommand) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.remoteCmds = append(s.remoteCmds, cmd)
+}
+
+// OnCTIResult 记录 INFO 指令结果（REQ-ACC-026）。
+func (s *testSink) OnCTIResult(res core.CTIResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ctiResults = append(s.ctiResults, res)
+}
+
+// OnMSPEvent 记录通话面板事件（REQ-ACC-026）。
+func (s *testSink) OnMSPEvent(event string, body map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mspEvents = append(s.mspEvents, mspEventRec{event: event, body: body})
+}
+
+// waitCTIResult 轮询等待满足条件的 INFO 结果。
+func (s *testSink) waitCTIResult(timeout time.Duration, pred func(core.CTIResult) bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		for _, r := range s.ctiResults {
+			if pred(r) {
+				s.mu.Unlock()
+				return true
+			}
+		}
+		s.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// waitRemoteCmd 轮询等待满足条件的控制指令（NOTIFY 的副作用是异步的）。
+func (s *testSink) waitRemoteCmd(timeout time.Duration, pred func(core.RemoteCommand) bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		for _, c := range s.remoteCmds {
+			if pred(c) {
+				s.mu.Unlock()
+				return true
+			}
+		}
+		s.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// eventsSnapshot 事件列表快照（失败信息里带上现场）。
+func (s *testSink) eventsSnapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.events...)
+}
+
 func (s *testSink) hasEvent(prefix string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -87,6 +177,18 @@ func (s *testSink) lastReg() core.RegisterState {
 	return s.regs[len(s.regs)-1]
 }
 
+// waitRegState 轮询等待注册状态达到 want。
+func (s *testSink) waitRegState(want core.RegisterState, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if s.lastReg() == want {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
 func (s *testSink) waitEvent(prefix string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -98,12 +200,46 @@ func (s *testSink) waitEvent(prefix string, timeout time.Duration) bool {
 	return false
 }
 
+// regRecord 测试服务器收到的一条 REGISTER（账号 + Expires + Contact），
+// 供换账号先注销旧账号的断言用（只记带 Authorization 的那条，
+// 即真正生效的注册/注销请求）。
+type regRecord struct {
+	user    string
+	expires int
+	contact string // Contact 头原文（断言 msp=support 用）
+}
+
+// regRecorder 线程安全地记录收到的 REGISTER。
+type regRecorder struct {
+	mu   sync.Mutex
+	regs []regRecord
+}
+
+func (r *regRecorder) add(user string, expires int, contact string) {
+	r.mu.Lock()
+	r.regs = append(r.regs, regRecord{user: user, expires: expires, contact: contact})
+	r.mu.Unlock()
+}
+
+func (r *regRecorder) list() []regRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]regRecord(nil), r.regs...)
+}
+
 // startTestServer 启动一个迷你 SIP 服务器（对端）：
 //   - REGISTER：首次回 401（要求 Digest），带凭据后回 200
 //   - INVITE：回 180 再 200（携带 SDP answer）
 //   - BYE：回 200
 func startTestServer(t *testing.T) (addr string) {
+	addr, _ = startTestServerRecording(t)
+	return addr
+}
+
+// startTestServerRecording 同 startTestServer，额外返回 REGISTER 记录器。
+func startTestServerRecording(t *testing.T) (addr string, rec *regRecorder) {
 	t.Helper()
+	rec = &regRecorder{}
 	ua, err := sipgo.NewUA(sipgo.WithUserAgent("test-server"))
 	if err != nil {
 		t.Fatalf("创建测试服务器 UA 失败: %v", err)
@@ -120,6 +256,18 @@ func startTestServer(t *testing.T) (addr string) {
 			_ = tx.Respond(res)
 			return
 		}
+		// 记录带凭据的 REGISTER（真正生效的注册/注销）
+		user := ""
+		if to := req.To(); to != nil {
+			user = to.Address.User
+		}
+		expires := -1
+		if eh := req.GetHeader("Expires"); eh != nil {
+			if v, err := strconv.Atoi(eh.Value()); err == nil {
+				expires = v
+			}
+		}
+		rec.add(user, expires, contactHeaderValue(req))
 		res := sip.NewResponseFromRequest(req, 200, "OK", nil)
 		res.AppendHeader(sip.NewHeader("Expires", "3600"))
 		_ = tx.Respond(res)
@@ -163,7 +311,7 @@ func startTestServer(t *testing.T) (addr string) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() { _ = srv.ServeUDP(ln) }()
-	return ln.LocalAddr().String()
+	return ln.LocalAddr().String(), rec
 }
 
 // newTestPhone 创建被测 Phone（无音频管理器）。
@@ -208,6 +356,47 @@ func TestRegisterFlow(t *testing.T) {
 	}
 	if sink.lastReg() != core.RegRegistered {
 		t.Fatalf("注册状态应为 registered，实际: %v", sink.regs)
+	}
+}
+
+// TestRegisterContactMSP 注册的 Contact 必须带 `msp=support`（REQ-ACC-026）：
+// CTI 周期同步 OpenSIPS location 表时按 contact 里的这个参数判断该话机支持
+// MSP 私有协议（MSP_EVENT_* 只推给声明支持的话机）。
+func TestRegisterContactMSP(t *testing.T) {
+	addr, rec := startTestServerRecording(t)
+	sink := &testSink{}
+	p := newTestPhone(t, sink)
+
+	host, portStr, _ := net.SplitHostPort(addr)
+	port := 0
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
+
+	acc := config.Account{
+		Server:    host,
+		Port:      port,
+		Transport: "udp",
+		Account:   "1001",
+		Password:  "secret",
+		Expires:   300,
+	}
+	if err := p.Register(context.Background(), acc); err != nil {
+		t.Fatalf("Register 返回错误: %v", err)
+	}
+	if !sink.waitRegState(core.RegRegistered, 5*time.Second) {
+		t.Fatalf("注册未成功，实际状态: %v", sink.regs)
+	}
+
+	var contact string
+	for _, r := range rec.list() {
+		if r.user == "1001" && r.expires > 0 {
+			contact = r.contact
+		}
+	}
+	if contact == "" {
+		t.Fatalf("服务器未收到注册的 Contact，记录: %+v", rec.list())
+	}
+	if !strings.Contains(contact, "msp=support") {
+		t.Fatalf("REGISTER 的 Contact 应带 msp=support，实际: %s", contact)
 	}
 }
 
@@ -278,5 +467,106 @@ func TestUnregisterFlow(t *testing.T) {
 	}
 	if sink.lastReg() != core.RegUnregistered {
 		t.Fatalf("注销后状态应为 unregistered，实际: %v", sink.lastReg())
+	}
+}
+
+// TestSwitchAccountUnregistersOld 换账号（REQ-ACC-011 修订）：p.Register 换成
+// 另一个账号时，必须先给**旧账号**发 expires=0 的 REGISTER 让它立即过期
+// （否则旧绑定要等自然过期，期间打旧号码仍会送到本机）；且这次注销走**静默
+// 路径**——不能把注册状态置成"未注册"（界面会闪、注册看护会被惊动）。
+func TestSwitchAccountUnregistersOld(t *testing.T) {
+	addr, rec := startTestServerRecording(t)
+	sink := &testSink{}
+	p := newTestPhone(t, sink)
+
+	host, portStr, _ := net.SplitHostPort(addr)
+	port := 0
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
+	// Expires 按真实配置给（默认 300）：0 表示"注销"，注册测试不能用
+	oldAcc := config.Account{Server: host, Port: port, Transport: "udp", Account: "1001", Password: "secret", Expires: 300}
+	newAcc := config.Account{Server: host, Port: port, Transport: "udp", Account: "1002", Password: "secret", Expires: 300}
+
+	if err := p.Register(context.Background(), oldAcc); err != nil {
+		t.Fatalf("注册旧账号失败: %v", err)
+	}
+	if !sink.waitRegState(core.RegRegistered, 3*time.Second) {
+		t.Fatal("旧账号未注册成功")
+	}
+
+	// 换账号：注销旧账号（同步发出）→ 注册新账号
+	if err := p.Register(context.Background(), newAcc); err != nil {
+		t.Fatalf("换账号失败: %v", err)
+	}
+
+	// 等待服务器收到旧账号的 expires=0 与 新账号的注册
+	deadline := time.Now().Add(3 * time.Second)
+	var oldUnregAt, newRegAt = -1, -1
+	for time.Now().Before(deadline) {
+		oldUnregAt, newRegAt = -1, -1
+		for i, r := range rec.list() {
+			if r.user == "1001" && r.expires == 0 && oldUnregAt < 0 {
+				oldUnregAt = i
+			}
+			if r.user == "1002" && r.expires > 0 && newRegAt < 0 {
+				newRegAt = i
+			}
+		}
+		if oldUnregAt >= 0 && newRegAt >= 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if oldUnregAt < 0 {
+		t.Fatalf("换账号后服务器未收到旧账号（1001）的 expires=0 注销，记录: %+v", rec.list())
+	}
+	if newRegAt < 0 {
+		t.Fatalf("新账号（1002）未注册，记录: %+v", rec.list())
+	}
+	if oldUnregAt > newRegAt {
+		t.Fatalf("旧账号注销应早于新账号注册（先注销后注册），记录: %+v", rec.list())
+	}
+
+	// 静默注销：状态流里不应出现 unregistered（只有 registering→registered 的跳变）
+	for _, st := range sink.regStates() {
+		if st == core.RegUnregistered {
+			t.Fatalf("换账号的旧账号注销不应把注册状态置成 unregistered（界面会闪未注册），状态流: %v", sink.regStates())
+		}
+	}
+	if sink.lastReg() != core.RegRegistered {
+		t.Fatalf("换账号后最终状态应为 registered，实际: %v", sink.lastReg())
+	}
+}
+
+// TestSameAccountReregisterNoUnregister 同账号重注册（改密码等）**不**给服务端
+// 发注销——只有真正换账号才打扰服务端。
+func TestSameAccountReregisterNoUnregister(t *testing.T) {
+	addr, rec := startTestServerRecording(t)
+	sink := &testSink{}
+	p := newTestPhone(t, sink)
+
+	host, portStr, _ := net.SplitHostPort(addr)
+	port := 0
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
+	acc := config.Account{Server: host, Port: port, Transport: "udp", Account: "1001", Password: "secret", Expires: 300}
+
+	if err := p.Register(context.Background(), acc); err != nil {
+		t.Fatalf("注册失败: %v", err)
+	}
+	if !sink.waitRegState(core.RegRegistered, 3*time.Second) {
+		t.Fatal("未注册成功")
+	}
+
+	// 同账号、仅改密码：重注册
+	acc2 := acc
+	acc2.Password = "newpass"
+	if err := p.Register(context.Background(), acc2); err != nil {
+		t.Fatalf("重注册失败: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	for _, r := range rec.list() {
+		if r.expires == 0 {
+			t.Fatalf("同账号重注册不应发 expires=0 注销，记录: %+v", rec.list())
+		}
 	}
 }

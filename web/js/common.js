@@ -211,17 +211,22 @@ window.SipApp = window.SipApp || {};
 
   /**
    * 对端展示的统一口径（网页各处都用它，别再各写一套）：
-   *   命中通信录 → 「号码 名称 - 备注★」（名称取通信录的，空则退回 SIP 显示名；
-   *                备注**直接跟在名称后面**，不用悬停提示——用户要求）；
+   *   名称优先级：Call-Info 的 display-name（peerName）> 通信录 > SIP 显示名；
+   *   命中通信录 → 「号码 名称 - 备注★」（备注**直接跟在名称后面**，不用悬停提示——用户要求）；
    *   未命中     → 「显示名（号码）」，名称与号码相同（很常见）时只显示一次。
    * 与桌面通信录/通话记录的展示口径一致（见 internal/ui/ui_history.go 的 historyDisplay）。
    */
   function peerText(o) {
     const remote = (o && o.remote) || '';
-    const name0 = (o && o.remoteName) || '';
+    // peerName = INVITE 的 Call-Info display-name（REQ-ACC-029）：优先于通信录名称；
+    // displayName = 通话记录里保存的座席显示名（座席列表直接呼出时记录）：
+    // 同样优先于通信录名称（用户要求）。
+    const peerName = (o && o.peerName) || '';
+    const displayName = (o && o.displayName) || '';
+    const name0 = peerName || displayName || (o && o.remoteName) || '';
     const c = o && o.contact;
     if (c) {
-      let label = c.name || name0;
+      let label = peerName || displayName || c.name || name0;
       const note = c.note || '';
       if (note) label = label ? label + ' - ' + note : note;
       const starred = !!c.starred;

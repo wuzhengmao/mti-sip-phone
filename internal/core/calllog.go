@@ -25,12 +25,15 @@ type CallRecord struct {
 	Direction  string // incoming 呼入 / outgoing 呼出
 	Remote     string // 对方号码或 URI
 	RemoteName string // 对方显示名
-	StartedAt  time.Time
-	AnsweredAt time.Time // 零值 = 未接通
-	EndedAt    time.Time // 零值 = 进行中
-	HasVideo   bool
-	Missed     bool   // 呼入未接（口径同 missedOnEnd，拒绝/本端挂断不算）
-	Reason     string // 结束原因（SIP 层原样透传）
+	// DisplayName 呼出时已知的座席显示名（在线座席列表直接呼出带上的
+	// displayName）：通话记录展示时**优先于通信录名称**，为空则回退通信录。
+	DisplayName string
+	StartedAt   time.Time
+	AnsweredAt  time.Time // 零值 = 未接通
+	EndedAt     time.Time // 零值 = 进行中
+	HasVideo    bool
+	Missed      bool   // 呼入未接（口径同 missedOnEnd，拒绝/本端挂断不算）
+	Reason      string // 结束原因（SIP 层原样透传）
 }
 
 // CallLogFilter 通话记录查询条件。
@@ -101,13 +104,26 @@ func (a *App) ClearCallLog() (int, error) {
 // PublishCallLogChanged 广播"通话记录被删除/清空"（REQ-WS-017）。
 //
 // 只覆盖删除类变更：新增记录由 call.terminated / call.failed 驱动刷新
-//（记录先入库再发事件，所以收到事件时查库一定能查到）。
+// （记录先入库再发事件，所以收到事件时查库一定能查到）。
 // 放在 core 里而不是 wsapi：桌面界面与网页都是消费者，事件得是同一份。
 func (a *App) PublishCallLogChanged(action string, deleted int) {
 	a.bus.Publish("calllog.changed", map[string]any{
 		"action":  action,
 		"deleted": deleted,
 	})
+}
+
+// selfCaller 来电主叫是否就是本机分机号（按 NormalizeNumber 比较）。
+// CTI 平台在监听/会议等场景会以本机号码作为主叫回呼话机，这类通话不进通话
+// 记录；配置里没有分机号（未启用账户）时一律不拦。
+func (a *App) selfCaller(remote string) bool {
+	a.mu.RLock()
+	self := a.cfg.Account.Account
+	a.mu.RUnlock()
+	if self == "" || remote == "" {
+		return false
+	}
+	return NormalizeNumber(remote) == NormalizeNumber(self)
 }
 
 // logStart 记开始（未接入存储时无副作用）。

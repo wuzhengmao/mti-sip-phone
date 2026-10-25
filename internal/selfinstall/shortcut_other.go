@@ -3,10 +3,8 @@
 package selfinstall
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,15 +25,12 @@ import (
 // 失败由调用方只告警不阻断。快捷方式名固定为「MTI 软电话」（shortcutName，
 // 两个变体共用）。
 func createDesktopShortcut(dst string) error {
-	// 图标 PNG：256px 绿色话机（与托盘同一真相源与光栅化链路）
+	// 图标 PNG：256px 绿色话机（iconfont 原始渲染，与托盘/窗口同一份）
 	iconPath := ""
-	if img, err := appicon.Rasterize(appicon.PhoneGreenSVG(), 256); err == nil {
-		var buf bytes.Buffer
-		if err := png.Encode(&buf, img); err == nil {
-			p := filepath.Join(filepath.Dir(dst), "icon.png")
-			if err := os.WriteFile(p, buf.Bytes(), 0o644); err == nil {
-				iconPath = p
-			}
+	if pngBytes := appicon.PhoneGreenPNG(); len(pngBytes) > 0 {
+		p := filepath.Join(filepath.Dir(dst), "icon.png")
+		if err := os.WriteFile(p, pngBytes, 0o644); err == nil {
+			iconPath = p
 		}
 	}
 

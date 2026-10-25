@@ -35,12 +35,18 @@ const (
 
 // Call 一次通话的运行时信息。
 type Call struct {
-	ID         string    `json:"id"`
-	Direction  string    `json:"direction"`  // incoming 呼入 / outgoing 呼出
-	Remote     string    `json:"remote"`     // 对方号码或 URI
-	RemoteName string    `json:"remoteName"` // 对方显示名
-	State      CallState `json:"state"`
-	Muted      bool      `json:"muted"`
+	ID         string `json:"id"`
+	Direction  string `json:"direction"`  // incoming 呼入 / outgoing 呼出
+	Remote     string `json:"remote"`     // 对方号码或 URI
+	RemoteName string `json:"remoteName"` // 对方显示名（From 的 display-name）
+	// PeerName INVITE 的 Call-Info 里 display-name 参数（服务端下发的对端名称）：
+	// **优先于通信录名称显示**（REQ-ACC-029）；为空时回退通信录/RemoteName。
+	PeerName string `json:"peerName,omitempty"`
+	// Consult Call-Info 的 call-type=consult：服务端推来的咨询呼入——接通后
+	// 通话面板第一行不显示咨询/转移/会议入口（REQ-ACC-029）。
+	Consult bool      `json:"consult,omitempty"`
+	State   CallState `json:"state"`
+	Muted   bool      `json:"muted"`
 	// MicMuted / SpeakerMuted 麦克风与扬声器静音（纯本地动作，REQ-UI-023；
 	// 桌面通话面板与网页控制共用同一份状态，变更时发 call.audio 事件）。
 	MicMuted     bool `json:"micMuted"`
@@ -59,6 +65,12 @@ type Call struct {
 	// 号码旁显示名称与 ★、悬停显示备注。**发布事件时即时解析**（见 publishCall），
 	// 所以通话中改通信录，后续事件的 contact 立刻是新的。
 	Contact *ContactInfo `json:"contact,omitempty"`
+	// CTI 复杂话务状态（咨询/三方/监听/会议，REQ-ACC-026）：双方通话时为零值
+	// （TalkState 为 twoParty）。由服务端 MSP_EVENT_* 驱动，UI 据此重建面板。
+	CTI CTIState `json:"cti,omitempty"`
+
+	// startedAt 通话创建时间：call.panel 事件的 startTime 用（内部字段，不下发）。
+	startedAt time.Time
 }
 
 // RegisterInfo 注册状态快照。
@@ -94,6 +106,15 @@ type State struct {
 	// Instance 本进程的实例槽位（0 = 主实例，≥1 = 沙箱实例，REQ-NFR-007）：
 	// 网页控制台在诊断页拼 sip:// 拉起链接时要带上它，否则拉起来的是主实例。
 	Instance int `json:"instance"`
+	// AgentOnline 是否处于坐席模式（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）：
+	// 只有坐席模式才在通话面板显示高级话务按钮（咨询/转移/会议）。
+	AgentOnline bool `json:"agentOnline"`
+	// AgentDisplayName 坐席显示名（AGENT_ONLINE 的 displayName；离线或为空时省略）。
+	AgentDisplayName string `json:"agentDisplayName,omitempty"`
+	// AgentMode 坐席模式（none/normal/dial_out/monitor，协议 §16.1）。
+	AgentMode string `json:"agentMode,omitempty"`
+	// AgentBusy 坐席是否置忙（isBusy）。
+	AgentBusy bool `json:"agentBusy,omitempty"`
 }
 
 // 常见错误，供接口层映射为错误码。
@@ -101,6 +122,11 @@ var (
 	ErrTelephonyNotReady = errors.New("电话能力尚未接入")
 	ErrCallNotFound      = errors.New("通话不存在")
 	ErrNoActiveCall      = errors.New("没有进行中的通话")
+	ErrCTIBusy           = errors.New("已有 CTI 指令在途，请稍候")
+	// ErrCTINotifyUnsupported 服务端不支持 CTI 的 NOTIFY 通道：收到
+	// MSP_UNSUPPORTED，或 MSP_HEARTBEAT 的 SIP 响应不是 200。话机据此停止
+	// 心跳并退出坐席模式（协议要求）。
+	ErrCTINotifyUnsupported = errors.New("服务端不支持 CTI NOTIFY")
 )
 
 // App 应用核心：维护注册与通话状态机，向上层发布事件。
@@ -127,6 +153,9 @@ type App struct {
 	callOrder  []string             // 保持创建顺序
 	video      *videoDemux          // 视频帧多播出口（恒定对象，见 video.go）
 	webViewers map[uint64]webViewer // 网页视频订阅（连接级，REQ-VIDEO-009）
+	// lastCallStatus 上一次上报的心跳 status：话务状态变化时据此**立即补发**
+	// 一条心跳（否则最多要等一个周期才同步给 CTI，见 notifyCallStatus）。
+	lastCallStatus string
 	// pendingVideo 早到的视频状态（通话尚未登记，如视频呼叫拨出即开摄像头）
 	pendingVideo map[string]VideoState
 	// videoTx 显示用的旋转/镜像（桌面与网页共用一份，见 video.go）
@@ -134,6 +163,21 @@ type App struct {
 	// autoAnswer 自动接听开关（桌面按钮与网页开关共用一份，
 	// 变更后广播 system.autoAnswer，见 SetAutoAnswer）
 	autoAnswer bool
+
+	// agent 坐席模式（MSP_EVENT_AGENT_ONLINE/OFFLINE，见 cti.go）：
+	// 只有坐席模式才在通话面板显示高级话务按钮。
+	agent agentState
+	// 服务端下发的面板（协议 §16.2/§16.3，2026-10 修订）：CTI 统一下发计算好的
+	// 完整通话/会议面板（MSP_CALL_PANEL_UPDATED / MSP_CONFERENCE_PANEL_UPDATED），
+	// 话机直接整份覆盖。收到过面板事件后（srvPanelSeen）就以它为准，不再用本地
+	// 事件推算面板（本地推算仅作为老服务端的兜底）。
+	srvPanelSeen  bool
+	srvCallPanel  *CallPanel
+	srvConfPanel  *ConferencePanel
+	lastPanelFail string // 已经提示过的 failCause（callId|failCause，去重）
+	// heartbeat CTI 心跳循环（协议 §10）：注册成功启动、注销停止，
+	// 报文里如实上报坐席模式与显示名（见 cti.go）。
+	heartbeat heartbeatState
 
 	// instance 实例槽位（0 = 主实例），见 SetInstanceSlot
 	instance int
@@ -174,7 +218,24 @@ func (a *App) Bus() *Bus { return a.bus }
 func (a *App) Tel() Telephony { return a.tel }
 
 // SetTel 注入电话层实现（用于 App 与电话层互相引用的场景，启动前调用）。
-func (a *App) SetTel(tel Telephony) { a.tel = tel }
+func (a *App) SetTel(tel Telephony) {
+	a.tel = tel
+	// 呼出 INVITE 的 Call-Info 要带被叫的显示名（REQ-ACC-029）：通信录在
+	// core 里、sip 层拿不到，这里把查名回调注入过去（sip.Phone 实现该方法；
+	// 其它实现没有就跳过，不影响功能）。
+	if s, ok := tel.(interface{ SetPeerNameLookup(func(string) string) }); ok {
+		s.SetPeerNameLookup(a.PeerDisplayName)
+	}
+}
+
+// PeerDisplayName 号码对应的显示名（通信录里的名称；查不到返回空串）。
+// 供电话层拼呼出 INVITE 的 Call-Info 用。
+func (a *App) PeerDisplayName(number string) string {
+	if c, ok := a.LookupContact(number); ok {
+		return c.Name
+	}
+	return ""
+}
 
 // Config 返回当前配置（只读用途，修改需走 UpdateAccount 等方法）。
 func (a *App) Config() *config.Config { return a.cfg }
@@ -193,7 +254,17 @@ func (a *App) UpdateAccount(acc config.Account) error {
 	if a.tel == nil {
 		return nil
 	}
+	// 注销条件（REQ-ACC-024）：账户未启用 / 缺字段——两者都走注销（发
+	// expires=0、停注册周期）。**「启用账户」同时也是"是否注册"的总开关**：
+	// 托盘菜单「退出账号」把它置 false（注销 + 停周期）、「登录账号」置回 true
+	// （立即注册），服务端 NOTIFY 注销同样置 false；WS 断线自动注销（REQ-WS-020）
+	// 用的也是它——重连恢复时若此时为 false 就不会偷偷注册回来。sip:// 拉起在
+	// handleLaunchArgs 里强制置 true（显式要求注册）。
 	if !acc.Enabled || acc.Server == "" || acc.Account == "" {
+		// 登出账号（REQ-ACC-028 补充）：坐席模式一并退出——坐席会话绑定在
+		// 登录态上，退出账号后不应再显示"座席已登录"（托盘菜单/网页徽章/
+		// SDK unregister/服务端 MSP_UNREGISTER/断线自动注销都走这里）。
+		a.setAgentOnline(false, "", AgentModeNone, false)
 		a.setRegister(RegUnregistered, "")
 		a.bus.Publish("register.state", map[string]any{
 			"state":   string(RegUnregistered),
@@ -227,6 +298,8 @@ func (a *App) Start(ctx context.Context) {
 		return
 	}
 	acc := a.cfg.Account
+	// 启动注册：**只由「启用账户」控制**（REQ-ACC-024——取消勾选即"退出账号"，
+	// 启动不注册；托盘菜单「登录账号」置回 true 并立即注册；sip:// 拉起强制启用）。
 	if acc.Enabled && acc.Server != "" && acc.Account != "" {
 		go func() {
 			if err := a.tel.Register(ctx, acc); err != nil {
@@ -265,6 +338,10 @@ func (a *App) State() State {
 		Instance:   a.instance,
 		// 官方更新站点（网页「使用主站点」按钮用，REQ-UPD-023）
 		UpdatePrimarySite: config.PrimaryUpdateSite,
+		AgentOnline:       a.AgentOnline(),
+		AgentDisplayName:  a.AgentDisplayName(),
+		AgentMode:         a.AgentMode(),
+		AgentBusy:         a.AgentBusy(),
 	}
 	for _, id := range a.callOrder {
 		c := *a.calls[id]
@@ -296,17 +373,36 @@ func (a *App) attachContact(c *Call) {
 // Dial 呼出。target 为号码或 SIP URI。
 // 单通话限制：呼叫/振铃/通话中不允许发起新的呼叫。
 func (a *App) Dial(ctx context.Context, target string) (string, error) {
+	return a.dial(ctx, target, "", false)
+}
+
+// DialNamed 带对端显示名的呼出：displayName 来自座席列表等界面已知的名称，
+// 呼叫期间**优先于通信录名称**显示（为空时行为与 Dial 完全一致）。
+func (a *App) DialNamed(ctx context.Context, target, displayName string) (string, error) {
+	return a.dial(ctx, target, displayName, false)
+}
+
+// dial 呼出/视频呼出的公共流程；displayName 非空时写进 Call.PeerName。
+func (a *App) dial(ctx context.Context, target, displayName string, video bool) (string, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
-		return "", fmt.Errorf("号码不能为空")
+		return "", errors.New("号码不能为空")
 	}
 	if a.tel == nil {
 		return "", ErrTelephonyNotReady
 	}
 	if a.HasActiveCall() {
-		return "", fmt.Errorf("已有通话进行中，无法发起新的呼叫")
+		return "", errors.New("已有通话进行中，无法发起新的呼叫")
 	}
-	callID, err := a.tel.Dial(ctx, target)
+	var (
+		callID string
+		err    error
+	)
+	if video {
+		callID, err = a.tel.DialVideo(ctx, target)
+	} else {
+		callID, err = a.tel.Dial(ctx, target)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -314,23 +410,44 @@ func (a *App) Dial(ctx context.Context, target string) (string, error) {
 		ID:        callID,
 		Direction: "outgoing",
 		Remote:    target,
+		PeerName:  strings.TrimSpace(displayName),
 		State:     CallRinging,
+		HasVideo:  video,
 	})
 	// 通话记录（REQ-CALL-007）：必须在 addRecentDial（会同步写 config.json）
 	// 与 publishCall 之前入队——前者是与结束事件抢时间的最大窗口，后者是
 	// 界面收到事件后立刻查库刷新能看到这条记录的前提。
 	a.logStart(CallRecord{
-		CallID:    callID,
-		Direction: "outgoing",
-		Remote:    target,
-		StartedAt: time.Now(),
+		CallID:      callID,
+		Direction:   "outgoing",
+		Remote:      target,
+		DisplayName: strings.TrimSpace(displayName),
+		StartedAt:   time.Now(),
+		HasVideo:    video,
 	})
 	a.addRecentDial(target)
 	// 发布"呼出中"事件：GUI 进入呼叫状态（通话面板），WS 客户端
 	//（如测试页）收到后可显示挂断按钮中止呼叫
 	a.publishCall("call.dialing", callID)
-	logx.Logger().Info("发起呼叫", "callId", callID, "target", target)
+	a.notifyCallStatus() // 心跳 status：dialing
+	logx.Logger().Info("发起呼叫", "callId", callID, "target", target, "video", video,
+		"displayName", displayName)
+	// 视频呼叫拨出即开摄像头/回显（sip 侧），其首个状态可能早于本次登记到达，
+	// 已被 upsertCall 并入通话——这里补发一次事件，界面才会立刻显示本地画面
+	//（顺序必须在 call.dialing 之后：界面要先有 activeCallID 才认这条事件）。
+	if video {
+		if c := a.getCall(callID); c != nil && (c.Video.Enabled || c.Video.Sending || c.Video.Negotiated) {
+			a.publishCall("call.video", callID)
+		}
+	}
 	return callID, nil
+}
+
+// AddRecentDial 把号码记进"最近呼叫"（主窗体拨号下拉的数据源，持久化）。
+// 普通拨号在 Dial/DialVideo 里自动记；CTI 拨号复用（咨询/转移/加会）没有走
+// Dial，由界面在指令发出后调这里补记。
+func (a *App) AddRecentDial(number string) {
+	a.addRecentDial(number)
 }
 
 // addRecentDial 记录最近呼叫号码（去重、最多 5 个、持久化）。
@@ -487,6 +604,7 @@ func (a *App) Mute(callID string, muted bool) error {
 	}
 	a.updateCall(callID, func(c *Call) { c.Muted = muted })
 	a.bus.Publish("call.muted", map[string]any{"callId": callID, "muted": muted})
+	a.notifyCallStatus() // 心跳 status：holding / talking
 	return nil
 }
 
@@ -585,45 +703,12 @@ func (a *App) CameraSupported() bool {
 
 // DialVideo 发起视频呼叫。
 func (a *App) DialVideo(ctx context.Context, target string) (string, error) {
-	if a.tel == nil {
-		return "", ErrTelephonyNotReady
-	}
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return "", errors.New("呼叫目标不能为空")
-	}
-	if a.HasActiveCall() {
-		return "", errors.New("已有进行中的通话")
-	}
-	callID, err := a.tel.DialVideo(ctx, target)
-	if err != nil {
-		return "", err
-	}
-	a.upsertCall(&Call{
-		ID:        callID,
-		Direction: "outgoing",
-		Remote:    target,
-		State:     CallRinging,
-		HasVideo:  true,
-	})
-	a.logStart(CallRecord{
-		CallID:    callID,
-		Direction: "outgoing",
-		Remote:    target,
-		StartedAt: time.Now(),
-		HasVideo:  true,
-	})
-	a.addRecentDial(target)
-	a.publishCall("call.dialing", callID)
-	// 视频呼叫拨出即开摄像头/回显（sip 侧），其首个状态可能早于本次登记到达，
-	// 已被 upsertCall 并入通话——这里补发一次事件，界面才会立刻显示本地画面
-	//（顺序必须在 call.dialing 之后：界面要先有 activeCallID 才认这条事件）。
-	// 条件带上 Enabled：摄像头禁用时 Sending=false，界面同样要拿到"视频已开启"
-	// 才能把远端画面显示出来。
-	if c := a.getCall(callID); c != nil && (c.Video.Enabled || c.Video.Sending || c.Video.Negotiated) {
-		a.publishCall("call.video", callID)
-	}
-	return callID, nil
+	return a.dial(ctx, target, "", true)
+}
+
+// DialVideoNamed 带对端显示名的视频呼叫（见 DialNamed）。
+func (a *App) DialVideoNamed(ctx context.Context, target, displayName string) (string, error) {
+	return a.dial(ctx, target, displayName, true)
 }
 
 // AnswerVideo 视频接听（打开摄像头，双向视频）。
@@ -704,26 +789,40 @@ func (a *App) VideoDevices() []VideoDevice {
 // ---------------------------------------------------------------------------
 
 // OnIncoming 呼入。创建呼入通话并进入振铃状态。
-func (a *App) OnIncoming(callID, remote, remoteName string, hasVideo bool) {
+func (a *App) OnIncoming(callID string, info IncomingCall) {
+	// From 的 display-name 可能只是网关的占位（如 FreeSWITCH 的
+	// "Outbound Call"）：过滤掉，显示回退到号码/通信录名称。
+	remoteName := CleanDisplayName(info.RemoteName)
 	a.upsertCall(&Call{
 		ID:         callID,
 		Direction:  "incoming",
-		Remote:     remote,
+		Remote:     info.Remote,
 		RemoteName: remoteName,
+		PeerName:   info.PeerName,
+		Consult:    info.Consult,
 		State:      CallRinging,
-		HasVideo:   hasVideo,
+		HasVideo:   info.HasVideo,
 	})
-	// 通话记录（REQ-CALL-007）：来电的起点即振铃开始时刻
-	a.logStart(CallRecord{
-		CallID:     callID,
-		Direction:  "incoming",
-		Remote:     remote,
-		RemoteName: remoteName,
-		StartedAt:  time.Now(),
-		HasVideo:   hasVideo,
-	})
-	logx.Logger().Info("收到来电", "callId", callID, "remote", remote, "hasVideo", hasVideo)
+	// 通话记录（REQ-CALL-007）：来电的起点即振铃开始时刻。
+	// 主叫就是本机分机号的通话不记（平台监听/会议等场景会以本机号码回呼话机，
+	// 记下来只会把通话记录刷满自己呼自己的条目）。
+	if a.selfCaller(info.Remote) {
+		logx.Logger().Info("主叫为本机的通话不记入通话记录",
+			"callId", callID, "remote", info.Remote)
+	} else {
+		a.logStart(CallRecord{
+			CallID:     callID,
+			Direction:  "incoming",
+			Remote:     info.Remote,
+			RemoteName: remoteName,
+			StartedAt:  time.Now(),
+			HasVideo:   info.HasVideo,
+		})
+	}
+	logx.Logger().Info("收到来电", "callId", callID, "remote", info.Remote,
+		"peerName", info.PeerName, "consult", info.Consult, "hasVideo", info.HasVideo)
 	a.publishCall("call.incoming", callID)
+	a.notifyCallStatus() // 心跳 status：ringing
 }
 
 // OnVideoState 视频状态变化（协商成功、开关切换、拿到对端分辨率）。
@@ -762,6 +861,7 @@ func (a *App) OnEstablished(callID string) {
 		logx.Logger().Info("通话建立", "callId", callID)
 		a.logAnswered(callID) // 通话记录：接通时刻（先写记录再发事件）
 		a.publishCall("call.established", callID)
+		a.notifyCallStatus() // 心跳 status：talking / holding
 	}
 }
 
@@ -776,21 +876,34 @@ func (a *App) OnTerminated(callID, reason string) {
 	}
 	logx.Logger().Info("通话结束", "callId", callID, "reason", reason, "missed", missed)
 	a.logFinish(callID, reason, missed) // 通话记录：先写记录再发事件
+	// 服务端面板随通话结束清空（页面据此关闭面板）
+	a.clearServerPanels()
 	a.publishCall("call.terminated", callID, "reason", reason, "missed", missed)
+	a.notifyCallStatus() // 心跳 status：idle
 }
 
 // OnFailed 呼叫失败。
+//
+// **CTI 接管的话务**（收到过 `CALL_RINGING`，`CTI.CallPhase` 为 ringing/talking）
+// 在事件里带 `ctiManaged=true`：SIP 侧的原因（如「603 Decline」）不再由界面
+// 弹提示——CTI 随后会下发 `CALL_FAILED`，由 `cti.failed` 给出统一的中文消息
+// （「呼叫未接通」等）。否则用户会同时看到两条失败消息（用户实测）。
 func (a *App) OnFailed(callID, reason string) {
-	var missed bool
+	var missed, ctiManaged bool
 	if !a.updateCall(callID, func(c *Call) {
 		missed = missedOnEnd(c, reason)
+		ctiManaged = c.CTI.CallPhase == "ringing" || c.CTI.CallPhase == "talking"
 		c.State = CallTerminated
 	}) {
 		return
 	}
-	logx.Logger().Info("呼叫失败", "callId", callID, "reason", reason, "missed", missed)
+	logx.Logger().Info("呼叫失败", "callId", callID, "reason", reason,
+		"missed", missed, "ctiManaged", ctiManaged)
 	a.logFinish(callID, reason, missed) // 通话记录：先写记录再发事件
-	a.publishCall("call.failed", callID, "reason", reason, "missed", missed)
+	a.clearServerPanels()               // 服务端面板随通话结束清空
+	a.publishCall("call.failed", callID, "reason", reason, "missed", missed,
+		"ctiManaged", ctiManaged)
+	a.notifyCallStatus() // 心跳 status：idle
 }
 
 // isHandledLocally 结束原因是否属于「本端当场处理」：振铃中拒接（603，
@@ -825,6 +938,120 @@ func (a *App) OnRegisterState(state RegisterState, reason string) {
 	})
 }
 
+// OnRemoteCommand 处理服务端 NOTIFY 控制指令（REQ-ACC-025，协议见
+// docs/cti-sip-phone-protocol.md）。由 sip 层的 NOTIFY handler 在独立
+// goroutine 里调用（不阻塞信令事务；200 OK 已在 handler 内发出）。
+//
+// **视频能力一律"静默降级"**：withVideo=true 但话机未开启视频功能
+// （VideoUsable：构建支持 + 配置总开关）或呼入本身不含视频（Call.HasVideo）
+// 时，改为纯音频拨号/接听，只记一条 Info 日志，不报错、不中断指令。
+func (a *App) OnRemoteCommand(cmd RemoteCommand) {
+	logx.Logger().Info("收到服务端控制指令", "kind", cmd.Kind,
+		"dest", cmd.DestNo, "withVideo", cmd.WithVideo, "reason", cmd.Reason)
+	switch cmd.Kind {
+	case "unregister":
+		// 坐席登出通知注销（与托盘「退出账号」一致：禁用账户并立即注销）
+		logx.Logger().Warn("服务端要求注销（MSP_UNREGISTER），退出账号并停止注册周期",
+			"reason", cmd.Reason, "agent", cmd.Agent)
+		if err := a.SetRegistered(false); err != nil {
+			logx.Logger().Warn("按服务端通知注销失败", "reason", cmd.Reason, "err", err)
+		}
+
+	case "dial":
+		if strings.TrimSpace(cmd.DestNo) == "" {
+			logx.Logger().Warn("服务端拨号指令缺少 destNo，忽略")
+			return
+		}
+		video := cmd.WithVideo && a.VideoUsable()
+		if cmd.WithVideo && !video {
+			logx.Logger().Info("服务端要求视频呼叫，但视频功能不可用，降级为纯音频呼叫",
+				"dest", cmd.DestNo)
+		}
+		var (
+			callID string
+			err    error
+		)
+		if video {
+			callID, err = a.DialVideo(context.Background(), cmd.DestNo)
+		} else {
+			callID, err = a.Dial(context.Background(), cmd.DestNo)
+		}
+		if err != nil {
+			logx.Logger().Warn("服务端拨号失败", "dest", cmd.DestNo, "video", video, "err", err)
+			return
+		}
+		logx.Logger().Info("服务端拨号已发起", "dest", cmd.DestNo, "video", video, "callId", callID)
+
+	case "answer":
+		c := a.ringingIncomingCall()
+		if c == nil {
+			logx.Logger().Warn("服务端接听指令：当前没有等待接听的来电，忽略")
+			return
+		}
+		video := cmd.WithVideo && a.VideoUsable() && c.HasVideo
+		if cmd.WithVideo && !video {
+			logx.Logger().Info("服务端要求视频接听，但视频功能或本呼入视频不可用，降级为纯音频接听",
+				"callId", c.ID)
+		}
+		if err := a.AnswerOrVideo(c.ID, video); err != nil {
+			logx.Logger().Warn("服务端接听失败", "callId", c.ID, "video", video, "err", err)
+		}
+
+	case "hangup":
+		c := a.activeCall()
+		if c == nil {
+			logx.Logger().Warn("服务端挂断指令：当前没有进行中的通话，忽略")
+			return
+		}
+		if err := a.Hangup(c.ID); err != nil {
+			logx.Logger().Warn("服务端挂断失败", "callId", c.ID, "err", err)
+		}
+
+	case "autoanswer":
+		if cmd.AutoAnswer == nil {
+			logx.Logger().Warn("服务端自动接听指令缺少 autoAnswer，忽略")
+			return
+		}
+		if err := a.SetAutoAnswer(*cmd.AutoAnswer); err != nil {
+			logx.Logger().Warn("服务端设置自动接听失败", "enabled", *cmd.AutoAnswer, "err", err)
+		}
+
+	default:
+		logx.Logger().Warn("未知的服务端控制指令，忽略", "kind", cmd.Kind)
+	}
+}
+
+// AnswerOrVideo 按是否视频接听当前来电（NOTIFY 接听指令用）：video=true 走
+// 视频接听（未接通前可打开摄像头），否则普通接听（answer 里 m=video 0，
+// 不接受视频）。
+func (a *App) AnswerOrVideo(callID string, video bool) error {
+	if video {
+		return a.AnswerVideo(callID)
+	}
+	return a.Answer(callID)
+}
+
+// ringingIncomingCall 当前振铃中的**呼入**（服务端接听指令的目标）。
+// 单通话限制下最多一条；没有则返回 nil。
+func (a *App) ringingIncomingCall() *Call {
+	for _, c := range a.State().Calls {
+		if c.Direction == "incoming" && c.State == CallRinging {
+			return &c
+		}
+	}
+	return nil
+}
+
+// activeCall 当前进行中的通话（振铃或已接通，服务端挂断指令的目标）。
+func (a *App) activeCall() *Call {
+	for _, c := range a.State().Calls {
+		if c.State == CallRinging || c.State == CallEstablished {
+			return &c
+		}
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // 内部工具
 // ---------------------------------------------------------------------------
@@ -833,6 +1060,14 @@ func (a *App) setRegister(state RegisterState, reason string) {
 	a.mu.Lock()
 	a.reg = RegisterInfo{State: state, Account: a.cfg.Account.Account, Reason: reason}
 	a.mu.Unlock()
+
+	// CTI 心跳（协议 §10）：注册成功就开始周期发，注销就停。
+	switch state {
+	case RegRegistered:
+		a.startHeartbeat()
+	case RegUnregistered:
+		a.stopHeartbeat()
+	}
 }
 
 // HasActiveCall 是否存在进行中的通话（振铃或已接通）。
@@ -859,6 +1094,9 @@ func (a *App) upsertCall(c *Call) {
 	a.mu.Lock()
 	if _, ok := a.calls[c.ID]; !ok {
 		a.callOrder = append(a.callOrder, c.ID)
+		if c.startedAt.IsZero() {
+			c.startedAt = time.Now()
+		}
 		// 新通话的音量/增益默认 100%（0 在这两个字段里表示"禁用"，不能靠零值默认；
 		// 界面在通话建立时会按会话内记忆再下发一次真实值）
 		if c.MicGain == 0 {
@@ -904,4 +1142,7 @@ func (a *App) publishCall(event, callID string, extra ...any) {
 		}
 	}
 	a.bus.Publish(event, data)
+	// 通话面板快照随之更新（REQ-WS-023）：页面/SDK 基于 call.panel 构建面板，
+	// 不必自己解析 call.* / cti.* 明细；面板关闭时两个 panel 为 null。
+	a.publishCallPanel()
 }

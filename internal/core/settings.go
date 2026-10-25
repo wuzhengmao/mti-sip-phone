@@ -86,23 +86,24 @@ func (a *App) NotifyAudioReady() {
 // AccountSnapshot 账户配置快照（REQ-WS-016）：**不含密码**，
 // 只给一个 passwordSet 布尔值——网页永远拿不到明文，也不需要回显。
 type AccountSnapshot struct {
-	Enabled     bool   `json:"enabled"`
-	Server      string `json:"server"`
-	Port        int    `json:"port"`
-	Expires     int    `json:"expires"`
-	RPort       bool   `json:"rport"`
-	ChkOpt      bool   `json:"optchk"`
-	STUNEnabled bool   `json:"stunEnabled"`
-	STUNServer  string `json:"stunServer"`
-	Proxy       string `json:"proxy"`
-	Transport   string `json:"transport"`
-	TLSVerify   bool   `json:"tlsVerify"`
-	SRTP        string `json:"srtp"`
-	Domain      string `json:"domain"`
-	PublicIP    string `json:"publicIP"`
-	Account     string `json:"account"`
-	AuthUser    string `json:"authUser"`
-	DisplayName string `json:"displayName"`
+	Enabled bool   `json:"enabled"`
+	Server  string `json:"server"`
+	Port    int    `json:"port"`
+	Expires int    `json:"expires"`
+	// CTIHeartbeat CTI 心跳间隔（秒，坐席模式；0 = 未配置，按默认 20s）
+	CTIHeartbeat int    `json:"ctiHeartbeat"`
+	RPort        bool   `json:"rport"`
+	STUNEnabled  bool   `json:"stunEnabled"`
+	STUNServer   string `json:"stunServer"`
+	Proxy        string `json:"proxy"`
+	Transport    string `json:"transport"`
+	TLSVerify    bool   `json:"tlsVerify"`
+	SRTP         string `json:"srtp"`
+	Domain       string `json:"domain"`
+	PublicIP     string `json:"publicIP"`
+	Account      string `json:"account"`
+	AuthUser     string `json:"authUser"`
+	DisplayName  string `json:"displayName"`
 	// PasswordSet 是否已设置密码（网页的密码框据此决定占位文案）
 	PasswordSet bool `json:"passwordSet"`
 }
@@ -156,24 +157,24 @@ func (a *App) ConfigSnapshot() ConfigSnapshot {
 
 	return ConfigSnapshot{
 		Account: AccountSnapshot{
-			Enabled:     acc.Enabled,
-			Server:      acc.Server,
-			Port:        acc.Port,
-			Expires:     acc.Expires,
-			RPort:       acc.RPort,
-			ChkOpt:      acc.ChkOpt,
-			STUNEnabled: acc.STUNEnabled,
-			STUNServer:  acc.STUNServer,
-			Proxy:       acc.Proxy,
-			Transport:   acc.Transport,
-			TLSVerify:   acc.TLSVerify,
-			SRTP:        acc.SRTP,
-			Domain:      acc.Domain,
-			PublicIP:    acc.PublicIP,
-			Account:     acc.Account,
-			AuthUser:    acc.AuthUser,
-			DisplayName: acc.DisplayName,
-			PasswordSet: acc.Password != "" || acc.PasswordEnc != "",
+			Enabled:      acc.Enabled,
+			Server:       acc.Server,
+			Port:         acc.Port,
+			Expires:      acc.Expires,
+			CTIHeartbeat: acc.CTIHeartbeat,
+			RPort:        acc.RPort,
+			STUNEnabled:  acc.STUNEnabled,
+			STUNServer:   acc.STUNServer,
+			Proxy:        acc.Proxy,
+			Transport:    acc.Transport,
+			TLSVerify:    acc.TLSVerify,
+			SRTP:         acc.SRTP,
+			Domain:       acc.Domain,
+			PublicIP:     acc.PublicIP,
+			Account:      acc.Account,
+			AuthUser:     acc.AuthUser,
+			DisplayName:  acc.DisplayName,
+			PasswordSet:  acc.Password != "" || acc.PasswordEnc != "",
 		},
 		Audio: AudioSnapshot{
 			AudioConfig:         audio,
@@ -204,27 +205,65 @@ func (a *App) ConfigSnapshot() ConfigSnapshot {
 // AccountPatch 账户配置补丁：字段为指针，nil = 不改（口径与
 // system.setUpdateConfig 一致）。
 type AccountPatch struct {
-	Enabled     *bool
-	Server      *string
-	Port        *int
-	Expires     *int
-	RPort       *bool
-	ChkOpt      *bool
-	STUNEnabled *bool
-	STUNServer  *string
-	Proxy       *string
-	Transport   *string
-	TLSVerify   *bool
-	SRTP        *string
-	Domain      *string
-	PublicIP    *string
-	Account     *string
-	AuthUser    *string
-	DisplayName *string
+	Enabled *bool
+	Server  *string
+	Port    *int
+	Expires *int
+	// CTIHeartbeat CTI 心跳间隔（秒，0 = 用默认 20s）：坐席模式下周期发
+	// MSP_HEARTBEAT，报文 expires = 间隔 × 2.5。
+	CTIHeartbeat *int
+	RPort        *bool
+	STUNEnabled  *bool
+	STUNServer   *string
+	Proxy        *string
+	Transport    *string
+	TLSVerify    *bool
+	SRTP         *string
+	Domain       *string
+	PublicIP     *string
+	Account      *string
+	AuthUser     *string
+	DisplayName  *string
 	// Password 非 nil 时改密码（空串 = 清空密码）；nil = 保持原密码
 	Password *string
 	// ClearPassword 显式清空密码（与 Password 二选一，ClearPassword 优先）
 	ClearPassword bool
+}
+
+// SetRegistered 登录/退出账号（REQ-ACC-024），供托盘菜单的
+// 「登录账号 / 退出账号」、网页注册徽章与 SDK 的 register()/unregister()、
+// 以及服务端 NOTIFY 注销共用——**共用「启用账户」这一个配置项**：
+//   - on=true（登录账号）：启用账户 → UpdateAccount → **立即注册**
+//     （已有注册循环时 sip.Phone.Register 会重启它，幂等）；
+//   - on=false（退出账号）：禁用账户 → UpdateAccount → **发 expires=0、停注册
+//     周期**；之后启动也不会自动注册（与配置页「启用账户」勾选是同一开关）。
+//
+// 注册/注销在后台进行（不阻塞调用方），结果经 register.state 事件回显；
+// 返回的是落盘错误。状态未变时直接返回（幂等，NOTIFY 重传不会重复注销）。
+func (a *App) SetRegistered(on bool) error {
+	a.mu.RLock()
+	acc := a.cfg.Account
+	a.mu.RUnlock()
+	if acc.Enabled == on {
+		return nil
+	}
+	acc.Enabled = on
+	if err := a.UpdateAccount(acc); err != nil {
+		return err
+	}
+	// 广播账户配置变化（与 PatchAccount 一致）：网页配置页的「启用账户」
+	// 勾选随之自动更新（桌面配置页在 register.state 事件里同步）。
+	a.bus.Publish("system.config", map[string]any{
+		"section": "account", "values": a.ConfigSnapshot().Account,
+	})
+	return nil
+}
+
+// AccountEnabled 当前「启用账户」配置（加锁读，供界面同步勾选状态）。
+func (a *App) AccountEnabled() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.Account.Enabled
 }
 
 // PatchAccount 按补丁改账户配置：校验 →（内存 + 落盘）→ 重新注册。
@@ -252,11 +291,14 @@ func (a *App) PatchAccount(p AccountPatch) (AccountSnapshot, error) {
 		}
 		acc.Expires = *p.Expires
 	}
+	if p.CTIHeartbeat != nil {
+		if *p.CTIHeartbeat < 0 || *p.CTIHeartbeat > 3600 {
+			return AccountSnapshot{}, fmt.Errorf("%w: CTI 心跳间隔必须在 0–3600 秒", ErrConfigInvalid)
+		}
+		acc.CTIHeartbeat = *p.CTIHeartbeat
+	}
 	if p.RPort != nil {
 		acc.RPort = *p.RPort
-	}
-	if p.ChkOpt != nil {
-		acc.ChkOpt = *p.ChkOpt
 	}
 	if p.STUNEnabled != nil {
 		acc.STUNEnabled = *p.STUNEnabled

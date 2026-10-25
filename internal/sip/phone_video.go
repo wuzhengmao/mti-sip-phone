@@ -55,7 +55,7 @@ func (p *Phone) VideoCallEnabled() bool { return p.videoConfig().Enabled() }
 
 // SetVideoCallEnabled 开/关视频通话总开关（配置页勾选项，立即生效）。
 // 只影响之后发起的呼叫与之后的来电：正在进行的通话里已经协商好的视频段不动
-//（关掉视频开关时界面在主窗体上，而主窗体在通话期间是隐藏的，实际碰不到）。
+// （关掉视频开关时界面在主窗体上，而主窗体在通话期间是隐藏的，实际碰不到）。
 func (p *Phone) SetVideoCallEnabled(on bool) error {
 	p.videoMu.Lock()
 	p.videoCfg.Disabled = !on
@@ -249,7 +249,7 @@ func (p *Phone) AnswerVideo(callID string) error {
 // ⚠️ 三个概念别混：`m=video 0` 是**拒绝视频**（对端也不发，answerNoVideo）；
 // `recvonly` 是**只收不发**（能看对方，不开摄像头——摄像头被禁用/不可用时
 // answerSendRecv 会退化成它）；`sendrecv` 是双向。自动接听曾把前两者搞混
-//（传 false 却按 recvonly 注释理解），表现为「视频呼叫自动接听只接通音频」。
+// （传 false 却按 recvonly 注释理解），表现为「视频呼叫自动接听只接通音频」。
 //
 // 注意：sipgo 的 RespondSDP 发送 200 后按 RFC 6026 阻塞等待对端 ACK
 // （最长 64*T1=32 秒），必须放在后台 goroutine 执行，否则阻塞 UI 线程

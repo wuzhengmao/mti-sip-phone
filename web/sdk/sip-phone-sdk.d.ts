@@ -48,10 +48,21 @@ declare class SipPhoneSDK {
   close(): void;
 
   /**
+   * 订阅**通话面板快照**（REQ-WS-023 / REQ-SDK-010）：负载类型
+   * `SipCallPanelState`（两个 panel 都为 null 表示没有通话）。
+   */
+  on(event: 'call.panel', fn: (data: SipCallPanelState) => void): this;
+
+  /**
    * 订阅事件；'*' 订阅全部。
    * 事件名：call.incoming / call.ringing / call.dialing / call.established /
    *         call.terminated / call.failed / call.muted / call.audio（麦克风/扬声器开关）/
-   *         call.video / video.web / video.transform /
+   *         call.video / call.panel（通话面板快照，见 SipCallPanelState）/
+   *         cti.agent（坐席模式/置忙变化）/
+   *         cti.state（通话话务状态变化：{callId, call}）/
+   *         cti.failed（CTI 话务失败：{callId, kind, reason, message}）/
+   *         cti.result（CTI 指令结果：{seq, success, code, message, action, data?}）/
+   *         video.web / video.transform /
    *         video.frame（订阅视频后逐帧推送）/
    *         register.state / system.state / system.ready / system.update /
    *         system.updateConfig / system.autoAnswer /
@@ -60,14 +71,17 @@ declare class SipPhoneSDK {
    */
   on(event: string, fn: (data: any) => void): this;
 
+  /** 取消订阅通话面板快照 */
+  off(event: 'call.panel', fn: (data: SipCallPanelState) => void): this;
+
   /** 取消订阅 */
   off(event: string, fn: (data: any) => void): this;
 
   /** 拨号；options.video=true 发起视频呼叫 */
-  dial(target: string, options?: { video?: boolean }): Promise<{ callId: string }>;
+  dial(target: string, options?: { video?: boolean; name?: string }): Promise<{ callId: string }>;
 
-  /** 视频呼叫（dial 的便捷写法） */
-  dialVideo(target: string): Promise<{ callId: string }>;
+  /** 视频呼叫（dial 的便捷写法）；name 为对端显示名（可选，优先于通信录名称） */
+  dialVideo(target: string, name?: string): Promise<{ callId: string }>;
 
   /** 接听；options.video=true 视频接听（打开摄像头双向视频） */
   answer(callId: string, options?: { video?: boolean }): Promise<{ callId: string }>;
@@ -104,6 +118,81 @@ declare class SipPhoneSDK {
 
   /** 自动接听开关（与软电话界面按钮共用一份状态；变更推 system.autoAnswer 事件） */
   setAutoAnswer(enabled: boolean): Promise<{ enabled: boolean }>;
+
+  /**
+   * 登录账号（REQ-ACC-024）：启用账户并立即注册。
+   * 结果经 `register.state` 事件回显。
+   */
+  register(): Promise<{ enabled: boolean; state: string }>;
+
+  /**
+   * 退出账号（REQ-ACC-024）：发 expires=0、停止注册周期并禁用账户
+   * （启动/重连都不会自动恢复，直到再次 register 或 sip:// 拉起）。
+   */
+  unregister(): Promise<{ enabled: boolean; state: string }>;
+
+  // ---- CTI 坐席/话务（REQ-ACC-026 / REQ-ACC-034 / REQ-ACC-035）----
+
+  /**
+   * 在线座席列表（CTI `listAgents`）。非坐席模式以 code='cti_not_agent' 拒绝。
+   */
+  listAgents(): Promise<{ agents: SipAgent[]; count: number }>;
+
+  /**
+   * 坐席置忙/置闲（setBusy / setIdle）。结果经 `cti.agent` 事件回显。
+   */
+  setAgentBusy(busy: boolean): Promise<SipCTIActionResult>;
+
+  /** 坐席置闲 */
+  setIdle(): Promise<SipCTIActionResult>;
+
+  /** 坐席置忙 */
+  setBusy(): Promise<SipCTIActionResult>;
+
+  /**
+   * 发起一条 CTI 反向控制指令（与桌面通话面板的按钮一致）。
+   * 指令等待 MSP_RESULT 后 resolve；失败 code 为 cti_failed / cti_busy /
+   * cti_timeout / cti_not_agent。
+   */
+  ctiAction(action: string, arg?: string | string[]): Promise<SipCTIActionResult>;
+
+  /** 发起咨询（被咨询方 = target） */
+  consult(target: string): Promise<SipCTIActionResult>;
+  /** 咨询转三方 */
+  consultThreeWay(target: string): Promise<SipCTIActionResult>;
+  /** 直接转移 */
+  transfer(target: string): Promise<SipCTIActionResult>;
+  /** 咨询转移 */
+  consultTransfer(target: string): Promise<SipCTIActionResult>;
+  /** 监听坐席（班长模式） */
+  monitor(target: string): Promise<SipCTIActionResult>;
+  /** 代接坐席的振铃来电 */
+  takeover(target: string): Promise<SipCTIActionResult>;
+  /** 三方通话里强制挂断某一方（仅 owner） */
+  exitThreeWay(target: string): Promise<SipCTIActionResult>;
+  /** 结束咨询 */
+  finishConsult(): Promise<SipCTIActionResult>;
+  /** 结束会议（owner） */
+  finishConference(): Promise<SipCTIActionResult>;
+  /** 监听耳语 */
+  whisper(): Promise<SipCTIActionResult>;
+  /** 退出监听耳语（恢复静默监听） */
+  stopWhisper(): Promise<SipCTIActionResult>;
+  /** 监听插话（强插） */
+  intervene(): Promise<SipCTIActionResult>;
+  /** 监听强拦 */
+  intercept(): Promise<SipCTIActionResult>;
+  /** 把成员加入会议 */
+  addConferenceMembers(members: string | string[]): Promise<SipCTIActionResult>;
+  /** 从会议移除成员 */
+  removeConferenceMembers(members: string | string[]): Promise<SipCTIActionResult>;
+
+  /** 会议成员会控（owner）：禁音/取消禁音 */
+  setConferenceMemberMuted(member: string, muted: boolean): Promise<SipCTIActionResult>;
+  /** 会议成员会控（owner）：禁听/取消禁听 */
+  setConferenceMemberDeafened(member: string, deafened: boolean): Promise<SipCTIActionResult>;
+  /** 会议成员会控（owner）：禁视频/取消禁视频 */
+  setConferenceMemberVideoMuted(member: string, muted: boolean): Promise<SipCTIActionResult>;
 
   /**
    * 导出通信录为 CSV 文本（表头「号码,名称,备注,常用」，带 UTF-8 BOM）。
@@ -157,6 +246,14 @@ declare class SipPhoneSDK {
     noUI?: boolean;
     /** 实例槽位（0 = 主实例，≥1 = 沙箱实例） */
     instance?: number;
+    /** 坐席模式（REQ-ACC-028）：是否在线（非坐席模式为 false） */
+    agentOnline?: boolean;
+    /** 坐席显示名（AGENT_ONLINE 的 displayName） */
+    agentDisplayName?: string;
+    /** 坐席模式：none / normal / dial_out / monitor */
+    agentMode?: string;
+    /** 坐席是否置忙 */
+    agentBusy?: boolean;
     register: { state: string; account: string; reason: string };
     calls: Array<{
       id: string;
@@ -178,6 +275,8 @@ declare class SipPhoneSDK {
       };
       /** 通信录匹配结果（命中才有）：名称/备注/是否常用（REQ-UI-037） */
       contact?: SipContactInfo;
+      /** 复杂话务状态（咨询/三方/监听/会议，REQ-ACC-026） */
+      cti?: SipCTIState;
     }>;
     update?: SipUpdateStatus;
   }>;
@@ -353,6 +452,10 @@ interface SipCall {
   direction: 'incoming' | 'outgoing';
   remote: string;
   remoteName: string;
+  /** INVITE 的 Call-Info display-name（服务端下发的对端名称，优先于通信录显示；可能为空） */
+  peerName?: string;
+  /** 本通是服务端推来的咨询腿（Call-Info call-type=consult） */
+  consult?: boolean;
   state: 'ringing' | 'established' | 'terminated';
   muted: boolean;
   /** 麦克风静音（纯本地动作） */
@@ -376,6 +479,181 @@ interface SipCall {
   };
   /** 通信录匹配结果（命中才有）：页面可直接显示名称、★ 与备注（REQ-UI-037） */
   contact?: SipContactInfo;
+  /** 复杂话务状态（咨询/三方/监听/会议，REQ-ACC-026）：双方通话时为空/零值 */
+  cti?: SipCTIState;
+}
+
+/** 在线座席列表的一项（cti.listAgents） */
+interface SipAgent {
+  /** 座席号（分机号） */
+  agent: string;
+  /** 显示名 */
+  displayName: string;
+  /** 技能组（"110:1,122:1"） */
+  acd: string;
+  /** 坐席模式：normal / dial_out / monitor */
+  agentMode: string;
+  /** 座席状态：free / dialing / ringing / talking / busy / leave / not_ready /
+   *  free_offhook / miss_phone / offline */
+  agentStatus: string;
+}
+
+/** cti.action / cti.listAgents 的结果 */
+interface SipCTIActionResult {
+  /** 动作名（与服务端回显一致） */
+  action: string;
+  /** 指令序号（MSP_ACTION 的 seq） */
+  seq: string;
+  /** 带返回值的动作的结果（如 listAgents 的原始数组） */
+  data?: any;
+}
+
+/** 通话的复杂话务状态（协议 §16，MSP_EVENT_* 翻译后的结果） */
+interface SipCTIState {
+  /** twoParty / consult / threeWay / monitor / conference */
+  talkState: string;
+  /** 另有一通咨询进行中（本机不是发起方）：隐藏话务入口 */
+  consultInProgress?: boolean;
+  consulter?: string;
+  consulterName?: string;
+  consultee?: string;
+  consulteeName?: string;
+  consultPhase?: string;
+  owner?: string;
+  ownerName?: string;
+  firstParty?: string;
+  firstPartyName?: string;
+  secondParty?: string;
+  secondPartyName?: string;
+  thirdParty?: string;
+  thirdPartyName?: string;
+  monitor?: string;
+  monitorName?: string;
+  target?: string;
+  targetName?: string;
+  monitorPhase?: string;
+  /** 被监听话务的主被叫（MONITOR_STARTED 携带；CALL_* 双方通话事件复用） */
+  callerNo?: string;
+  callerName?: string;
+  calledNo?: string;
+  calledName?: string;
+  /** CTI 侧话务 ID（CALL_* 事件，SIP 信令里没有） */
+  mspCallId?: string;
+  /** 双方通话阶段：dialing / ringing / talking（CALL_RINGING 时显示「振铃中」） */
+  callPhase?: string;
+  /** 接听坐席（CALL_INCOMING/CONNECTED/FINISHED/FAILED） */
+  agent?: string;
+  agentName?: string;
+  confId?: string;
+  members?: Array<{
+    telNo: string;
+    displayName?: string;
+    state: string;
+    skillGroup?: string;
+  }>;
+}
+
+/** 通话面板快照（事件 `call.panel`，REQ-WS-023 / REQ-SDK-010）。
+ *
+ * 应用直接基于它构建自己的通话面板，不必解析 `call.*` / `cti.*` 明细：
+ * `sdk.on('call.panel', (p) => { ... })`。两个 panel 都为 null 表示没有通话。 */
+interface SipCallPanelState {
+  /** 坐席模式：normal / dial_out / monitor（非坐席模式为 none） */
+  agentMode: string;
+  /** 坐席是否置忙 */
+  isBusy: boolean;
+  /** 通话面板；没有进行中的通话时为 null */
+  callPanel: SipCallPanel | null;
+  /** 会议面板（会议进行中才有），否则 null */
+  conferencePanel: SipConferencePanel | null;
+}
+
+/** 面板里的一个参与方：号码 + 名称 + 通信录备注。 */
+interface SipPanelParty {
+  number: string;
+  name?: string;
+  /** 通信录备注：**仅当协议没有给名称、回退到通信录时才有**（此时 name 也来自通信录） */
+  note?: string;
+}
+
+/** 通话面板里的一方（子话务）。字段与 CTI 协议 §16.2 的 `callList` 项一致
+ *  （话机未用到的属性也原样保留，应用可以按需使用）；唯一的改写是 `peer`：
+ *  协议里是号码字符串（名称另给 `peerName`），这里合并成
+ *  `{number,name,note}` 对象。 */
+interface SipCallPanelLeg {
+  /** 主叫号码（协议原样） */
+  callerNo?: string;
+  /** 被叫号码（协议原样） */
+  calledNo?: string;
+  /** 对端（`peer` 号码 + `peerName` 名称 + 通信录备注）；监听话务时 peer 是主叫 */
+  peer: SipPanelParty;
+  /** 是否为内部分机（协议原样） */
+  intercom?: boolean;
+  /** 该腿的技能组（外线呼入分配时可能有值） */
+  skillGroup?: string;
+  /** 服务端给的腿类型（incoming/outgoing/consult） */
+  callType?: string;
+  /** 子话务状态（协议原属性名 `callStatus`）：incoming / dialing / ringing /
+   *  talking / holding（holding = 咨询期间原通话被保持） */
+  callStatus: string;
+  /** 子话务开始时间（毫秒时间戳，协议原样） */
+  startTime?: number;
+  /** 振铃时间（毫秒时间戳，协议原样） */
+  ringingTime?: number;
+  /** 摘机时间（毫秒时间戳，协议原样） */
+  offhookTime?: number;
+  /** 本端补充（非协议）：仅监听话务，peer=主叫、target=被叫 */
+  target?: SipPanelParty;
+}
+
+/** 通话面板。字段与 CTI 协议 §16.2 一致（含话机未使用的属性）。 */
+interface SipCallPanel {
+  callId: string;
+  /** 坐席号 */
+  agent?: string;
+  /** 话务开始时间（毫秒时间戳） */
+  startTime: number;
+  /** 面板状态文案（本端补充）：拨号中/振铃中/来电/通话中/咨询呼叫中/咨询振铃中/
+   *  咨询通话中/三方通话中/监听中/监听耳语中/会议中/通话保持中 */
+  title: string;
+  /** 面板状态（据此决定显示哪些功能按钮）：dialing / ringing / incoming / talking /
+   *  consult-dialing / consult-ringing / consult-talking / three-way / monitoring / whispering */
+  state: string;
+  /** 服务端面板的通话类型：incoming / outgoing / transfer / monitor */
+  callType?: string;
+  /** 服务端面板的话务模式：normal / consult / three-way / monitor */
+  callMode?: string;
+  /** 当前操作的发起方分机（协议原样，`callMode=normal` 时无此字段）：咨询是
+   *  咨询方，三方是发起方，监听是班长。**只有 owner 显示该话务的发起方按钮**
+   *  （咨询接通后 owner 显示三方/转移；三方的移除按钮只有 owner 显示）。 */
+  owner?: string;
+  /** 失败原因（仅失败时）：cancel / refuse / takeover / fail */
+  failCause?: string;
+  callList: SipCallPanelLeg[];
+}
+
+/** 会议成员。字段与 CTI 协议 §16.3 的 `memberList` 项一致；`member` 与 `peer`
+ *  一样合并成 `{number,name,note}` 对象（协议里是 `member` 号码 + `memberName`）。 */
+interface SipConferenceMemberPanel {
+  /** 成员（号码 + 名称 + 通信录备注） */
+  member: SipPanelParty;
+  /** 是否为内部分机 */
+  intercom?: boolean;
+  /** 是否主持人 */
+  owner: boolean;
+  /** 成员状态（透传 CTI：dialing/ringing/talking/holding/hangup，会控后缀 muted/deafened/vmuted，可用 "+" 组合） */
+  state: string;
+  /** 成员加入时间（毫秒时间戳） */
+  timestamp?: number;
+}
+
+/** 会议面板。字段与 CTI 协议 §16.3 一致。 */
+interface SipConferencePanel {
+  confId: string;
+  /** 主持人号码 */
+  owner: string;
+  /** 成员列表（主持人固定第一行） */
+  memberList: SipConferenceMemberPanel[];
 }
 
 /** 通话对象里携带的通信录信息（对端号码在通信录里命中时才有） */
@@ -561,6 +839,8 @@ interface SipCallRecord {
   direction: 'incoming' | 'outgoing';
   remote: string;
   remoteName: string;
+  /** 座席显示名（在线座席列表直接呼出时记录；展示时优先于通信录名称） */
+  displayName: string;
   startedAt: number;
   /** 0 = 未接通 */
   answeredAt: number;
@@ -572,14 +852,6 @@ interface SipCallRecord {
   reason: string;
   /** 号码命中通信录时的条目（软电话侧按号码规范化解析，口径同桌面通话记录页） */
   contact?: SipContactInfo;
-}
-
-/** 通信录条目（与 GET /api/contacts 的字段一致） */
-export interface SipContactJSON {
-  number: string;
-  name: string;
-  note: string;
-  starred: boolean;
 }
 
 /** 新增/修改联系人的入参 */
@@ -646,7 +918,6 @@ interface SipAccountSnapshot {
   port: number;
   expires: number;
   rport: boolean;
-  optchk: boolean;
   stunEnabled: boolean;
   stunServer: string;
   proxy: string;

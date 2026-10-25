@@ -254,7 +254,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 | 音频设备 / 提示音 / 按键音 | `internal/audio/manager.go`、`backend_malgo.go`、`tone.go` |
 | WS 方法 / 事件 | `internal/wsapi/{protocol,handler,server}.go`（协议文档同步 `docs/ws-protocol.md`） |
 | 网页视频订阅 | `internal/wsapi/video.go` + `web/sdk/sip-phone-sdk.js` |
-| 网页控制台（五个页面） | `web/index.html`（外壳，单页 + hash 路由）+ `web/css/app.css` + `web/js/{common,icons,store,callbar,app}.js` + `web/js/views/{call,history,contacts,settings,diag}.js`（改完**重建二进制 + 重启**才生效——都是内嵌资源；新增文件要同步 `internal/wsapi/server.go` 的白名单） |
+| 网页控制台（五个页面） | `web/index.html`（外壳，单页 + hash 路由；顶栏应用名「MTI 软电话」）+ `web/css/app.css` + `web/img/*`（与桌面同一套话务图标）+ `web/js/{common,icons,store,callbar,callui,dialpad,app}.js` + `web/js/views/{call,history,contacts,settings,diag}.js`（改完**重建二进制 + 重启**才生效——都是内嵌资源；新增文件要同步 `internal/wsapi/server.go` 的白名单） |
 | JS SDK | `web/sdk/sip-phone-sdk.{js,d.ts}`（同样内嵌，改完要重建） |
 | 仅托盘无 UI 版（托盘行为/图标） | `cmd/sip-phone/gui_noui.go` + `internal/tray/*` + `internal/variant/*`（构建标签 `noui`） |
 | 构建脚本 / 交叉编译 | `build.bat`、`build.sh`（两者都按 full / noui 两个变体各跑一遍目标）、`scripts/build-*-lib.*`（先读 CLAUDE.md 构建章节） |

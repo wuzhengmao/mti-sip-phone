@@ -26,6 +26,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"fyne.io/systray"
@@ -53,6 +54,10 @@ func themeColorNRGBA(name fyne.ThemeColorName) color.NRGBA {
 // 官方更新站点常量见 config.PrimaryUpdateSite（桌面与网页共用一份，REQ-UPD-023）。
 
 // App GUI 应用：组装 Fyne 窗口与托盘，订阅核心事件驱动界面。
+// appDisplayName 用户可见的应用名（窗口标题、托盘提示/菜单、通知抬头）：
+// 统一文案「MTI 软电话」（用户要求，2026-10-21）。
+const appDisplayName = "MTI 软电话"
+
 type App struct {
 	core      *core.App
 	audioMgr  *audio.Manager
@@ -64,6 +69,10 @@ type App struct {
 	desk  desktop.App
 	mainW fyne.Window // 主窗口：仅空闲状态显示
 	callW fyne.Window // 通话面板：呼叫/振铃/通话中显示，置顶右下角
+	// callPanelRows 通话面板当前的行数（3 = 两方通话/拨号/振铃，4+ = 复杂话务）。
+	// 记住它，重建面板时行数不同才 resize（用户实测：进过咨询后下次来电
+	// 面板仍是 4 行高，内容却只有 3 行）。
+	callPanelRows int
 
 	// 主窗口：内容切换容器（拨号盘 / 设置页）
 	mainContent  *fyne.Container
@@ -79,11 +88,15 @@ type App struct {
 
 	regDot        *statusDot
 	regLabel      *plainText // 注册状态文字（颜色跟圆点一致；本机号码见窗口标题）
-	autoAnswerBtn *widget.Button
+	autoAnswerBtn *hoverIcon // 自动接听开关：图形按钮（icons/自动接听开启.png）
 	callBtn       *compactButton
 	settingsBtn   *widget.Button
 	contactsBtn   *widget.Button // 通信录（REQ-UI-032，位于通话记录按钮右侧）
 	historyBtn    *widget.Button // 通话记录（REQ-UI-031，位于设置按钮左侧）
+	// 禁用态图标：PNG 图标 Fyne 不会自动变灰（只处理 SVG），禁用时手动换上
+	// 这一份，观感才与设置按钮（齿轮，SVG）一致，见 setIconButtonEnabled。
+	contactsIconOff fyne.Resource
+	historyIconOff  fyne.Resource
 
 	// ---- 通话记录（REQ-CALL-007，与配置页一样切在主窗体内）----
 	historyPage *fyne.Container // 记录页内容（buildHistoryPage 构建）
@@ -92,6 +105,8 @@ type App struct {
 	// ---- 通信录（REQ-UI-032，同样切在主窗体内）----
 	contactsPage *fyne.Container   // 通信录页内容（buildContactsPage 构建）
 	contacts     *contactsState    // 页面状态（见 ui_contacts.go）
+	agentsPage   *fyne.Container   // 在线座席页内容（buildAgentsPage 构建，REQ-ACC-035）
+	agents       *agentsState      // 在线座席页状态（见 ui_agents.go）
 	mainTip      *tooltipLayer     // 备注悬停提示图层（主窗体内容顶层，见 ui_tooltip.go）
 	mainSuggest  *dialSuggestLayer // 拨号建议下拉图层（见 ui_dial_suggest.go）
 	// hideSuggestTimer 输入框失焦后"延迟收起"下拉的定时器（点选建议需要这点时间）
@@ -102,11 +117,11 @@ type App struct {
 	settingsScroll    *container.Scroll
 	accServerAddr     *widget.Entry // SIP 服务器（含端口，如 10.168.4.40:15060）
 	accExpires        *widget.Entry // 注册到期时间（秒）
+	accCTIHeartbeat   *widget.Entry // CTI 心跳间隔（秒，坐席模式）
 	accProxy          *widget.Entry // 出站代理（可选）
 	accStunCheck      *widget.Check
 	accStunServer     *widget.Entry
 	rportCheck        *widget.Check
-	chkOptCheck       *widget.Check // 服务端心跳检测（User-Agent 带 optchk，REQ-ACC-020）
 	accTransport      *widget.Select
 	tlsVerifyCheck    *widget.Check // 校验 TLS 服务器证书（REQ-ACC-006）
 	tlsNote           *widget.Label // 「只加密信令」提示（仅传输=tls 时显示）
@@ -173,6 +188,51 @@ type App struct {
 	callStartAt  time.Time
 	timerStop    chan struct{}
 	regState     string
+
+	// ---- CTI 话务控制（REQ-ACC-026 / REQ-ACC-029）----
+	// agentOnline 坐席模式（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）：
+	// **只有坐席模式才在通话面板显示高级话务按钮**（咨询/转移/会议）。
+	agentOnline      bool
+	agentMode        string          // none / normal / dial_out / monitor（协议 §16.1）
+	agentBusy        bool            // 置忙（isBusy）：已注册时托盘/应用图标变黄
+	agentDisplayName string          // 坐席显示名（AGENT_ONLINE 的 displayName）
+	agentIcon        *hoverIcon      // 主窗体「已注册」后的坐席按钮（点击切换置忙/置闲）
+	rosterIcon       *hoverIcon      // 坐席模式下的「在线座席」入口（座位表图标）
+	statusRow        *fyne.Container // 顶栏「圆点 + 已注册 + 坐席/监听按钮」（图标显隐后要重排）
+	// ctiDialMode 主窗体拨号盘被"咨询/转移/会议加人"复用的模式：""（普通拨号）/
+	// "consult"（发起咨询+发起三方）/ "transfer"（直接转移+咨询转移）/ "conference"（加人）。
+	ctiDialMode string
+	// ctiCallBtn2 拨号复用模式的第二个动作按钮（如"发起三方"/"咨询转移"）。
+	ctiCallBtn2 *compactButton
+	// 两方通话第一行的三个入口按钮（咨询/转移/会议，位于保持左侧）
+	consultBtn    *compactButton
+	transferBtn   *compactButton
+	conferenceBtn *compactButton
+	// 咨询接通后的第一行按钮
+	threeWayBtn        *compactButton // 三方
+	consultTransferBtn *compactButton // 咨询转移
+	finishConsultBtn   *compactButton // 结束咨询（被咨询方行右侧）
+	exitThreeWayBtn    *compactButton // 三方：发起方强制挂断一方（X）
+	// 监听第一行按钮
+	whisperBtn   *compactButton // 耳语（耳语态时改为「监听」= 退出耳语）
+	interceptBtn *compactButton // 拦截
+	interveneBtn *compactButton // 强插（三方）
+	// monitorWhisper 当前监听是否处于耳语态：决定 whisperBtn 的动作
+	// （whisper / stopWhisper）与悬停提示（耳语 / 监听）。
+	monitorWhisper bool
+	// 会议按钮
+	addMemberBtn        *compactButton // 添加成员（owner，结束会议左侧）
+	finishConferenceBtn *compactButton // 结束会议（owner）
+
+	// CTI 指令在途（REQ-ACC-026）：命令发出后锁住（协议只允许一条在途），
+	// 点下去的那个按钮换成旋转圆圈（没有对应按钮时只锁不转），收到
+	// MSP_RESULT（cti.result，含超时）后恢复；期间点其它话务按钮只提示。
+	ctiInFlight   bool
+	ctiPending    *compactButton
+	ctiPendingRes fyne.Resource
+	ctiSpinStop   chan struct{}
+	ctiSpinAt     time.Time // 转圈开始时刻：结果来得太快时保证至少显示一小会儿
+
 	// trayRegistered 托盘图标当前是否为"已注册"绿色。续注册（registering）
 	// 期间不改变它——每次续注册图标都闪一下红色观感很差；只有注册失败
 	// 或未注册才转红（界面圆点仍按 黄=注册中 显示，REQ-UI-018）。
@@ -307,6 +367,9 @@ func New(c *core.App, audioMgr *audio.Manager, cfg *config.Config, cfgPath strin
 	if desk, ok := ui.fyne.(desktop.App); ok {
 		ui.desk = desk
 	}
+	// 坐席模式初值（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）
+	ui.agentOnline = c.AgentOnline()
+	ui.agentDisplayName = c.AgentDisplayName()
 	// 注册视频帧出口（REQ-VIDEO-006/007）：帧走这条直连通道，
 	// **不走事件总线**——总线容量 64、满即丢，视频帧会把它打满。
 	c.SetVideoSink(ui)
@@ -321,6 +384,9 @@ func (a *App) Run() {
 	// glfw_linux.go。
 	prepareGLFW()
 	a.buildMainWindow()
+	// **必须在 buildTray 之前**：托盘首份菜单（注册状态决定「登录账号/退出账号」）
+	// 用它构建，而 Fyne 的就绪回调会拿这份菜单覆盖之后的更新。
+	a.syncInitialState()
 	a.buildTray()
 	a.subscribeEvents()
 	// 视频窗口"用户挪动了"回调（REQ-VIDEO-015）：Windows 是窗口过程的
@@ -351,7 +417,7 @@ func (a *App) Quit() {
 
 // buildMainWindow 主窗口：内容可在「拨号盘」与「设置页」之间切换。
 func (a *App) buildMainWindow() {
-	w := a.fyne.NewWindow("mti-sip-phone")
+	w := a.fyne.NewWindow(appDisplayName)
 	a.mainW = w
 	// 任务栏/窗口图标（默认是控制台图标，这里设为话机）
 	w.SetIcon(IconPhoneGreen)
@@ -375,6 +441,7 @@ func (a *App) buildMainWindow() {
 	a.applyPreprocessForm()
 	a.buildHistoryPage()
 	a.buildContactsPage()
+	a.buildAgentsPage()
 
 	// 窗口内容 = 当前页 + 顶层提示图层（备注悬停用，见 ui_tooltip.go）。
 	// 切页只换 Objects[0]，提示图层恒为 Objects[1]：它不含 Hoverable/Tappable，
@@ -386,6 +453,32 @@ func (a *App) buildMainWindow() {
 	w.CenterOnScreen()
 	// 固定窗口尺寸：切换设置页（内容多）时窗口不被撑大
 	w.SetFixedSize(true)
+	// 跨屏 DPI 修复（多显示器缩放不同时，用户实测）：窗口在缩放不同的显示器间
+	// 移动时 Fyne（2.8.1）的 canvas scale 会变化（实测 200%↔150% 屏 → 2.0↔1.5），
+	// 但**固定尺寸窗口的物理尺寸与画布重排不同步**——内容整体偏移（现象：移到
+	// 另一块屏后内容挤在窗口下半部）。**注意 `Settings().Scale()` 在"自动"模式
+	// 下恒为 0**（真实缩放在 `Canvas().Scale()`，也没有变化通知可监听），所以
+	// 这里每秒轻量轮询 canvas scale：**首轮无条件重设一次**（纠正"窗口创建早于
+	// scale 检测"导致的初始物理尺寸错误），之后只在真正变化时重设——先解固定
+	// 再重设，逼 Fyne 按新 scale 重算窗口物理尺寸与画布布局。
+	go func() {
+		first := true
+		var last float32
+		for {
+			time.Sleep(time.Second)
+			fyne.Do(func() {
+				s := w.Canvas().Scale()
+				if !first && s == last {
+					return
+				}
+				first = false
+				last = s
+				w.SetFixedSize(false)
+				w.Resize(fyne.NewSize(320, 620))
+				w.SetFixedSize(true)
+			})
+		}
+	}()
 
 	// 主窗体任意位置按键输入（无需聚焦输入框，REQ-UI-024）：
 	// 数字/星号/井号直接输入拨号框，退格删除末尾字符。
@@ -401,6 +494,22 @@ func (a *App) buildMainWindow() {
 		// 通话中（REQ-UI-030）：只把数字键透传成 DTMF，其余按键一律不管——
 		// 此时输入框是禁用的，键盘事件不会被任何控件消费，正好落到这里
 		if a.uiState != uiIdle {
+			// CTI 拨号复用模式（咨询/转移/加会）：数字输入、退格删除、回车发起
+			if a.ctiDialMode != "" {
+				switch {
+				case ev.Name == fyne.KeyBackspace:
+					runes := []rune(a.dialSelect.Text)
+					if len(runes) > 0 {
+						a.dialSelect.SetText(string(runes[:len(runes)-1]))
+					}
+				case ev.Name == fyne.KeyEnter || ev.Name == fyne.KeyReturn:
+					a.onCallButton()
+				case isDialDigit(ev.Name):
+					a.appendDialKey(string(ev.Name))
+					a.onKeypadDigit(string(ev.Name))
+				}
+				return
+			}
 			if a.uiState == uiInCall && isDialDigit(ev.Name) {
 				a.onKeypadDigit(string(ev.Name))
 			}
@@ -448,10 +557,48 @@ func (a *App) onKeypadDigit(key string) {
 	case a.audioMgr != nil:
 		a.audioMgr.PlayDTMF(key)
 	}
+	// CTI 拨号复用模式：只输入、不发 DTMF（REQ-ACC-026 第 2 点"不再发 DTMP"）
+	if a.ctiDialMode != "" {
+		return
+	}
 	if a.uiState == uiInCall && a.activeCallID != "" {
 		if err := a.core.SendDTMF(a.activeCallID, key); err != nil {
 			logx.Logger().Debug("发送 DTMF 失败", "digit", key, "err", err)
 		}
+	}
+}
+
+// dialCallRowLayout 主窗体的呼叫行：
+//   - 普通拨号：[呼叫按钮（占满）] [视频按钮（可选，靠右）]
+//   - 拨号复用（咨询/转移）：[第一动作][第二动作] **两个等宽按钮并排**
+//
+// 用自定义布局而不是 Border/VBox：第二动作按钮显隐时要重新分配主按钮的宽度。
+type dialCallRowLayout struct{}
+
+func (dialCallRowLayout) MinSize([]fyne.CanvasObject) fyne.Size {
+	return fyne.NewSize(160, dialCallButtonHeight)
+}
+
+func (dialCallRowLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	call, alt, video := objs[0], objs[1], objs[2]
+	if alt.Visible() {
+		w := (size.Width - panelColGap) / 2
+		call.Resize(fyne.NewSize(w, size.Height))
+		call.Move(fyne.NewPos(0, 0))
+		alt.Resize(fyne.NewSize(size.Width-w-panelColGap, size.Height))
+		alt.Move(fyne.NewPos(w+panelColGap, 0))
+		return
+	}
+	vw := float32(0)
+	if video.Visible() {
+		vw = video.MinSize().Width + panelColGap
+	}
+	call.Resize(fyne.NewSize(size.Width-vw, size.Height))
+	call.Move(fyne.NewPos(0, 0))
+	if video.Visible() {
+		m := video.MinSize()
+		video.Resize(m)
+		video.Move(fyne.NewPos(size.Width-m.Width, (size.Height-m.Height)/2))
 	}
 }
 
@@ -464,23 +611,54 @@ func (a *App) buildDialPage() {
 	// 对不上圆点那四个自定颜色）。本机号码不在顶栏显示，见窗口标题。
 	a.regLabel = newPlainText(regText("unregistered"),
 		a.fyne.Settings().Theme().Size(theme.SizeNameText), dotColors["unregistered"], true)
-	a.autoAnswerBtn = widget.NewButton("自动接听", a.toggleAutoAnswer)
-	// 未选中时浅灰底（与通话面板开关关闭状态一致，REQ-UI-024 修订）
-	a.autoAnswerBtn.Importance = widget.MediumImportance
-	statusRow := fyne.NewContainerWithLayout(statusRowLayout{}, a.regDot, a.regLabel)
+	// 自动接听：**图形按钮**（icons/自动接听开启.png），文字走悬停提示（用户要求）。
+	// 图标比坐席/监听那排小图标大一号（用户要求：按钮太小），命中区随之放大。
+	iconSize := fyne.CurrentApp().Settings().Theme().Size(theme.SizeNameText) + 2
+	autoAnswerSize := fyne.CurrentApp().Settings().Theme().Size(theme.SizeNameText) + 10
+	a.autoAnswerBtn = newHoverIcon(IconAutoAnswerOn, autoAnswerSize, a.mainTip)
+	a.autoAnswerBtn.SetOnTap(a.toggleAutoAnswer)
+	a.autoAnswerBtn.SetDisabledResource(tintIcon(IconAutoAnswerOn, disabledIconColor()))
+	a.autoAnswerBtn.SetIconOffsetY(2) // 图案在按钮里下移 2px（按钮位置不变，用户要求）
+	a.setAutoAnswer(a.autoAnswer)
+	// 坐席按钮（REQ-ACC-029）：icons/座席.png，**绿色 = 空闲、黄色 = 置忙**；
+	// 非坐席模式（agentMode=none）隐藏。点击切换置忙/置闲（setBusy/setIdle），
+	// 悬停提示显示坐席名与当前状态。
+	a.agentIcon = newHoverIcon(tintIcon(IconAgentSeat, colorSuccessGreen), iconSize, a.mainTip)
+	a.agentIcon.SetOnTap(a.toggleAgentBusy)
+	a.agentIcon.Hide()
+	// 在线座席入口（REQ-ACC-035）：坐席模式下显示在坐席按钮右侧，点击打开
+	// 在线座席页（listAgents）。
+	a.rosterIcon = newHoverIcon(tintIcon(IconAgentRoster, colorHoldBlue), iconSize+2, a.mainTip)
+	a.rosterIcon.SetOnTap(a.showAgents)
+	a.rosterIcon.SetNote("在线座席")
+	a.rosterIcon.Hide()
+	statusRow := fyne.NewContainerWithLayout(statusRowLayout{}, a.regDot, a.regLabel,
+		a.agentIcon, a.rosterIcon)
+	a.statusRow = statusRow
 	// 顶栏图标按钮统一用**标准 Fyne 按钮**（低强调）：通话记录在左、通信录居中、
 	// 设置在右（REQ-UI-031 / REQ-UI-032）。自绘紧凑版观感与其它按钮不一致，已回退。
 	a.settingsBtn = widget.NewButtonWithIcon("", theme.SettingsIcon(), a.showSettings)
 	a.settingsBtn.Importance = widget.LowImportance
-	a.historyBtn = widget.NewButtonWithIcon("", theme.HistoryIcon(), a.showHistory)
+	a.historyBtn = widget.NewButtonWithIcon("", IconHistory, a.showHistory)
 	a.historyBtn.Importance = widget.LowImportance
 	a.contactsBtn = widget.NewButtonWithIcon("",
-		theme.NewColoredResource(IconContacts, theme.ColorNameForeground), a.showContacts)
+		IconContacts, a.showContacts)
 	a.contactsBtn.Importance = widget.LowImportance
+	// 禁用态图标（灰色）：Fyne 只给 SVG 图标做禁用变灰，PNG 得自己备一份
+	a.historyIconOff = disabledPNG("history", 0.8)
+	a.contactsIconOff = disabledPNG("contacts", 0.8)
 
-	// 顶栏：圆点+状态靠左，通话记录+通信录+设置按钮靠右，自动接听按钮居中
-	topBar := container.NewBorder(nil, nil, statusRow,
-		container.NewHBox(a.historyBtn, a.contactsBtn, a.settingsBtn),
+	// 顶栏：圆点+状态靠左，通话记录+通信录+设置按钮靠右，自动接听按钮居中。
+	// 右侧三个图标按钮的内边距（用户要求，先后试过 2px、定为 6px）：视觉空隙
+	// 几乎全部来自按钮自身的 SizeNameInnerPadding——本项目主题为拨号盘大按键
+	// 把它提到 12，**光调容器间距几乎看不出变化**（实测）。这里用**局部主题
+	// 覆盖**只把这三个按钮的 InnerPadding 压到 6，容器间距用 0；全局主题
+	// （拨号盘等）不受影响。
+	iconBtns := container.NewThemeOverride(
+		container.New(layout.NewCustomPaddedHBoxLayout(0),
+			a.historyBtn, a.contactsBtn, a.settingsBtn),
+		compactIconButtonsTheme{pad: 6})
+	topBar := container.NewBorder(nil, nil, statusRow, iconBtns,
 		container.NewCenter(a.autoAnswerBtn))
 
 	// ---- 号码输入框：可下拉（最近 5 次呼叫号码，去重）----
@@ -517,11 +695,12 @@ func (a *App) buildDialPage() {
 		for _, k := range row {
 			key := k
 			btn := widget.NewButton(key, func() {
-				if a.uiState == uiIdle {
+				if a.dialInputMode() {
 					a.appendDialKey(key)
 				}
 				// 点号码盘一律回显按键音；通话中还会向对端发 DTMF
-				//（REQ-UI-029 / REQ-CALL-006）；呼出/振铃中按键是禁用的
+				//（REQ-UI-029 / REQ-CALL-006）；呼出/振铃中按键是禁用的。
+				// CTI 拨号复用模式下只输入、不发 DTMF（onKeypadDigit 内部拦）。
 				a.onKeypadDigit(key)
 			})
 			btn.Importance = widget.LowImportance
@@ -535,10 +714,15 @@ func (a *App) buildDialPage() {
 	// 呼叫按钮用 compactTextButton：文字颜色固定（浅色主题下 fyne
 	// Success 按钮文字为白色、看不清），黑色文字与黑色图标一致
 	//（REQ-UI-024 修订）
-	a.callBtn = newCompactTextButton("呼叫", IconPlayBlack, colorSuccessGreen, colorIconBlack, a.onCallButton)
+	a.callBtn = newCompactTextButton("呼叫", IconPhoneCallWhite, colorSuccessGreen, colorIconWhite, a.onCallButton)
 	// REQ-VIDEO-003：呼叫按钮缩小，右侧加一个无文字的视频呼叫按钮
+	// （用户要求：蓝底白图标，与「呼叫」同一套配色）
 	a.callBtn.SetMinSize(0, dialCallButtonHeight)
-	a.videoCallBtn = newCompactButton(IconVideoCall, colorSuccessGreen, dialCallButtonHeight, a.onVideoCallButton)
+	a.videoCallBtn = newCompactButton(IconVideoCallWhite, colorCallGreen, dialCallButtonHeight, a.onVideoCallButton)
+	// REQ-ACC-026：拨号复用模式的第二个动作按钮（咨询/转移/加会时显示，默认隐藏）
+	a.ctiCallBtn2 = newCompactTextButton("", IconPlayBlack, colorCallGreen, colorIconWhite, a.onCTICallButton2)
+	a.ctiCallBtn2.SetMinSize(0, dialCallButtonHeight)
+	a.ctiCallBtn2.Hide()
 
 	// 呼叫按钮上方一行：版本更新提示（REQ-UPD-003，默认隐藏）
 	a.buildUpdateBar()
@@ -547,7 +731,9 @@ func (a *App) buildDialPage() {
 	// 对象，视频按钮隐藏时呼叫按钮自然恢复占满）。视频入口的显隐由
 	// applyVideoFeatureUI 统一维护：本构建没有视频、或配置里关掉了视频通话
 	//（REQ-VIDEO-014）都隐藏。
-	a.callRow = container.NewBorder(nil, nil, nil, a.videoCallBtn, a.callBtn)
+	// 呼叫行：平时 [呼叫][视频]；拨号复用模式（咨询/转移）时换成
+	// [第一动作][第二动作] 两个**等宽并排**的按钮（用户要求，蓝底白字）。
+	a.callRow = fyne.NewContainerWithLayout(dialCallRowLayout{}, a.callBtn, a.ctiCallBtn2, a.videoCallBtn)
 	if !a.core.VideoUsable() {
 		a.videoCallBtn.Hide()
 	}
@@ -561,6 +747,9 @@ func (a *App) buildDialPage() {
 			padGrid,
 		),
 	)
+	// 空闲态按钮外观（蓝底白字）由 updateCallButton 统一决定：不在这里刷一次的话，
+	// 启动后要等第一通电话才变色（按钮构造函数里的配色是旧的绿底黑字）。
+	a.updateCallButton()
 }
 
 // buildSettingsPage 设置页：账户、音频设备、日志、网页接入（REQ-UI-006/012）。
@@ -574,12 +763,15 @@ func (a *App) buildSettingsPage() {
 	a.accServerAddr.SetPlaceHolder("SIP 服务器，如 10.168.4.40:15060（端口可省略，默认 5060）")
 	a.accExpires = newFormEntry()
 	a.accExpires.SetPlaceHolder("300")
+	// CTI 心跳（协议 §10）：坐席模式下每 N 秒发一次 MSP_HEARTBEAT，
+	// expires = N × 2.5。默认 20 秒。
+	a.accCTIHeartbeat = newFormEntry()
+	a.accCTIHeartbeat.SetPlaceHolder("20")
 	a.accTransport = widget.NewSelect([]string{"udp", "tcp", "tls"}, func(sel string) {
 		if a.loadingForm {
 			return
 		}
 		a.updateTLSRow(sel)
-		a.updateChkOptRow(sel)
 	})
 	// TLS（REQ-ACC-006）：只加密信令，媒体是否加密由下面的「媒体加密」决定。
 	// 提示**保持一行短句**：主窗体固定 320 DIP，长句会被折在难读的位置
@@ -612,13 +804,8 @@ func (a *App) buildSettingsPage() {
 			logx.Logger().Warn("切换 rport 失败", "err", err)
 		}
 	})
-	// 服务端心跳检测（默认开启，REQ-ACC-020）：开启后注册报文的 User-Agent
-	// 带 optchk 标记，服务端据此定期发 OPTIONS 探测；OPTIONS 用 sipgo 默认
-	// 行为回 405 即可（实测服务端接受）。改变的是注册报文内容，随「保存并注册」生效。
-	// 服务端心跳检测（REQ-ACC-020 修订）：**仅 UDP 传输可用**——连接型传输
-	// （tcp/tls）注册报文不带 optchk、服务端也不会按心跳探测，所以非 UDP 时置灰
-	//（保留已选值，切回 udp 不用重选，见 updateChkOptRow）。
-	a.chkOptCheck = widget.NewCheck("启用服务端心跳检测（仅 UDP）", nil)
+	// 服务端心跳检测（optchk）已按用户要求取消：设置项、User-Agent 标记与
+	// 超时重注册一并移除（REQ-ACC-020/021 废弃）。
 
 	// 表单项采用「label 在上、输入框在下」的堆叠布局，
 	// 避免 Grid 双列在窄窗口下把主窗口撑宽（REQ-UI-019）
@@ -665,8 +852,8 @@ func (a *App) buildSettingsPage() {
 		formItem("密码", a.accPassword),
 		formItem("显示名", a.accDisplay),
 		formItem("注册到期时间（秒）", a.accExpires),
+		formItem("CTI 心跳间隔（秒）", a.accCTIHeartbeat),
 		a.rportCheck,
-		a.chkOptCheck,
 		formItem("声明 IP（Via/Contact/SDP）", a.accIPSelect),
 		a.accStunCheck,
 		formItem("STUN 服务器", a.accStunServer),
@@ -980,16 +1167,6 @@ func (a *App) updateTLSRow(transport string) {
 	a.tlsNote.Hide()
 }
 
-// updateChkOptRow 传输方式联动（REQ-ACC-020 修订）：服务端心跳检测**只有 UDP
-// 传输才可用**，tcp/tls 下置灰（连同 sip 层的心跳计数与超时重注册一起停用）。
-func (a *App) updateChkOptRow(transport string) {
-	if config.NormalizeTransport(transport) == config.TransportUDP {
-		a.chkOptCheck.Enable()
-		return
-	}
-	a.chkOptCheck.Disable()
-}
-
 // showSettings 切换到设置页（仅非通话状态可用，REQ-UI-012）。
 func (a *App) showSettings() {
 	if a.activeCallID != "" {
@@ -1087,7 +1264,16 @@ func (a *App) showDialPage() {
 }
 
 // onCallButton 呼叫按钮：无通话时拨号，呼叫/通话中挂断（REQ-UI-008）。
-func (a *App) onCallButton() {
+func (a *App) onCallButton() { a.onCallButtonNamed("") }
+
+// onCallButtonNamed 呼叫按钮的实际实现：displayName 非空时作为对端显示名带进
+// 呼叫（座席列表直接呼出用——优先于通信录名称）。
+func (a *App) onCallButtonNamed(displayName string) {
+	// CTI 拨号复用模式：第一动作（发起咨询 / 直接转移 / 加入会议）
+	if a.ctiDialMode != "" {
+		a.onCTICallButton()
+		return
+	}
 	if a.activeCallID != "" {
 		_ = a.core.Hangup(a.activeCallID)
 		return
@@ -1097,7 +1283,15 @@ func (a *App) onCallButton() {
 		a.showInfo("提示", "请输入号码")
 		return
 	}
-	callID, err := a.core.Dial(context.Background(), target)
+	var (
+		callID string
+		err    error
+	)
+	if displayName != "" {
+		callID, err = a.core.DialNamed(context.Background(), target, displayName)
+	} else {
+		callID, err = a.core.Dial(context.Background(), target)
+	}
 	if err != nil {
 		a.showError(err)
 		return
@@ -1108,6 +1302,7 @@ func (a *App) onCallButton() {
 		ID:        callID,
 		Direction: "outgoing",
 		Remote:    target,
+		PeerName:  displayName,
 		State:     core.CallRinging,
 	}
 	a.savedNumber = target
@@ -1117,7 +1312,11 @@ func (a *App) onCallButton() {
 
 // onVideoCallButton 视频呼叫按钮（REQ-VIDEO-003）：无通话时发起视频呼叫，
 // 呼叫/通话中与呼叫按钮一致地挂断。
-func (a *App) onVideoCallButton() {
+func (a *App) onVideoCallButton() { a.onVideoCallButtonNamed("") }
+
+// onVideoCallButtonNamed 视频呼叫按钮的实际实现（displayName 语义同
+// onCallButtonNamed）。
+func (a *App) onVideoCallButtonNamed(displayName string) {
 	if a.activeCallID != "" {
 		_ = a.core.Hangup(a.activeCallID)
 		return
@@ -1127,7 +1326,15 @@ func (a *App) onVideoCallButton() {
 		a.showInfo("提示", "请输入号码")
 		return
 	}
-	callID, err := a.core.DialVideo(context.Background(), target)
+	var (
+		callID string
+		err    error
+	)
+	if displayName != "" {
+		callID, err = a.core.DialVideoNamed(context.Background(), target, displayName)
+	} else {
+		callID, err = a.core.DialVideo(context.Background(), target)
+	}
 	if err != nil {
 		a.showError(err)
 		return
@@ -1137,6 +1344,7 @@ func (a *App) onVideoCallButton() {
 		ID:        callID,
 		Direction: "outgoing",
 		Remote:    target,
+		PeerName:  displayName,
 		State:     core.CallRinging,
 		HasVideo:  true,
 	}
@@ -1230,7 +1438,7 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		a.updateCallWindowTitle()
 		a.setCallName(call)
 		a.callStateLabel.SetText("呼叫中")
-		a.rebuildCallRows(dialingButtons)
+		a.rebuildPanel(dialingButtons)
 		showCallWindow(a.callW) // 平台函数：Windows 下不占任务栏（见 showWindowAsTool）
 		a.placeCallWindow()
 		a.startTimer()
@@ -1244,7 +1452,7 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		a.updateCallWindowTitle()
 		a.setCallName(call)
 		a.callStateLabel.SetText("来电")
-		a.rebuildCallRows(ringingButtons)
+		a.rebuildPanel(ringingButtons)
 		showCallWindow(a.callW)
 		a.callW.RequestFocus()
 		a.placeCallWindow()
@@ -1259,7 +1467,7 @@ func (a *App) setCallUI(state int, call *core.Call) {
 		a.updateCallWindowTitle()
 		a.setCallName(call)
 		a.callStateLabel.SetText("通话中")
-		a.rebuildCallRows(incallButtons)
+		a.rebuildPanel(incallButtons)
 		showCallWindow(a.callW)
 		a.placeCallWindow()
 		a.startTimer() // 通话时长从 0 开始
@@ -1378,12 +1586,39 @@ func (a *App) applyMainCallMode(inCall bool) {
 	}
 	// 输入框禁用后不可聚焦，键盘数字因此落到 canvas 按键回调 → 发 DTMF
 	setEnabled(a.dialSelect, !inCall)
+	// 通信录/通话记录：**通话中也保持可用**（打开后行内的操作按钮按当前话务/
+	// 拨号复用状态显示，见 listRowActions，REQ-ACC-035）。
+	setIconButtonEnabled(a.historyBtn, IconHistory, a.historyIconOff, true)
+	setIconButtonEnabled(a.contactsBtn, IconContacts, a.contactsIconOff, true)
+	// 自动接听按钮**通话中也保持可点**（用户要求）；其余（设置/呼叫/视频呼叫）
+	// 通话中禁用。
+	setEnabled(a.autoAnswerBtn, true)
 	for _, c := range []interface {
 		Enable()
 		Disable()
-	}{a.settingsBtn, a.historyBtn, a.contactsBtn, a.autoAnswerBtn, a.callBtn, a.videoCallBtn} {
+	}{a.settingsBtn, a.callBtn, a.videoCallBtn} {
 		setEnabled(c, !inCall)
 	}
+}
+
+// setIconButtonEnabled 启用/禁用图标按钮，并在禁用时把图标换成灰色版本。
+//
+// Fyne 的 buttonRenderer 只在 `Disabled() && svg.IsResourceSVG(icon)` 时换用
+// theme.NewDisabledResource——**位图（PNG）图标不会自动变灰**（上游 TODO），
+// 所以顶栏那三个按钮里，设置（SVG 齿轮）会自动变灰，而通信录/通话记录
+// （PNG）仍是白的（用户实测）。这里在开关时手动换图标。
+func setIconButtonEnabled(btn *widget.Button, normal, disabled fyne.Resource, enabled bool) {
+	if btn == nil {
+		return
+	}
+	if enabled {
+		btn.Icon = normal
+		btn.Enable()
+	} else {
+		btn.Icon = disabled
+		btn.Disable()
+	}
+	btn.Refresh()
 }
 
 // refreshRecentDials 拨号框的"最近呼叫"现在由建议下拉图层呈现（获得焦点即列出），
@@ -1406,18 +1641,55 @@ func (a *App) setKeypadEnabled(enabled bool) {
 // 呼叫态=绿底黑字黑图标；挂断态=红底白字白图标
 // （文字颜色固定，不随主题变化，REQ-UI-024 修订）。
 func (a *App) updateCallButton() {
+	// CTI 拨号复用模式：主按钮 = 第一动作，第二按钮 = 第二动作（会议只有第一动作）。
+	// 两个按钮**蓝底白字、左右并排**（用户要求），图标跟着动作走。
+	if a.ctiDialMode != "" && a.callBtn != nil {
+		a.callBtn.SetBg(colorCallGreen)
+		a.callBtn.SetLabelColor(colorIconWhite)
+		switch a.ctiDialMode {
+		case "consult":
+			a.callBtn.SetIcon(IconCTIConsult)
+			a.callBtn.SetText("发起咨询")
+			a.ctiCallBtn2.SetIcon(IconCTIThreeWay)
+			a.ctiCallBtn2.SetText("发起三方")
+			a.ctiCallBtn2.Show()
+		case "transfer":
+			a.callBtn.SetIcon(IconCTITransfer)
+			a.callBtn.SetText("直接转移")
+			a.ctiCallBtn2.SetIcon(IconCTIConsultTransfer)
+			a.ctiCallBtn2.SetText("咨询转移")
+			a.ctiCallBtn2.Show()
+		case "conference":
+			a.callBtn.SetIcon(IconCTIAddMember)
+			a.callBtn.SetText("加入会议")
+			a.ctiCallBtn2.Hide()
+		}
+		a.callBtn.Refresh()
+		a.ctiCallBtn2.Refresh()
+		if a.callRow != nil {
+			a.callRow.Refresh() // 两个按钮并排/单按钮的切换要重排
+		}
+		return
+	}
+	if a.ctiCallBtn2 != nil {
+		a.ctiCallBtn2.Hide()
+	}
 	if a.activeCallID != "" {
 		a.callBtn.SetText("挂断")
 		a.callBtn.SetIcon(IconStopWhite)
 		a.callBtn.SetBg(colorDangerRed)
 		a.callBtn.SetLabelColor(colorIconWhite)
 	} else {
+		// 空闲「呼叫」：蓝底白字（用户要求，与面板按钮同一套配色）
 		a.callBtn.SetText("呼叫")
-		a.callBtn.SetIcon(IconPlayBlack)
-		a.callBtn.SetBg(colorSuccessGreen)
-		a.callBtn.SetLabelColor(colorIconBlack)
+		a.callBtn.SetIcon(IconPhoneCallWhite)
+		a.callBtn.SetBg(colorCallGreen)
+		a.callBtn.SetLabelColor(colorIconWhite)
 	}
 	a.callBtn.Refresh()
+	if a.callRow != nil {
+		a.callRow.Refresh()
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1432,14 +1704,37 @@ func (a *App) updateCallButton() {
 //   - SetSystemTrayIcon 直接操作底层 systray，在 systray 启动前调用会报
 //     "tray not ready yet" 且托盘不显示；启动后的状态切换（注册红/绿）
 //     通过 SetSystemTrayIcon 完成（此时 systray 已就绪）。
-func (a *App) buildTray() {
-	if a.desk == nil {
-		logx.Logger().Warn("当前驱动不支持系统托盘")
-		return
-	}
+//
+// trayMenu 托盘右键菜单（REQ-ACC-024）：显示主界面 / **登录账号或退出账号**
+// （按当前注册状态，位置在「显示主界面」下面）/ 分隔 / 退出。
+// **注册状态变化时重建**（updateTrayMenu），保证菜单项与状态一致。
+func (a *App) trayMenu() *fyne.Menu {
 	showMain := fyne.NewMenuItem("显示主界面", func() {
 		a.showMain()
 	})
+	// 已注册/注册中 → 「退出账号」：注销（发 expires=0）并停注册周期，
+	//   同时把「启用账户」置 false（下次启动不再自动注册）；
+	// 未注册/注册失败 → 「登录账号」：启用账户并立即注册。
+	// 动作可能阻塞（等 REGISTER 响应），放 goroutine，不卡 UI 线程。
+	registered := a.regState == "registered" || a.regState == "registering"
+	var accItem *fyne.MenuItem
+	if registered {
+		accItem = fyne.NewMenuItem("退出账号", func() {
+			go func() {
+				if err := a.core.SetRegistered(false); err != nil {
+					logx.Logger().Warn("退出账号失败", "err", err)
+				}
+			}()
+		})
+	} else {
+		accItem = fyne.NewMenuItem("登录账号", func() {
+			go func() {
+				if err := a.core.SetRegistered(true); err != nil {
+					logx.Logger().Warn("登录账号失败", "err", err)
+				}
+			}()
+		})
+	}
 	quit := fyne.NewMenuItem("退出", func() {
 		a.fyne.Quit()
 	})
@@ -1447,19 +1742,34 @@ func (a *App) buildTray() {
 	// 末尾自动补一个本地化的 Quit 项（driver_desktop.go 的
 	// addMissingQuitForMenu），托盘上会出现「退出」与「Quit」两项
 	markTrayQuit(quit)
-	menu := fyne.NewMenu("mti-sip-phone", showMain, fyne.NewMenuItemSeparator(), quit)
+	return fyne.NewMenu(appDisplayName, showMain, accItem, fyne.NewMenuItemSeparator(), quit)
+}
 
-	// 应用图标固定为绿色话机（用户要求：标准 app 图标是绿色话机，红色只作
-	// 异常提醒——那个由托盘图标承担）。各窗口另有自己的 SetIcon，这里同时是
-	// "没单独设图标的窗口"的默认值。
+// updateTrayMenu 按当前注册状态重建托盘菜单（Fyne 的 SetSystemTrayMenu
+// 可重复调用：首次会启动托盘并在就绪时应用，之后只刷新菜单项）。
+func (a *App) updateTrayMenu() {
+	if a.desk == nil {
+		return
+	}
+	logx.Logger().Debug("重建托盘菜单", "state", a.regState)
+	a.desk.SetSystemTrayMenu(a.trayMenu())
+}
+
+func (a *App) buildTray() {
+	if a.desk == nil {
+		logx.Logger().Warn("当前驱动不支持系统托盘")
+		return
+	}
+	// 应用图标按状态着色（未注册/注册中红、已注册空闲绿、已注册置忙黄），
+	// 同时是"没单独设图标的窗口"的默认值（applyIconColors 内统一设置）。
 	a.fyne.SetIcon(IconPhoneGreen)
 	// 单击托盘图标唤出主窗口（Fyne 托盘无原生双击事件，单击唤出）
-	a.desk.SetSystemTrayMenu(menu)
+	a.desk.SetSystemTrayMenu(a.trayMenu())
 	a.desk.SetSystemTrayWindow(a.mainW)
-	// 托盘图标显式按注册状态给一次（未注册红 / 已注册绿，REQ-UI-011）：
-	// Fyne 的托盘就绪回调只在"从未显式设置过托盘图标"时才退回应用图标，
-	// 不设的话托盘会跟着应用图标一起变绿，丢掉未注册的红色提醒。
-	a.updateTrayIcon()
+	// 托盘/应用图标显式按当前状态给一次（REQ-UI-011）：Fyne 的托盘就绪回调
+	// 只在"从未显式设置过托盘图标"时才退回应用图标，不设的话托盘会跟着应用
+	// 图标一起变绿，丢掉未注册的红色提醒。
+	a.applyIconColors()
 	// SetSystemTrayWindow 内部会覆盖窗口的 CloseIntercept（w.Hide）并
 	// 注册单击回调（直接 Show）——两处均不经过应用代码，导致自维护的
 	// mainShown 显示标志失去同步（点 X 后标志仍为 true，通话结束误判
@@ -1473,15 +1783,21 @@ func (a *App) buildTray() {
 			a.showMain()
 		})
 	})
+	// 尽力让托盘图标常显在通知区（Windows 11 的 IsPromoted 设置；见平台实现）
+	startTrayIconPromotion()
 	logx.Logger().Info("系统托盘已就绪（单击图标唤出主界面）")
 }
 
-// trayIcon 按注册状态返回托盘图标：未注册红、已注册绿（REQ-UI-011）。
+// trayIcon 按注册与坐席状态返回图标（REQ-UI-011 修订）：未注册/注册中红、
+// 已注册且坐席置忙黄、已注册且空闲绿。
 func (a *App) trayIcon() fyne.Resource {
-	if a.trayRegistered {
-		return IconPhoneGreen
+	if !a.trayRegistered {
+		return IconPhoneRed
 	}
-	return IconPhoneRed
+	if a.agentBusy {
+		return IconPhoneYellow
+	}
+	return IconPhoneGreen
 }
 
 // setRegState 记录注册状态：托盘图标只在"注册成功"与"失败/未注册"之间
@@ -1496,13 +1812,17 @@ func (a *App) setRegState(state string) {
 	}
 }
 
-// appTitle 应用标题："mti-sip-phone - 本机号码"（未注册/未配置时只有应用名）。
+// appTitle 应用标题："MTI 软电话 - 本机号码"（未注册/未配置时只有应用名）。
 // 主窗口标题栏、托盘悬停提示与未接来电通知共用。
 func (a *App) appTitle() string {
 	account := a.core.State().Register.Account
-	title := "mti-sip-phone"
+	title := appDisplayName
 	if account != "" {
 		title += " - " + account
+	}
+	// 坐席模式（REQ-ACC-028）：标题/托盘提示在号码后追加坐席显示名
+	if a.agentOnline && a.agentDisplayName != "" {
+		title += " " + a.agentDisplayName
 	}
 	return title
 }
@@ -1513,6 +1833,86 @@ func (a *App) updateWindowTitle() {
 	a.mainW.SetTitle(title)
 	// 托盘悬停提示（systray 需已就绪；未就绪时由后续事件刷新）
 	systray.SetTooltip(title)
+}
+
+// applyAgentState 坐席状态变化：刷新坐席按钮（颜色/悬停文案/显隐）、班长模式
+// 的监听按钮、窗口标题，以及应用/托盘图标颜色（已注册且置忙 = 黄色）。
+func (a *App) applyAgentState() {
+	online := a.agentOnline && a.agentMode != core.AgentModeNone
+	if a.agentIcon != nil {
+		if online {
+			iconColor := colorSuccessGreen
+			state, action := "空闲", "点击置忙"
+			if a.agentBusy {
+				iconColor = colorHoldYellow
+				state, action = "置忙", "点击置闲"
+			}
+			a.agentIcon.SetResource(tintIcon(IconAgentSeat, iconColor))
+			note := "座席" + state
+			if a.agentDisplayName != "" {
+				note += " - " + a.agentDisplayName
+			}
+			a.agentIcon.SetNote(note + "（" + action + "）")
+			a.agentIcon.Show()
+		} else {
+			a.agentIcon.SetNote("")
+			a.agentIcon.Hide()
+			// 图标消失时把提示一并收起（指针可能一直停在图标上，MouseOut 不会来）
+			if a.mainTip != nil {
+				a.mainTip.hide()
+			}
+		}
+	}
+	// 在线座席入口：坐席模式下才显示（非坐席模式没有 listAgents 可查）
+	if a.rosterIcon != nil {
+		if online {
+			a.rosterIcon.Show()
+		} else {
+			a.rosterIcon.Hide()
+		}
+	}
+	// 顶栏的注册圆点与「已注册」文字也跟着置忙/置闲变色（REQ-ACC-034）
+	if a.regDot != nil {
+		a.regDot.setBusy(a.agentBusy)
+	}
+	a.setRegLabel(a.regState)
+	// 图标显隐改变状态行的最小宽度：必须重排，否则顶栏仍按旧宽度布局
+	//（踩过：「已注册」被截成「...」、图标位置错乱）。
+	if a.statusRow != nil {
+		a.statusRow.Refresh()
+	}
+	a.updateWindowTitle()
+	a.applyIconColors()
+}
+
+// toggleAgentBusy 点击坐席按钮：空闲 → 置忙（setBusy），置忙 → 置闲（setIdle）。
+// 结果由 CTI 推送的 MSP_EVENT_AGENT_ONLINE（携带最新 isBusy）回到界面。
+func (a *App) toggleAgentBusy() {
+	if !a.agentOnline || a.agentMode == core.AgentModeNone {
+		return
+	}
+	action := "setBusy"
+	if a.agentBusy {
+		action = "setIdle"
+	}
+	if err := a.runCTI(nil, action, nil); err != nil {
+		return
+	}
+	logx.Logger().Info("坐席状态切换", "action", action, "原置忙", a.agentBusy)
+}
+
+// applyIconColors 应用图标 / 主窗口图标 / 托盘图标统一按状态着色
+// （REQ-UI-011 修订）：未注册与注册中红色、已注册且坐席置忙黄色、
+// 已注册且空闲绿色。
+func (a *App) applyIconColors() {
+	icon := a.trayIcon()
+	if a.fyne != nil {
+		a.fyne.SetIcon(icon)
+	}
+	if a.mainW != nil {
+		a.mainW.SetIcon(icon)
+	}
+	a.updateTrayIcon()
 }
 
 // updateTrayIcon 注册状态变化时更新托盘图标颜色。
@@ -1527,19 +1927,38 @@ func (a *App) updateTrayIcon() {
 // 事件订阅
 // ---------------------------------------------------------------------------
 
-// subscribeEvents 订阅核心事件，驱动界面状态。
-func (a *App) subscribeEvents() {
-	// 初始状态直接从核心快照读取（REQ-UI-015）：注册可能在 UI 订阅
-	// 事件之前已完成（启动即注册），依赖事件流会导致界面状态不准确。
-	// regLabel 显示注册状态文字，颜色与圆点一致（本机号码见窗口标题/配置页）。
+// syncInitialState 从核心快照补取注册与坐席的初始状态（REQ-UI-015 / REQ-ACC-028）：
+// 开机自动注册、CTI 推 AGENT_ONLINE 都可能发生在界面订阅事件之前，只靠事件
+// 流界面会停在初始值（用户实测：注册完成了托盘菜单还是「登录账号」）。
+//
+// **必须在 buildTray 之前调一次**：Fyne 的托盘就绪回调会用 buildTray 传进去的
+// 那份菜单覆盖此前所有更新（driver_desktop.go 的 runSystray 捕获了首次的 m），
+// 所以首份菜单本身就得是对的。
+func (a *App) syncInitialState() {
 	st := a.core.State()
 	a.setRegState(string(st.Register.State))
 	if a.regDot != nil {
 		a.regDot.setState(a.regState)
 	}
 	a.setRegLabel(a.regState)
-	a.updateTrayIcon()
+	a.agentOnline = st.AgentOnline
+	a.agentMode = st.AgentMode
+	a.agentBusy = st.AgentBusy
+	a.agentDisplayName = st.AgentDisplayName
+	a.setAutoAnswer(st.AutoAnswer)
+	a.applyAgentState()
 	a.updateWindowTitle()
+}
+
+// subscribeEvents 订阅核心事件，驱动界面状态。
+func (a *App) subscribeEvents() {
+	// 初始状态直接从核心快照读取（REQ-UI-015）：注册可能在 UI 订阅
+	// 事件之前已完成（启动即注册），依赖事件流会导致界面状态不准确。
+	a.syncInitialState()
+	a.applyIconColors()
+	// 托盘菜单也按当前状态重建（首份菜单在 buildTray 里已是同步过的状态，
+	// 这里覆盖"buildTray 之后、订阅之前"发生的注册变化）。
+	a.updateTrayMenu()
 
 	sub := a.core.Bus().Subscribe()
 	// **订阅之后再取一次快照**：网页可能在 UI 订阅事件之前就连上并订阅了视频
@@ -1553,6 +1972,10 @@ func (a *App) subscribeEvents() {
 	if st := a.core.UpdateStatus(); st.Phase != core.UpdateIdle {
 		a.onUpdateStatus(st)
 	}
+	// 注册/坐席状态同理：订阅前那次快照可能已经过时（订阅的空档里完成注册），
+	// 再补一次，保证顶栏、托盘图标与菜单和核心状态一致。
+	a.syncInitialState()
+	a.updateTrayMenu()
 	go func() {
 		for ev := range sub {
 			fyne.Do(func() { a.onEvent(ev) })
@@ -1595,7 +2018,14 @@ func (a *App) onEvent(ev core.Event) {
 				a.setRegState(state)
 				a.regDot.setState(state)
 				a.setRegLabel(state) // 顶栏显示状态文字（不再显示本机号码）
-				a.updateTrayIcon()
+				a.applyIconColors()
+				// 托盘菜单按注册状态切换「登录账号 / 退出账号」（REQ-ACC-024）
+				a.updateTrayMenu()
+				// 「退出账号/登录账号」改的是「启用账户」（REQ-ACC-024）：配置页
+				// 的勾选随之同步（只动这一个勾选，表单其它未保存的输入不受影响）。
+				if a.accEnabled != nil {
+					a.accEnabled.SetChecked(a.core.AccountEnabled())
+				}
 				a.updateWindowTitle()
 			}
 		}
@@ -1732,6 +2162,117 @@ func (a *App) onEvent(ev core.Event) {
 			}
 		}
 
+	case "cti.agent":
+		// 坐席模式变化（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）：
+		// 只有坐席模式才显示高级话务按钮。通话中就地重建面板（两方通话
+		// 才显示，拨号/振铃不显示——rebuildCallRows 按状态分支）。
+		if data, ok := ev.Data.(map[string]any); ok {
+			on, _ := data["online"].(bool)
+			if name, ok := data["displayName"].(string); ok {
+				a.agentDisplayName = name
+			}
+			if mode, ok := data["agentMode"].(string); ok {
+				a.agentMode = mode
+			}
+			if busy, ok := data["isBusy"].(bool); ok {
+				a.agentBusy = busy && on
+			}
+			if !on {
+				a.agentBusy = false
+			}
+			a.agentOnline = on
+			// 这里不再打日志：core 的 setAgentOnline 已经打过一条「坐席模式变化」，
+			// 两边同一句文案会让日志里出现两条一模一样的记录（用户实测）。
+			a.applyAgentState()
+			if a.uiState == uiInCall && a.talkState() == core.TalkTwoParty {
+				a.rebuildPanel(incallButtons)
+			}
+			// 非坐席模式下不应停留在"拨号复用"（咨询/转移/加会）里
+			if !on && a.ctiDialMode != "" {
+				a.exitCTIDialMode()
+				if a.mainShown {
+					a.mainW.Hide()
+					a.mainShown = false
+				}
+			}
+		}
+
+	case "cti.state":
+		// 话务状态变化（MSP_EVENT_*，REQ-ACC-026）：重建通话面板。
+		// 对端号码/名称也可能变（咨询转接完成后本机接管原通话，见
+		// MSP_EVENT_CONSULT_TRANSFER），所以先按新通话刷新对端展示。
+		//
+		// **只在"通话中"重建**：话务事件也可能在振铃期间到达——被咨询方会先收到
+		// CONSULT_STARTED、而咨询腿那通电话还在振铃，这时用 incallButtons 重建会把
+		// 振铃面板错误地变成"通话中"（接听/拒接按钮都不见了）。状态字段照常更新，
+		// 接通时 setCallUI(uiInCall) 会用新状态重建（届时入口按钮按 ConsultInProgress 隐藏）。
+		if callID, call := callData(ev.Data); call != nil && callID == a.activeCallID {
+			a.activeCall = call
+			a.setCallName(call)
+			a.applyCallPhase(call)
+			if a.uiState == uiInCall {
+				a.rebuildPanel(incallButtons)
+			}
+		}
+
+	case "cti.failed":
+		// CTI 报的话务失败（协议 §16.2/§16.3）：CALL_FAILED 的 refuse/cancel/
+		// takeover、CONSULT_FAILED 的 refuse/cancel。消息由 core 翻好（cti.failed
+		// 事件），这里就地弹提示条。
+		if data, ok := ev.Data.(map[string]any); ok {
+			msg, _ := data["message"].(string)
+			if msg != "" {
+				a.toastError(msg)
+			}
+		}
+
+	case "cti.result":
+		// 指令结果（REQ-ACC-026）：结束按钮的"旋转中"状态；失败要显示错误消息
+		//（包括 2 秒没等到回执的超时），然后照旧把拨号复用模式收回去。
+		a.stopCTISpin()
+		if data, ok := ev.Data.(map[string]any); ok {
+			action, _ := data["action"].(string)
+			// listAgents：结果交给在线座席页（不参与拨号复用的收尾）
+			if action == "listAgents" {
+				if ok, _ := data["success"].(bool); ok {
+					if a.agents != nil {
+						a.agents.setAgents(parseAgentEntries(data["data"]))
+					}
+					return
+				}
+				msg, _ := data["message"].(string)
+				if msg == "" {
+					msg = "获取在线座席失败"
+				}
+				logx.Logger().Warn("获取在线座席失败", "code", data["code"], "message", msg)
+				if a.agents != nil {
+					a.agents.setError(msg)
+				}
+				a.toastError(msg)
+				return
+			}
+			if success, _ := data["success"].(bool); success {
+				// 拨号复用流程（发起咨询/转移/加会…）成功：收起主窗体、回到通话面板。
+				// 只有**该复用模式自己的动作**才收起：复用期间用户在同一个主窗体上
+				// 点坐席状态按钮（setBusy/setIdle）等，回执不能把主窗体关掉。
+				if a.ctiDialMode != "" && ctiDialAction(a.ctiDialMode, action) {
+					a.finishCTIDial()
+				}
+				return
+			}
+			msg, _ := data["message"].(string)
+			if msg == "" {
+				msg = "操作失败"
+			}
+			logx.Logger().Warn("CTI 操作失败", "code", data["code"], "message", msg)
+			a.toastError(msg)
+			if a.ctiDialMode != "" && ctiDialAction(a.ctiDialMode, action) {
+				a.exitCTIDialMode()
+				a.mainW.Hide()
+				a.mainShown = false
+			}
+		}
+
 	case "call.terminated", "call.failed":
 		// 通话记录窗口开着就刷新（新记录在 core 侧先入队再发事件，这里查得到）。
 		// 必须在下面 call.failed 的提前 return 之前。
@@ -1740,9 +2281,11 @@ func (a *App) onEvent(ev core.Event) {
 		// 停止振铃音，并按结果放提示音：遇忙放忙音，其余放挂断音
 		reason := ""
 		missed := false
+		ctiManaged := false
 		if m, ok := ev.Data.(map[string]any); ok {
 			reason, _ = m["reason"].(string)
 			missed, _ = m["missed"].(bool)
+			ctiManaged, _ = m["ctiManaged"].(bool)
 		}
 		if missed {
 			// 未接来电（REQ-UI-010）：是否未接由核心判定（core.missedOnEnd），
@@ -1767,6 +2310,15 @@ func (a *App) onEvent(ev core.Event) {
 			}
 		}
 		if ev.Name == "call.failed" {
+			if ctiManaged {
+				// CTI 接管的话务（收到过 CALL_RINGING）：SIP 侧原因不弹窗——
+				// CTI 随后下发的 CALL_FAILED 会经 cti.failed 给出中文消息
+				//（否则「603 …」与「呼叫未接通」两条提示同时出现）。
+				logx.Logger().Info("呼叫失败（CTI 接管，失败消息由 cti.failed 提示）",
+					"reason", reason)
+				a.restoreIdle()
+				return
+			}
 			if reason == "" {
 				reason = "未知原因"
 			}
@@ -1827,8 +2379,20 @@ func (a *App) setRegLabel(state string) {
 		state = "unregistered"
 	}
 	a.regLabel.SetText(regText(state))
-	a.regLabel.SetColor(dotColors[state])
+	a.regLabel.SetColor(a.statusColor(state))
 	a.regLabel.SetBold(true)
+}
+
+// statusColor 注册状态文字/圆点的颜色：与圆点同色；**已注册且坐席置忙时用
+// 黄色**（与"注册中"同一个黄），让顶栏跟着置忙/置闲一起变（REQ-ACC-034）。
+func (a *App) statusColor(state string) color.Color {
+	if state == "registered" && a.agentBusy {
+		return busyColor
+	}
+	if c, ok := dotColors[state]; ok {
+		return c
+	}
+	return dotColors["unregistered"]
 }
 
 // toggleAutoAnswer 自动接听开关：开启后来电自动接听。
@@ -1841,7 +2405,8 @@ func (a *App) toggleAutoAnswer() {
 	// 这样桌面按钮与网页开关永远是同一份状态。
 }
 
-// setAutoAnswer 刷新自动接听开关的界面状态（本地点击与网页开关共用）。
+// setAutoAnswer 刷新自动接听按钮的外观（本地点击与网页开关共用）：
+// 开启 = 绿色图标、关闭 = 灰色图标，文案走悬停提示（用户要求）。
 func (a *App) setAutoAnswer(enabled bool) {
 	a.autoAnswer = enabled
 	logx.Logger().Info("自动接听开关", "enabled", enabled)
@@ -1849,11 +2414,12 @@ func (a *App) setAutoAnswer(enabled bool) {
 		return
 	}
 	if enabled {
-		a.autoAnswerBtn.Importance = widget.HighImportance
+		a.autoAnswerBtn.SetResource(tintIcon(IconAutoAnswerOn, colorSuccessGreen))
+		a.autoAnswerBtn.SetNote("自动接听：已开启（点击关闭）")
 	} else {
-		a.autoAnswerBtn.Importance = widget.MediumImportance
+		a.autoAnswerBtn.SetResource(tintIcon(IconAutoAnswerOn, disabledIconColor()))
+		a.autoAnswerBtn.SetNote("自动接听：已关闭（点击开启）")
 	}
-	a.autoAnswerBtn.Refresh()
 }
 
 // showMain 显示主窗口（托盘单击/菜单唤出）。
@@ -1863,6 +2429,9 @@ func (a *App) showMain() {
 	// 通话中也能从托盘唤出主窗体（REQ-UI-030）：此时主窗体只放开号码按键与
 	// 键盘输入（发 DTMF），输入框/设置/呼叫按钮等一律禁用，见 applyMainCallMode
 	a.applyMainCallMode(a.uiState != uiIdle)
+	// 任务栏按钮在窗口显示时才创建（图标取自窗口图标）：按当前话机状态再设一次，
+	// 避免"窗口隐藏期间状态变了、按钮建出来还是旧颜色"。
+	a.mainW.SetIcon(a.trayIcon())
 	a.mainW.Show()
 	a.mainShown = true
 	a.mainW.RequestFocus()
@@ -1884,7 +2453,7 @@ func (a *App) isMainWindowVisible() bool {
 // bringMainToFront 把主窗口带到前台（Windows 前台锁可能拒绝，
 // 失败时仅任务栏闪烁——平台级限制）。
 func (a *App) bringMainToFront() {
-	if hwnd := findWindowByTitlePrefix("mti-sip-phone"); hwnd != 0 {
+	if hwnd := findWindowByTitlePrefix(appDisplayName); hwnd != 0 {
 		forceForegroundWindow(hwnd)
 	}
 }
@@ -1961,25 +2530,32 @@ func (a *App) saveAccount() {
 		a.showInfo("提示", "「声明 IP」请填合法 IP（如 10.168.5.10），或留空表示自动")
 		return
 	}
+	heartbeat := 20
+	if v := strings.TrimSpace(a.accCTIHeartbeat.Text); v != "" {
+		fmt.Sscanf(v, "%d", &heartbeat)
+	}
+	if heartbeat <= 0 {
+		heartbeat = 20
+	}
 	acc := config.Account{
-		Enabled:     a.accEnabled.Checked,
-		Server:      host,
-		Port:        port,
-		Expires:     expires,
-		RPort:       a.rportCheck.Checked,
-		ChkOpt:      a.chkOptCheck.Checked,
-		STUNEnabled: a.accStunCheck.Checked,
-		STUNServer:  a.accStunServer.Text,
-		Proxy:       a.accProxy.Text,
-		Domain:      config.NormalizeDomain(a.accDomain.Text),
-		PublicIP:    declaredIP,
-		Transport:   config.NormalizeTransport(a.accTransport.Selected),
-		TLSVerify:   a.tlsVerifyCheck.Checked,
-		SRTP:        config.NormalizeSRTP(srtpValueOfLabel(a.accSRTP.Selected)),
-		Account:     a.accAccount.Text,
-		AuthUser:    a.accAuthUser.Text,
-		Password:    a.accPassword.Text,
-		DisplayName: a.accDisplay.Text,
+		Enabled:      a.accEnabled.Checked,
+		Server:       host,
+		Port:         port,
+		Expires:      expires,
+		CTIHeartbeat: heartbeat,
+		RPort:        a.rportCheck.Checked,
+		STUNEnabled:  a.accStunCheck.Checked,
+		STUNServer:   a.accStunServer.Text,
+		Proxy:        a.accProxy.Text,
+		Domain:       config.NormalizeDomain(a.accDomain.Text),
+		PublicIP:     declaredIP,
+		Transport:    config.NormalizeTransport(a.accTransport.Selected),
+		TLSVerify:    a.tlsVerifyCheck.Checked,
+		SRTP:         config.NormalizeSRTP(srtpValueOfLabel(a.accSRTP.Selected)),
+		Account:      a.accAccount.Text,
+		AuthUser:     a.accAuthUser.Text,
+		Password:     a.accPassword.Text,
+		DisplayName:  a.accDisplay.Text,
 	}
 	if acc.Enabled && (acc.Server == "" || acc.Account == "") {
 		a.showInfo("提示", "启用账户需填写服务器与账号")
@@ -1999,10 +2575,13 @@ func (a *App) loadAccountIntoForm() {
 	acc := a.cfg.Account
 	a.accEnabled.SetChecked(acc.Enabled)
 	a.rportCheck.SetChecked(acc.RPort)
-	a.chkOptCheck.SetChecked(acc.ChkOpt)
-	a.updateChkOptRow(acc.Transport)
 	a.accServerAddr.SetText(fmt.Sprintf("%s:%d", acc.Server, acc.Port))
 	a.accExpires.SetText(fmt.Sprintf("%d", acc.Expires))
+	hb := acc.CTIHeartbeat
+	if hb <= 0 {
+		hb = 20
+	}
+	a.accCTIHeartbeat.SetText(fmt.Sprintf("%d", hb))
 	a.accProxy.SetText(acc.Proxy)
 	a.accStunCheck.SetChecked(acc.STUNEnabled)
 	if acc.STUNServer == "" {

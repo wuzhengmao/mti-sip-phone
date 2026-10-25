@@ -9,5 +9,5 @@ import "embed"
 // 改动这些资源后**必须重新构建 + 重启软电话**才生效（资源是编进二进制的），
 // 前端出问题时先确认跑的是不是新构建。
 //
-//go:embed index.html css/* js/* js/views/* sdk/*
+//go:embed index.html css/* js/* js/views/* sdk/* img/*
 var Assets embed.FS

@@ -1,6 +1,7 @@
 package calllog
 
 import (
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -305,5 +306,102 @@ func TestTruncateUntrustedText(t *testing.T) {
 	rec := queryAll(t, s, "").Records[0]
 	if len([]rune(rec.Remote)) != maxTextLen {
 		t.Fatalf("超长号码应截断到 %d 个字符，得到 %d", maxTextLen, len([]rune(rec.Remote)))
+	}
+}
+
+// TestDisplayNameRoundTrip 座席显示名落库并原样查回（REQ-CALL-007 补充）：
+// 通话记录展示名称时优先用它，其次才回退通信录。
+func TestDisplayNameRoundTrip(t *testing.T) {
+	s, _ := openTest(t)
+	s.Start(core.CallRecord{CallID: "c1", Direction: "outgoing", Remote: "2901",
+		DisplayName: "测试1", StartedAt: time.Now()})
+	rec := queryAll(t, s, "").Records[0]
+	if rec.DisplayName != "测试1" {
+		t.Fatalf("display_name 应原样查回，得到 %q", rec.DisplayName)
+	}
+}
+
+// TestLegacySchemaGetsDisplayNameColumn 旧库（user_version=1，没有 display_name）
+// 打开时自动补列：旧记录 displayName 为空，新写入可正常保存。
+func TestLegacySchemaGetsDisplayNameColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "call-log.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("建旧库失败: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE call_log (
+		call_id TEXT PRIMARY KEY, direction TEXT NOT NULL, remote TEXT NOT NULL,
+		remote_name TEXT NOT NULL DEFAULT '', started_at INTEGER NOT NULL,
+		answered_at INTEGER NOT NULL DEFAULT 0, ended_at INTEGER NOT NULL DEFAULT 0,
+		has_video INTEGER NOT NULL DEFAULT 0, missed INTEGER NOT NULL DEFAULT 0,
+		reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+		INSERT INTO call_log (call_id, direction, remote, started_at, created_at)
+		VALUES ('old', 'outgoing', '1001', 1, 1);`); err != nil {
+		db.Close()
+		t.Fatalf("建旧表失败: %v", err)
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("打开旧库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if rec := queryAll(t, s, "").Records[0]; rec.CallID != "old" || rec.DisplayName != "" {
+		t.Fatalf("旧记录应保留且 displayName 为空，得到 %+v", rec)
+	}
+	s.Start(core.CallRecord{CallID: "new", Direction: "outgoing", Remote: "2002",
+		DisplayName: "李四", StartedAt: time.Now()})
+	page := queryAll(t, s, "")
+	var got string
+	for _, r := range page.Records {
+		if r.CallID == "new" {
+			got = r.DisplayName
+		}
+	}
+	if got != "李四" {
+		t.Fatalf("补列后新记录应能保存 display_name，得到 %q", got)
+	}
+}
+
+// TestPlaceholderRemoteName 网关的占位显示名（FreeSWITCH 出局腿把 From 的
+// display-name 写成 "Outbound Call"）不应显示在通话记录里：写入时过滤，
+// 老记录（库里已有）读取时同样过滤，界面回退到号码。
+func TestPlaceholderRemoteName(t *testing.T) {
+	s, _ := openTest(t)
+	base := time.Now()
+	s.Start(core.CallRecord{
+		CallID: "c1", Direction: "incoming", Remote: "91381003",
+		RemoteName: "Outbound Call", StartedAt: base,
+	})
+	s.Start(core.CallRecord{
+		CallID: "c2", Direction: "incoming", Remote: "1002",
+		RemoteName: "张三", StartedAt: base.Add(time.Minute),
+	})
+	page := queryAll(t, s, "")
+	if len(page.Records) != 2 {
+		t.Fatalf("应有 2 条记录，得到 %d", len(page.Records))
+	}
+	for _, r := range page.Records {
+		if r.CallID == "c1" && r.RemoteName != "" {
+			t.Fatalf("占位显示名应被过滤，实际 %q", r.RemoteName)
+		}
+		if r.CallID == "c2" && r.RemoteName != "张三" {
+			t.Fatalf("正常显示名应保留，实际 %q", r.RemoteName)
+		}
+	}
+
+	// 模拟老库：直接写一条带占位名的记录，读取时也要过滤
+	if _, err := s.db.Exec(`INSERT INTO call_log
+		(call_id, direction, remote, remote_name, display_name, started_at, answered_at,
+		 ended_at, has_video, missed, reason, created_at)
+		VALUES ('legacy','incoming','91381003','OutboundCall','',0,0,0,0,0,'',0)`); err != nil {
+		t.Fatalf("插入老记录失败: %v", err)
+	}
+	page = queryAll(t, s, "")
+	for _, r := range page.Records {
+		if r.CallID == "legacy" && r.RemoteName != "" {
+			t.Fatalf("老记录的占位显示名读取时也应过滤，实际 %q", r.RemoteName)
+		}
 	}
 }

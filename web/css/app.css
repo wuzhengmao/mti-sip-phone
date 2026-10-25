@@ -33,6 +33,19 @@
   .badge.ok { background: #dcfce7; color: var(--green); }
   .badge.err { background: #fee2e2; color: var(--red); }
   .badge.warn { background: #fef3c7; color: var(--warn); }
+  /* 在线座席（REQ-ACC-035）：状态圆点 + 技能组 tag（其余技能组收进 more 的悬停提示） */
+  .dot {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    margin-right: 6px; vertical-align: middle; background: var(--gray);
+  }
+  .dot-ok { background: var(--green); }
+  .dot-warn { background: var(--warn); }
+  .dot-err { background: var(--red); }
+  .tag {
+    display: inline-block; padding: 1px 8px; margin-right: 4px; border-radius: 4px;
+    background: #eef0f3; color: var(--text); font-size: 12px;
+  }
+  .tag.more { color: var(--gray); cursor: default; }
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
   label { font-size: 13px; color: var(--gray); min-width: 70px; }
   /* 勾选行：开关 + 说明文字（label 的最小宽度在这里不需要） */
@@ -290,3 +303,202 @@ details.diag .body { margin-top: 10px; }
 .suggest .item:hover, .suggest .item.active { background: #eef2f7; }
 .suggest .item .num { font-variant-numeric: tabular-nums; color: var(--text); }
 .suggest .item .name { color: var(--gray); }
+
+/* ---------- 网页控制台 1.0.18：拨号对话框 / 多方通话 / 多方话务条 ---------- */
+  /* display 布局的元素会盖掉 UA 的 hidden，必须显式兜底 */
+  [hidden] { display: none !important; }
+
+  /* 弹层：点遮罩空白处关闭 */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(15, 23, 42, .45);
+    display: flex; align-items: center; justify-content: center; z-index: 80;
+  }
+  .dial-dialog {
+    background: var(--card); border-radius: 12px; width: min(420px, calc(100vw - 32px));
+    max-height: calc(100vh - 48px); overflow: auto; padding: 14px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .25);
+  }
+  .dial-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .dial-tabs { display: flex; gap: 6px; flex: 1; }
+  .dial-tabs .tab {
+    background: #fff; color: var(--text); border: 1px solid var(--border);
+    padding: 6px 14px; border-radius: 999px; font-size: 13px;
+  }
+  .dial-tabs .tab.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .dial-pane .dtmf-pad { margin-top: 8px; }
+  .dial-actions { margin-top: 10px; }
+  .dial-actions button { flex: 1; }
+  .dial-agent-list { max-height: 320px; overflow: auto; }
+  .dial-agent-row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .dial-agent-row:last-child { border-bottom: none; }
+  .dial-agent-row .who { flex: 1; min-width: 0; }
+  .dial-agent-row .who .no { font-size: 13px; }
+  .dial-agent-row .who .nm { font-size: 12px; color: var(--gray); }
+  .dial-agent-row .acts { display: flex; gap: 4px; flex: none; }
+  .dtmf-dialog {
+    background: var(--card); border-radius: 12px; padding: 12px;
+    width: 220px; box-shadow: 0 12px 32px rgba(0, 0, 0, .25);
+  }
+  .dtmf-dialog .dtmf-pad { grid-template-columns: repeat(3, 1fr); }
+  .dtmf-dialog button#dtmfClose { width: 100%; margin-top: 8px; }
+
+  /* 通话卡片：状态行 + 多方列表 */
+  .call-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .call-status { font-size: 15px; font-weight: 600; }
+  .call-timer { font-variant-numeric: tabular-nums; color: var(--gray); font-size: 13px; }
+  .spacer { flex: 1; }
+  .call-parties { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+  .party-row { display: flex; align-items: center; gap: 6px; }
+  .party-row .who { flex: 1; min-width: 0; font-size: 14px; overflow: hidden;
+                    text-overflow: ellipsis; white-space: nowrap; }
+  .party-row .acts, .bar-party .acts { display: flex; gap: 4px; flex: none; }
+  .mini-icon {
+    width: 28px; height: 28px; padding: 0; border-radius: 6px; border: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; cursor: pointer;
+  }
+  .mini-icon:hover { background: #eef0f3; }
+  .mini-icon.danger svg { fill: var(--red); }
+  .mini-icon.normal svg { fill: var(--primary); }
+
+  /* 多方话务条：每一方一个块 */
+  .bar-parties { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .bar-party {
+    position: relative; display: flex; align-items: center; gap: 6px;
+    background: rgba(255, 255, 255, .12); border-radius: 8px; padding: 2px 8px;
+  }
+  .bar-party .who { font-size: 13px; white-space: nowrap; }
+  .bar-party .acts { gap: 2px; }
+  .bar-party .mini-icon { width: 24px; height: 24px; }
+  .bar-party .mini-icon:hover { background: rgba(255, 255, 255, .18); }
+  .bar-party .mini-icon.danger svg { fill: #fecaca; }
+  .bar-party .mini-icon.normal svg { fill: #dbeafe; }
+  /* 会议话务条：悬停主持人块浮现成员列表 */
+  .bar-members {
+    display: none; position: absolute; left: 0; top: 100%; margin-top: 6px;
+    min-width: 160px; max-height: 240px; overflow: auto; z-index: 60;
+    background: var(--card); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+    font-size: 12px; line-height: 1.7; white-space: nowrap;
+  }
+  .bar-party:hover .bar-members { display: block; }
+  .bar-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .bar-actions .mini-icon { width: 30px; height: 30px; }
+  .bar-actions .mini-icon svg { fill: #fff; }
+  .party-row .who .nm { color: var(--gray); font-size: 12px; }
+  /* 技能组小标签（CALL_RINGING 的 skillGroup）：紧跟在号码/名称后面 */
+  .party-row .who .tag, .bar-party .who .tag {
+    margin: 0 0 0 6px; padding: 0 6px; font-size: 11px; vertical-align: middle;
+  }
+
+  /* 只读的会控按钮（普通成员视角的 禁视频/禁音/禁听）：不可点击、鼠标不显示手型、
+     悬停没有底色变化，并置灰——看起来就是"不能使用"的状态。 */
+  .mini-icon:disabled, .mini-icon[disabled] { cursor: default; opacity: .45; }
+  .mini-icon:disabled:hover, .mini-icon[disabled]:hover,
+  .bar-party .mini-icon:disabled:hover, .bar-party .mini-icon[disabled]:hover {
+    background: transparent;
+  }
+
+/* ---------- 1.0.18 修订：Edge 风格页签 / 跟随鼠标的弹层 / 文字按钮 ---------- */
+  .popover { position: fixed; z-index: 90; }
+  .dial-dialog { position: fixed; margin: 0; }
+  .dial-tabs .tab {
+    background: transparent; border: none; border-bottom: 2px solid transparent;
+    border-radius: 0; padding: 6px 12px; color: var(--gray); font-size: 13px;
+  }
+  .dial-tabs .tab:hover { color: var(--text); }
+  .dial-tabs .tab.active {
+    color: var(--text); border-bottom-color: var(--primary); background: transparent;
+  }
+  .popover-close {
+    border: none; background: transparent; width: 26px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; border-radius: 6px; flex: none;
+  }
+  .popover-close:hover { background: #eef0f3; }
+  /* 迷你 DTMF 拨号盘：收窄成约 3:4 的竖长比例（内容宽 110px） */
+  .dtmf-dialog { position: fixed; width: 130px; padding: 10px; }
+  .dtmf-dialog .dtmf-pad { max-width: none; margin: 0; }
+  .mini-text {
+    border: none; background: transparent; color: var(--primary); font-size: 12px;
+    padding: 2px 6px; border-radius: 4px; cursor: pointer; white-space: nowrap;
+  }
+  .mini-text:hover { background: #eef0f3; }
+  .mini-text.danger { color: var(--red); }
+  .bar-party .mini-text { color: #dbeafe; }
+  .bar-party .mini-text.danger { color: #fecaca; }
+  .bar-party .mini-text:hover { background: rgba(255, 255, 255, .15); }
+  .cti-icon {
+    width: 26px; height: 26px; padding: 0; border: none; border-radius: 6px;
+    background: var(--primary); display: inline-flex; align-items: center;
+    justify-content: center; cursor: pointer;
+  }
+  .cti-icon img { width: 16px; height: 16px; display: block; }
+  .cti-icon.danger { background: var(--red); }
+  .cti-icon:hover { filter: brightness(.95); }
+  .agent-status-icon { width: 18px; height: 18px; flex: none; }
+  .bar-actions button { padding: 6px 10px; font-size: 13px; }
+  .dial-agent-row .agent-info { text-align: right; flex: none; max-width: 120px; }
+  .dial-agent-row .agent-status { font-size: 12px; }
+  .dial-agent-row .agent-skills { margin-top: 2px; }
+  .party-row .party-arrow, .bar-party .party-arrow {
+    display: inline-flex; align-items: center; vertical-align: middle; margin: 0 4px;
+  }
+  /* 话务条的拨号盘按钮：蓝色底（与其他图形按钮一致） */
+  .bar-actions .mini-icon.dialpad-btn { background: var(--primary); }
+  .bar-actions .mini-icon.dialpad-btn:hover { background: var(--primary-hover); }
+  /* 在线座席行：状态与技能组都右对齐，并与右侧按钮拉开距离 */
+  .dial-agent-row .agent-info { padding-left: 8px; margin-right: 10px; }
+  .dial-agent-row .agent-skills { text-align: right; }
+  .dial-agent-row .agent-skills .tag { margin-right: 0; margin-left: 4px; }
+  .mini-icon.warn svg { fill: #d97706; }
+  .host-icon { display: inline-flex; align-items: center; margin-right: 2px; }
+  .host-icon img { width: 14px; height: 14px; display: block; }
+  .party-row .lead { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+  .party-row .lead .mini-icon { width: 24px; height: 24px; }
+  .bar-members .party-row { padding: 3px 0; }
+  .bar-members .party-row .who { color: var(--text); font-size: 12px; }
+  /* 会议行首列固定宽度：移除按钮 / 主持人图标 / 空位同列，号码左缘对齐 */
+  .party-row .lead.lead-slot { width: 30px; flex: none; justify-content: center; }
+  /* 话务条悬停成员列表：固定宽度、无缝隙（鼠标能从方块直接移入列表） */
+  .bar-members {
+    margin-top: 0; width: 340px; max-width: calc(100vw - 24px);
+    padding: 4px 10px;
+  }
+  .bar-members .party-row { width: 100%; }
+  .bar-members .party-row .who {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bar-members .party-row .acts { margin-left: auto; flex: none; }
+  .party-row .lead.lead-slot .host-icon { margin-right: 0; }
+  /* 会议成员列表：行距略微加大（用户要求） */
+  .bar-members .party-row { padding: 6px 0; }
+  .bar-members { padding: 6px 12px; }
+  /* 文字按钮的图标：颜色随文字（currentColor / 白色 PNG） */
+  .btn-ico { display: inline-flex; align-items: center; margin-right: 6px; }
+  .btn-ico img { width: 16px; height: 16px; display: block; }
+  .btn-ico svg { display: block; }
+  /* MSP_ACTION 在途：圆圈旋转（与 UI 一致），按钮禁用 */
+  .cti-spin {
+    display: inline-block; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, .45); border-top-color: #fff;
+    animation: cti-spin .8s linear infinite;
+  }
+  button.cti-busy { cursor: progress; }
+  @keyframes cti-spin { to { transform: rotate(360deg); } }
+  /* 带图标的文字按钮：用 flex 让图标与文字精确纵向居中 */
+  button.has-ico { display: inline-flex; align-items: center; justify-content: center; }
+  .btn-ico { vertical-align: middle; }
+  /* 导航页签：当前页用下划线高亮（不要做成实心按钮，与对话框页签一致） */
+  .tabs a {
+    padding: 8px 12px; border-radius: 0; border-bottom: 2px solid transparent;
+    color: var(--gray);
+  }
+  .tabs a:hover { background: transparent; color: var(--text); }
+  .tabs a.active {
+    background: transparent; color: var(--text);
+    border-bottom-color: var(--primary); font-weight: 600;
+  }

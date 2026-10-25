@@ -37,12 +37,12 @@ const (
 type UpdateStatus struct {
 	Phase       string     `json:"phase"`
 	Info        UpdateInfo `json:"info"`
-	Host        string     `json:"host,omitempty"`       // 下载地址主机名（界面展示来源）
-	Downloaded  int64      `json:"downloaded,omitempty"` // 已下载字节数
-	Total       int64      `json:"total,omitempty"`      // 总字节数（0 = 未知）
-	Progress    float64    `json:"progress,omitempty"`   // 下载进度 0-100
+	Host        string     `json:"host,omitempty"`        // 下载地址主机名（界面展示来源）
+	Downloaded  int64      `json:"downloaded,omitempty"`  // 已下载字节数
+	Total       int64      `json:"total,omitempty"`       // 总字节数（0 = 未知）
+	Progress    float64    `json:"progress,omitempty"`    // 下载进度 0-100
 	WaitingCall bool       `json:"waitingCall,omitempty"` // 已就绪，等通话结束后自动重启
-	Error       string     `json:"error,omitempty"`      // 面向用户的中文失败原因
+	Error       string     `json:"error,omitempty"`       // 面向用户的中文失败原因
 }
 
 // 更新相关错误，供接口层映射为错误码。
