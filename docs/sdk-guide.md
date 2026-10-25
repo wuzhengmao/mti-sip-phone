@@ -270,7 +270,7 @@ await sdk.consult('2002');                   // 咨询（转移/三方见下表�
 | `exitThreeWay(target)` | 三方通话里强制挂断某一方（仅 owner） |
 | `addConferenceMembers(members)` / `removeConferenceMembers(members)` | 加/减会议成员 |
 | `finishConsult()` / `finishConference()` | 结束咨询 / 结束会议（owner） |
-| `whisper()` / `intervene()` / `intercept()` | 监听耳语 / 插话（强插）/ 强拦 |
+| `whisper()` / `stopWhisper()` / `intervene()` / `intercept()` | 监听耳语 / 退出耳语（恢复静默监听）/ 插话（强插）/ 强拦 |
 
 失败错误码：`cti_failed`（平台拒绝，`message` 里带平台错误码）、`cti_busy`（已有指令在途，
 同一时间只允许一条）、`cti_timeout`、`cti_not_agent`。
@@ -323,7 +323,7 @@ sub.transforms();
 | `call.ringing` | 呼出振铃（180/183） | `earlyMedia: true` = 对端已下发回铃音 |
 | `call.established` | 通话建立 | `{callId, call}` |
 | `call.terminated` | 通话结束 | `reason`: `local_hangup`/`remote_hangup`/`remote_cancel`/`rejected`；`missed: true` = 未接来电 |
-| `call.failed` | 呼叫失败 | `reason`: `busy`/`no_answer`/`not_found`/`failed` |
+| `call.failed` | 呼叫失败 | `reason` 是 SIP 信令的原因原文（如 `486 Busy Here`、`408 Request Timeout`、`SDP 协商失败: …`），可直接展示；网页控制台显示「呼叫失败：<reason>」。`ctiManaged=true`（CTI 接管，收到过 `CALL_RINGING`）时**不要**显示 SIP 原因——`cti.failed` 会给出统一中文消息 |
 | `call.muted` | 保持状态变化 | `{callId, muted}` |
 | `call.audio` | 麦克风/扬声器/音量变化 | `call.micMuted` / `speakerMuted` / `micGain` / `speakerVolume`；**事件合并，最多 150ms 一条** |
 | `call.video` | 视频状态变化 | `call.video`: `{negotiated, enabled, previewOn, sending, width, height}` |
@@ -336,9 +336,27 @@ sub.transforms();
 | `system.config` | 配置被改写 | `{section, values}`，`section`: `account`/`audio`/`video`/`log`/`ws`/`autoStart` |
 | `audio.ready` | 音频后端后台初始化完成 | `{ready}`；据此刷新设备下拉（无 UI 版没有桌面界面，这是唯一信号） |
 | `cti.agent` | 坐席模式/置忙变化 | `{online, displayName, agentMode, isBusy}`；`agentMode=none` 时 `online=false` |
-| `cti.state` | 通话的复杂话务状态变化（咨询/三方/监听/会议） | `{callId, call}`；`call.cti` 是完整 `CTIState`（`talkState` 等） |
+| `cti.state` | 通话的话务状态变化（双方通话生命周期 CALL_*，以及咨询/三方/监听/会议） | `{callId, call}`；`call.cti` 是完整 `CTIState`（`talkState` 等；双方通话另有 `mspCallId`（CTI 侧话务 ID）、`callPhase`（`dialing`/`ringing`/`talking`）、主被叫与接听坐席的名称字段）。`callPhase=ringing` 时把状态显示为「振铃中」；`CALL_FINISHED`/`CALL_FAILED` 由软电话挂断，页面收到 `call.terminated` 关掉通话卡片即可 |
+| `cti.failed` | CTI 话务失败（CALL_FAILED / CONSULT_FAILED） | `{callId, kind, reason, message}`；`kind=call`（refuse 呼叫未接通 / cancel 呼叫已取消 / takeover 呼叫被代接）、`kind=consult`（refuse 咨询未接通 / cancel 咨询已取消），`message` 已翻成中文，直接 toast 即可 |
+| `call.panel` | **通话面板快照**（REQ-WS-023 / REQ-SDK-010，由 CTI 的 `MSP_CALL_PANEL_UPDATED`/`MSP_CONFERENCE_PANEL_UPDATED` 整份面板驱动） | `{agentMode, isBusy, callPanel, conferencePanel}`。应用可直接用它渲染自己的通话面板。**字段保留协议名、不丢弃话机未用到的属性**（`callStatus`/`callerNo`/`calledNo`/`intercom`/`ringingTime`/`offhookTime` 等原样交给应用），唯一的改写是 `peer`/`member` 合并成 `{number,name,note}` 对象：`callPanel` = `{callId, agent?, callType?, callMode?, owner?, state, startTime, title, failCause?, callList}`。`callPanel.owner` 是**当前操作的发起方**（咨询=咨询方、三方=发起方、监听=班长；`callMode=normal` 时没有）：`normal` 才显示咨询/转移/会议入口；`consult` 时只有 owner 显示三方/咨询转移/结束咨询（被咨询方按普通通话显示）；`three-way` 时只有 owner 显示移除/强制挂断。`callPanel.title` 是状态文案、`callPanel.state` 决定显示哪些按钮（`dialing`/`ringing`/`incoming`/`talking`/`consult-dialing`/`consult-ringing`/`consult-talking`/`three-way`/`monitoring`/`whispering`）、`callList` 每项 = `{callerNo?, calledNo?, peer:{number,name,note}, intercom?, skillGroup?, callType?, callStatus, startTime, ringingTime?, offhookTime?, target?（监听时的被叫）}`。会议时 `conferencePanel` = `{confId, owner（主持人号码）, memberList:[{member:{number,name,note}, intercom, owner, state, timestamp}]}`（`member` 与 `peer` 同为对象；主持人第一行；`state` 透传 dialing/ringing/talking/holding 与会控 muted/deafened/vmuted）。**`peer`/`member` 的 `note` 只在协议没有给名称、回退到通信录时才有**（此时 `name` 也来自通信录）；协议已经给了名称时只有 `name`、不带备注。**两个 panel 互斥**：会议接通后只有 `conferencePanel`；被叫在会议邀请振铃阶段只有 `callPanel`（来电），接通后才切换。**两个 panel 都为 `null` 表示没有进行中的通话**（关闭面板） |
 | `cti.result` | CTI 指令结果（MSP_RESULT） | `{seq, success, code, message, action, data?}`；用 `cti.action` 时通常不需要它 |
 | `system.update` | 自动更新状态变化 | `phase`: `idle`/`available`/`downloading`/`ready`/`failed`；含 `progress`、`error` 等 |
+
+**用 `call.panel` 快速搭一个通话面板**（不必解析 `call.*` / `cti.*` 明细）：
+
+```js
+sdk.on('call.panel', (p) => {
+  if (!p.callPanel && !p.conferencePanel) return hidePanel(); // 没有通话
+  if (p.conferencePanel) {                       // 会议（此时没有 callPanel）
+    status.textContent = '会议中';
+    return renderConference(p.conferencePanel);
+  }
+  status.textContent = p.callPanel.title;        // 拨号中 / 振铃中 / 咨询呼叫中 / …
+  renderParties(p.callPanel.callList);           // [{peer:{number,name,note}, callStatus, startTime, …}]
+  renderButtons(p.callPanel.state, p.callPanel.owner); // 按状态 + 发起方决定显示哪些按钮
+});
+```
+
 
 通话对象（`call`）字段：`id`、`direction`、`remote`、`remoteName`、`peerName?`（INVITE 的
 Call-Info display-name，显示名称时优先于通信录）、`consult?`（本通是服务端推来的咨询腿）、

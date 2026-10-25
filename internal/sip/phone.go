@@ -381,12 +381,27 @@ func (p *Phone) handleControlNotify(req *sip.Request) {
 		logx.Logger().Warn("收到非注册服务器发来的控制通知，已忽略", "event", ev, "source", req.Source())
 		return
 	}
-	// MSP_EVENT_*（通话面板事件，REQ-ACC-026）与 MSP_RESULT（反向指令回执）：
-	// 同样只接受注册服务器来源，但走各自的分发通道。
+	// 通话/会议面板（协议 §16.2/§16.3，2026-10 修订）：CTI 统一下发计算好的
+	// 完整面板，替代原来的 MSP_EVENT_CALL_*/CONSULT_*/... 细粒度事件。
+	// 两种 Event 头形式都收：MSP_CALL_PANEL_UPDATED（协议文档）与
+	// MSP_EVENT_CALL_PANEL_UPDATED（历史写法，parseMSPEventName 会转成同名）。
+	// MSP_EVENT_*（坐席 ONLINE/OFFLINE 等）与 MSP_RESULT 同样只接受注册服务器来源。
 	if name := parseMSPEventName(ev); name != "" {
 		var body map[string]any
 		if len(bytes.TrimSpace(req.Body())) > 0 {
 			_ = json.Unmarshal(req.Body(), &body)
+		}
+		go p.sink.OnMSPEvent(name, body)
+		return
+	}
+	if strings.EqualFold(ev, "MSP_CALL_PANEL_UPDATED") || strings.EqualFold(ev, "MSP_CONFERENCE_PANEL_UPDATED") {
+		var body map[string]any
+		if len(bytes.TrimSpace(req.Body())) > 0 {
+			_ = json.Unmarshal(req.Body(), &body)
+		}
+		name := "call_panel_updated"
+		if strings.EqualFold(ev, "MSP_CONFERENCE_PANEL_UPDATED") {
+			name = "conference_panel_updated"
 		}
 		go p.sink.OnMSPEvent(name, body)
 		return

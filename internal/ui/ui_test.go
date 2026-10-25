@@ -747,8 +747,31 @@ func TestCTISpinFrames(t *testing.T) {
 	}
 }
 
-// TestCTIIconsRender 话务按钮图标必须可用：PNG 图标（iconfont 原始渲染）要能
-// 解码出非空位图；SVG 图标（通用 X）要含 <path d="...">。兜底"图标空白/写错"。
+// TestCTISpinRestoresLatestIcon 在途转圈期间面板重建换了按钮图标（耳语→监听）：
+// 回执到达时必须恢复到**最新**图标，不能恢复成点击前的旧图标。
+func TestCTISpinRestoresLatestIcon(t *testing.T) {
+	testApp := test.NewApp()
+	defer testApp.Quit()
+	a := &App{}
+	btn := newPanelButton(IconCTIWhisper, colorHoldBlue, callPanelButtonSize, nil)
+	a.ctiInFlight = true
+	a.ctiPending = btn
+	a.ctiPendingRes = IconCTIWhisper
+	a.ctiSpinAt = time.Now().Add(-2 * ctiMinSpin) // 已超过最短转圈时间：立即恢复
+	btn.SetIcon(ctiSpinFrames[0])                 // 模拟转圈中
+
+	// 在途期间面板重建：耳语态把图标换成监听（应同步"恢复图标"）
+	a.setCTIButtonIcon(btn, IconCTIMonitor)
+	a.stopCTISpin()
+
+	if got := btn.iconSrc.Name(); got != IconCTIMonitor.Name() {
+		t.Fatalf("回执后应恢复成最新图标（监听），实际 %q", got)
+	}
+	if a.ctiInFlight {
+		t.Fatal("stopCTISpin 后不应仍在途")
+	}
+}
+
 func TestCTIIconsRender(t *testing.T) {
 	for name, res := range map[string]fyne.Resource{
 		"咨询":   IconCTIConsult,
@@ -797,7 +820,7 @@ func TestCallNameBoxMinSizeUsesFullText(t *testing.T) {
 	app := test.NewApp()
 	defer app.Quit()
 	b := newCallNameBox(newTooltipLayer())
-	b.Set("1381003", false, "")
+	b.Set("1381003", false, "", "")
 	full := b.MinSize().Width
 	if full < 40 {
 		t.Fatalf("MinSize 应按完整号码算宽度，实际 %.1f", full)
@@ -925,31 +948,6 @@ func TestCompactButtonIconReraster(t *testing.T) {
 	btn.SetAccent(colorDangerRed)
 	if off := center(); off == on {
 		t.Fatalf("换图标后位图没有重画（仍为 %s）", on)
-	}
-}
-
-// TestConsultEndNotice 咨询在拨号/振铃阶段结束（CONSULT_FINISHED）时的提示：
-// 拨号中 → 「咨询失败」，振铃中 → 「咨询未接通」，已接通或非咨询不提示。
-func TestConsultEndNotice(t *testing.T) {
-	consult := func(phase string) *core.Call {
-		return &core.Call{CTI: core.CTIState{TalkState: core.TalkConsult, ConsultPhase: phase}}
-	}
-	twoParty := &core.Call{CTI: core.CTIState{TalkState: core.TalkTwoParty}}
-	cases := []struct {
-		name       string
-		prev, next *core.Call
-		want       string
-	}{
-		{"拨号中结束", consult("dialing"), twoParty, "咨询失败"},
-		{"振铃中结束", consult("ringing"), twoParty, "咨询未接通"},
-		{"接通后结束", consult("talking"), twoParty, ""},
-		{"非咨询状态", twoParty, twoParty, ""},
-		{"没有上一个状态", nil, twoParty, ""},
-	}
-	for _, c := range cases {
-		if got := consultEndNotice(c.prev, c.next); got != c.want {
-			t.Errorf("%s：提示应为 %q，实际 %q", c.name, c.want, got)
-		}
 	}
 }
 

@@ -63,9 +63,14 @@ func (a *App) buildCTIButtons() {
 	a.finishConsultBtn = newIconButton(IconStopWhite, colorDangerRed, func() {
 		a.runCTI(a.finishConsultBtn, "finishConsult", nil)
 	})
-	// 监听：耳语 / 插话（强插）/ 强拦
+	// 监听：耳语 / 插话（强插）/ 强拦。耳语态下同一个按钮改为「监听」
+	// （动作 stopWhisper，恢复静默监听）。
 	a.whisperBtn = newIconButton(IconCTIWhisper, colorHoldBlue, func() {
-		a.runCTI(a.whisperBtn, "whisper", nil)
+		action := "whisper"
+		if a.monitorWhisper {
+			action = "stopWhisper"
+		}
+		a.runCTI(a.whisperBtn, action, nil)
 	})
 	a.interveneBtn = newIconButton(IconCTIIntervene, colorHoldBlue, func() {
 		a.runCTI(a.interveneBtn, "intervene", nil)
@@ -185,9 +190,12 @@ func (a *App) startCTISpin(btn *compactButton) {
 	}()
 }
 
-// stopCTISpin 结束"在途"状态并（如有按钮）恢复原图标：结果、超时、通话结束都要调。
+// stopCTISpin 结束"在途"状态并（如有按钮）恢复图标：结果、超时、通话结束都要调。
 // 结果来得比 ctiMinSpin 还快时，保持"在途"到满 ctiMinSpin 再恢复——期间点击
 // 仍被拦下，用户也能看到转圈。
+//
+// **恢复的不是点击前的快照**：在途期间面板可能已经重建并更新了按钮图标
+// （耳语→监听），所以恢复时取 ctiPendingRes 的最新值（见 setCTIButtonIcon）。
 func (a *App) stopCTISpin() {
 	if !a.ctiInFlight {
 		return
@@ -197,23 +205,37 @@ func (a *App) stopCTISpin() {
 		close(a.ctiSpinStop)
 		a.ctiSpinStop = nil
 	}
-	btn, res := a.ctiPending, a.ctiPendingRes
-	a.ctiPending, a.ctiPendingRes = nil, nil
-	wait := ctiMinSpin - time.Since(a.ctiSpinAt)
-	if btn == nil || wait <= 0 {
+	restore := func() {
 		a.ctiInFlight = false
+		btn, res := a.ctiPending, a.ctiPendingRes
+		a.ctiPending, a.ctiPendingRes = nil, nil
 		if btn != nil {
 			btn.SetIcon(res)
 		}
+	}
+	wait := ctiMinSpin - time.Since(a.ctiSpinAt)
+	if a.ctiPending == nil || wait <= 0 {
+		restore()
 		return
 	}
 	go func() {
 		time.Sleep(wait)
-		fyne.Do(func() {
-			a.ctiInFlight = false // 期间不会再有新指令（在途时被拦住）
-			btn.SetIcon(res)
-		})
+		fyne.Do(restore)
 	}()
+}
+
+// setCTIButtonIcon 设置按钮图标；若这个按钮正在"在途"（转圈），同步更新
+// 恢复图标——面板在转圈期间重建时（如耳语态把图标换成监听），回执到达时
+// 必须恢复到**最新**图标，不能恢复成点击前的旧图标（真机缺陷：点耳语后
+// 按钮转圈，转回来又变成耳语）。
+func (a *App) setCTIButtonIcon(btn *compactButton, res fyne.Resource) {
+	if btn == nil {
+		return
+	}
+	btn.SetIcon(res)
+	if a.ctiPending == btn {
+		a.ctiPendingRes = res
+	}
 }
 
 // runCTI 发起一条 CTI 指令（btn = 触发它的按钮，没有就传 nil）：
@@ -280,31 +302,28 @@ func (a *App) showToast(msg string, bg color.NRGBA, d time.Duration) {
 	layer.showBar(msg, bg, d)
 }
 
-// consultEndNotice 咨询子通话结束（MSP_EVENT_CONSULT_FINISHED）时要提示的消息
-// （用户要求）：还在**拨号**（没振铃）就结束 → 「咨询失败」；**振铃中**结束 →
-// 「咨询未接通」；已接通（talking）或本来就没在咨询 → 不提示。
-func consultEndNotice(prev, next *core.Call) string {
-	if prev == nil || next == nil {
-		return ""
-	}
-	if prev.CTI.TalkState != core.TalkConsult || next.CTI.TalkState != core.TalkTwoParty {
-		return ""
-	}
-	switch prev.CTI.ConsultPhase {
-	case "dialing":
-		return "咨询失败"
-	case "ringing":
-		return "咨询未接通"
-	}
-	return ""
-}
-
 // talkState 当前通话的话务状态（无通话/双方通话时返回 twoParty）。
 func (a *App) talkState() core.TalkState {
 	if a.activeCall == nil || a.activeCall.CTI.TalkState == "" {
 		return core.TalkTwoParty
 	}
 	return a.activeCall.CTI.TalkState
+}
+
+// applyCallPhase 把 CALL_* 事件（协议 §16.2）的话务阶段反映到面板状态文字：
+// CALL_RINGING 表示服务端侧已振铃（服务端外呼时 SIP 信令不一定有 180），
+// 用户要求此刻"呼叫中"改成"振铃中"。只在拨号阶段生效——接通后由
+// setCallUI(uiInCall) 的"通话中"负责，不能被迟到的事件改回去。
+func (a *App) applyCallPhase(call *core.Call) {
+	if a.callStateLabel == nil || call == nil || a.uiState != uiDialing {
+		return
+	}
+	switch call.CTI.CallPhase {
+	case "ringing":
+		a.callStateLabel.SetText("振铃中")
+	case "dialing":
+		a.callStateLabel.SetText("呼叫中")
+	}
 }
 
 // rebuildPanel 按当前通话状态重建面板：复杂话务走 rebuildTalkRows，
@@ -520,7 +539,7 @@ func (a *App) threeWayRows(st *core.CTIState) []fyne.CanvasObject {
 }
 
 // threeWayRemotes 三方通话里"除自己以外"的两个号码（最多两个、去重）。
-// 协议 §16.3：firstParty/secondParty 是原通话的双方，thirdParty 是新加入的一方。
+// 协议 §16.4：firstParty/secondParty 是原通话的双方，thirdParty 是新加入的一方。
 func (a *App) threeWayRemotes(st *core.CTIState) []string {
 	self := a.core.State().Register.Account
 	all := []string{st.FirstParty, st.SecondParty, st.ThirdParty}
@@ -562,17 +581,24 @@ func (a *App) newExitThreeWayBtn(target string) fyne.CanvasObject {
 // 3 行：状态+耳语/插话/强拦 / 「监听方 >>> 对端」+ 结束监听 / 时长。
 func (a *App) monitorRows(st *core.CTIState) []fyne.CanvasObject {
 	row1 := container.New(panelRowLayout{}, a.callStateLabel)
-	if st.MonitorPhase == "whisper" {
+	// 耳语态：耳语按钮改为「监听」（stopWhisper 回到静默监听）；插话（强插）
+	// 与强拦两种状态都保留（用户要求）。
+	a.monitorWhisper = st.MonitorPhase == "whisper"
+	if a.monitorWhisper {
 		a.callStateLabel.SetText("监听耳语中")
+		a.whisperBtn.setTip(a.callTip, "监听")
+		a.setCTIButtonIcon(a.whisperBtn, IconCTIMonitor)
 	} else {
 		a.callStateLabel.SetText("监听中")
-		row1.Add(a.whisperBtn)   // 耳语
-		row1.Add(a.interveneBtn) // 插话（强插）
-		row1.Add(a.interceptBtn) // 强拦
+		a.whisperBtn.setTip(a.callTip, "耳语")
+		a.setCTIButtonIcon(a.whisperBtn, IconCTIWhisper)
 	}
+	row1.Add(a.whisperBtn)
+	row1.Add(a.interveneBtn) // 插话（强插）
+	row1.Add(a.interceptBtn) // 强拦
 
 	a.hangupBtn.setTip(a.callTip, "结束监听")
-	// 行 2：被监听话务的主被叫（协议 §16.4 的 callerNo/calledNo）：
+	// 行 2：被监听话务的主被叫（协议 §16.5 的 callerNo/calledNo）：
 	// 主叫是 target 时显示 callerNo → calledNo，否则 callerNo → target；
 	// 老协议没带 caller/called 时退回"监听方 → 被监听方"。箭头用图标，不用字符。
 	//

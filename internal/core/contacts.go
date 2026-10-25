@@ -84,6 +84,34 @@ var (
 //	(0512)6888-8888               → 051268888888
 //	2901;user=phone               → 2901
 //
+// placeholderDisplayNames SIP 信令里常见的"占位"显示名：FreeSWITCH 等网关把
+// 出局腿 From 的 display-name 固定写成 "Outbound Call"，它不是真正的名称，
+// 显示时应回退到号码/通信录名称（否则通话记录/通话面板会出现
+// 「91381003 Outbound Call」这种怪名字，用户实测）。
+var placeholderDisplayNames = map[string]bool{
+	"outbound call":  true,
+	"outboundcall":   true,
+	"outbound":       true,
+	"inbound call":   true,
+	"inboundcall":    true,
+	"unknown":        true,
+	"anonymous":      true,
+	"anonymous call": true,
+}
+
+// CleanDisplayName 过滤 SIP 信令里的占位显示名：命中占位（大小写、空格不敏感）
+// 返回空串，调用方回退到号码/通信录名称；否则原样返回（去首尾空白）。
+func CleanDisplayName(name string) string {
+	n := strings.TrimSpace(name)
+	if n == "" {
+		return ""
+	}
+	if placeholderDisplayNames[strings.ToLower(strings.Join(strings.Fields(n), " "))] {
+		return ""
+	}
+	return n
+}
+
 // 无法规范化（空串/只有分隔符）返回空串。
 func NormalizeNumber(remote string) string {
 	s := strings.TrimSpace(remote)

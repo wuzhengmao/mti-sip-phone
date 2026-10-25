@@ -210,7 +210,7 @@ func TestApplyMSPEvent(t *testing.T) {
 		t.Fatalf("consult_finished 后应回到双方通话：%+v", st)
 	}
 
-	// 三方（协议 §16.3：firstParty/secondParty 是原通话双方，thirdParty 是新加入的一方）
+	// 三方（协议 §16.4：firstParty/secondParty 是原通话双方，thirdParty 是新加入的一方）
 	applyMSPEvent(&st, "three_way_started", map[string]any{
 		"owner": "2001", "firstParty": "2901", "secondParty": "2001", "thirdParty": "2003"}, "2001")
 	if st.TalkState != TalkThreeWay || st.Owner != "2001" || st.FirstParty != "2901" ||
@@ -286,7 +286,7 @@ func TestApplyMSPEvent(t *testing.T) {
 }
 
 // TestConsultStartedOtherParty CONSULT_STARTED 现在也发给原通话双方与被咨询方
-// （协议 §16.2）：**非咨询发起方**保持双方通话面板，只置 ConsultInProgress
+// （协议 §16.3）：**非咨询发起方**保持双方通话面板，只置 ConsultInProgress
 // （界面据此隐藏咨询/转移/会议入口），CONSULT_FINISHED 后恢复；
 // 咨询发起方仍照旧进入咨询面板。
 func TestConsultStartedOtherParty(t *testing.T) {
@@ -324,7 +324,7 @@ func (c *ctiHangupTel) Hangup(callID string) error {
 	return nil
 }
 
-// TestConsultTransfer 咨询转接完成（MSP_EVENT_CONSULT_TRANSFER，协议 §16.2）：
+// TestConsultTransfer 咨询转接完成（MSP_EVENT_CONSULT_TRANSFER，协议 §16.3）：
 // 被咨询方（本机）接管原通话——面板回到双方通话、对端换成原通话的另一方，
 // 且这通不再是「咨询腿」（话务入口按钮恢复显示）。
 func TestConsultTransfer(t *testing.T) {
@@ -409,7 +409,7 @@ func TestConsultTransferTransferorHangsUp(t *testing.T) {
 	}
 }
 
-// TestThreeWayFinishedConvergesPeer 三方结束（协议 §16.3）：FINISHED 的
+// TestThreeWayFinishedConvergesPeer 三方结束（协议 §16.4）：FINISHED 的
 // callerNo/calledNo/agent 用来确定**保留的对端**（用户口径）：
 //   - 有 agent 且 agent = 本机 → 对端是 caller；
 //   - caller = 本机 → 对端是 called；
@@ -502,7 +502,7 @@ func TestConferenceFinishedHangsUp(t *testing.T) {
 	}
 }
 
-// TestConferenceMembersChangedReplacesList 会议成员列表事件（协议 §16.5；
+// TestConferenceMembersChangedReplacesList 会议成员列表事件（协议 §16.6；
 // 实际下发偶见单数形式 CONFERENCE_MEMBER_CHANGED）**整份覆盖**本地列表：
 // 多出来的条目消失、缺少的补齐、状态重设，面板据此整块重画（不做增量）。
 func TestConferenceMembersChangedReplacesList(t *testing.T) {
@@ -579,7 +579,7 @@ func TestCallStatus(t *testing.T) {
 	}
 }
 
-// TestMonitorCallerCalled 监听的主被叫（协议 §16.4）：MONITOR_STARTED 携带被监听话务
+// TestMonitorCallerCalled 监听的主被叫（协议 §16.5）：MONITOR_STARTED 携带被监听话务
 // 的 callerNo/calledNo；WHISPER/INTERCEPT 不重复携带，必须沿用 STARTED 的值。
 func TestMonitorCallerCalled(t *testing.T) {
 	st := &CTIState{}
@@ -602,5 +602,381 @@ func TestMonitorCallerCalled(t *testing.T) {
 	}
 	if st.MonitorPhase != "whisper" {
 		t.Fatalf("耳语阶段应为 whisper，实际 %q", st.MonitorPhase)
+	}
+}
+
+// TestCallLifecycleEvents CALL_* 双方通话生命周期事件（协议 §16.2）：
+// 提取 callId（SIP 信令里没有）与名称字段，按 caller/called/agent 判定对端；
+// CALL_STARTED → dialing，CALL_RINGING → ringing（面板"呼叫中"改"振铃中"），
+// CALL_CONNECTED → talking；复杂话务进行中的基础话务事件不改面板状态。
+func TestCallLifecycleEvents(t *testing.T) {
+	body := map[string]any{
+		"callId": "C1", "callerNo": "2001", "callerName": "张三",
+		"calledNo": "1381003", "calledName": "李四",
+	}
+	st := CTIState{}
+	applyMSPEvent(&st, "call_started", body, "2001")
+	if st.TalkState != TalkTwoParty || st.CallPhase != "dialing" || st.MspCallID != "C1" {
+		t.Fatalf("call_started 后状态不符：%+v", st)
+	}
+	applyMSPEvent(&st, "call_ringing", body, "2001")
+	if st.CallPhase != "ringing" {
+		t.Fatalf("call_ringing 后阶段应为 ringing：%+v", st)
+	}
+	applyMSPEvent(&st, "call_connected", map[string]any{
+		"callId": "C1", "callerNo": "2001", "calledNo": "1381003"}, "2001")
+	if st.CallPhase != "talking" {
+		t.Fatalf("call_connected 后阶段应为 talking：%+v", st)
+	}
+
+	// 外呼（caller=本机）：对端取 called
+	if no, name := callPeerOf(body, "2001"); no != "1381003" || name != "李四" {
+		t.Fatalf("外呼对端应为 1381003/李四，实际 %q/%q", no, name)
+	}
+	// 呼入（协议 1.0.18：CALL_INCOMING 已取消，来电只看 CALL_RINGING；
+	// agent=本机、带分配用的技能组）：对端取 caller
+	in := map[string]any{
+		"callId": "C2", "callerNo": "1381003", "calledNo": "01108899",
+		"agent": "2001", "agentName": "张三", "skillGroup": "110",
+	}
+	if no, _ := callPeerOf(in, "2001"); no != "1381003" {
+		t.Fatalf("呼入对端应为主叫 1381003，实际 %q", no)
+	}
+	st = CTIState{}
+	applyMSPEvent(&st, "call_ringing", in, "2001")
+	if st.TalkState != TalkTwoParty || st.CallPhase != "ringing" || st.Agent != "2001" ||
+		st.AgentName != "张三" || st.MspCallID != "C2" || st.SkillGroup != "110" {
+		t.Fatalf("CALL_RINGING 后状态不符：%+v", st)
+	}
+	// 老服务端仍可能发 CALL_INCOMING：按同样口径兼容
+	st = CTIState{}
+	applyMSPEvent(&st, "call_incoming", in, "2001")
+	if st.CallPhase != "ringing" || st.SkillGroup != "110" {
+		t.Fatalf("CALL_INCOMING 兼容处理不符：%+v", st)
+	}
+
+	// 复杂话务进行中：基础话务事件只补 callId，不把面板改回双方通话
+	st = CTIState{TalkState: TalkConference}
+	applyMSPEvent(&st, "call_connected", map[string]any{"callId": "C3"}, "2001")
+	if st.TalkState != TalkConference || st.MspCallID != "C3" {
+		t.Fatalf("会议期间不应改回双方通话：%+v", st)
+	}
+
+	// 对端名称只在号码对得上时套用（避免把别人的名字安到当前对端上）
+	c := &Call{Remote: "1381003"}
+	applyCallPeer(c, "2001", body)
+	if c.PeerName != "李四" {
+		t.Fatalf("号码对得上时应补对端名称，实际 %q", c.PeerName)
+	}
+	c2 := &Call{Remote: "9999"}
+	applyCallPeer(c2, "2001", body)
+	if c2.PeerName != "" {
+		t.Fatalf("号码对不上时不应套用名称，实际 %q", c2.PeerName)
+	}
+}
+
+// TestCallFinishedHangsUp CALL_FINISHED / CALL_FAILED 表示基础话务已结束：
+// 本端挂断（通话面板随 call.terminated 关闭）。callId 与本通记录的不一致时
+// 忽略——那是别的话务或上一通的迟到事件，不能把当前通话挂掉。
+func TestCallFinishedHangsUp(t *testing.T) {
+	tel := &ctiHangupTel{ch: make(chan string, 2)}
+	cfg := config.Default()
+	cfg.Account.Account = "2001"
+	app := New(cfg, tel, NewBus())
+	app.OnIncoming("c1", IncomingCall{Remote: "1381003"})
+	app.OnEstablished("c1")
+	app.OnMSPEvent("call_started", map[string]any{
+		"callId": "C1", "callerNo": "1381003", "calledNo": "2001"})
+
+	// 别的 callId 的失败事件：忽略
+	app.OnMSPEvent("call_failed", map[string]any{"callId": "C-other", "reason": "fail"})
+	select {
+	case id := <-tel.ch:
+		t.Fatalf("callId 不匹配的 CALL_FAILED 不应挂断通话，实际挂了 %q", id)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	app.OnMSPEvent("call_finished", map[string]any{"callId": "C1"})
+	select {
+	case id := <-tel.ch:
+		if id != "c1" {
+			t.Fatalf("应挂断 c1，实际 %q", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("收到 CALL_FINISHED 应挂断通话（关闭通话面板）")
+	}
+}
+
+// TestCTIFailureTexts 话务失败原因的中文提示（协议 §16.2 CALL_FAILED：
+// refuse 呼叫未接通 / cancel 呼叫已取消 / takeover 呼叫被代接；
+// §16.3 CONSULT_FAILED：refuse 被拒接 / cancel 已取消，兼容旧值 fail）。
+func TestCTIFailureTexts(t *testing.T) {
+	calls := map[string]string{
+		"refuse": "呼叫未接通", "cancel": "呼叫已取消", "takeover": "呼叫被代接",
+		"": "呼叫失败", "other": "呼叫失败（other）",
+	}
+	for reason, want := range calls {
+		if got := callFailedText(reason); got != want {
+			t.Fatalf("callFailedText(%q) = %q，应为 %q", reason, got, want)
+		}
+	}
+	consults := map[string]string{
+		"refuse": "咨询未接通", "cancel": "咨询已取消", "fail": "咨询已取消",
+		"": "咨询失败", "other": "咨询失败（other）",
+	}
+	for reason, want := range consults {
+		if got := consultFailedText(reason); got != want {
+			t.Fatalf("consultFailedText(%q) = %q，应为 %q", reason, got, want)
+		}
+	}
+}
+
+// TestCTIFailedEvent CALL_FAILED / CONSULT_FAILED 发布 cti.failed（页面据此
+// 显示失败消息）：kind 区分基础话务与咨询，message 是翻好的中文提示。
+func TestCTIFailedEvent(t *testing.T) {
+	bus := NewBus()
+	sub := bus.Subscribe()
+	defer bus.Unsubscribe(sub)
+	cfg := config.Default()
+	cfg.Account.Account = "2001"
+	app := New(cfg, nil, bus)
+	app.OnIncoming("c1", IncomingCall{Remote: "1381003"})
+	app.OnEstablished("c1")
+
+	waitFailed := func(kind, want string) {
+		t.Helper()
+		deadline := time.After(2 * time.Second)
+		for {
+			select {
+			case ev := <-sub:
+				if ev.Name != "cti.failed" {
+					continue
+				}
+				data, _ := ev.Data.(map[string]any)
+				if data["kind"] != kind || data["message"] != want {
+					t.Fatalf("cti.failed 内容不符：%+v（想要 kind=%s message=%s）",
+						data, kind, want)
+				}
+				return
+			case <-deadline:
+				t.Fatalf("应发布 cti.failed（kind=%s）", kind)
+			}
+		}
+	}
+
+	// 咨询失败（cancel → 咨询已取消）：面板不结束，仅提示
+	app.OnMSPEvent("consult_started", map[string]any{"consulter": "2001", "consultee": "2002"})
+	app.OnMSPEvent("consult_failed", map[string]any{"reason": "cancel"})
+	waitFailed("consult", "咨询已取消")
+}
+
+// TestCallFailedAfterLocalEnd 真机时序：本地 SIP 先结束（对端 CANCEL →
+// call.failed，activeCall 已为空），CTI 的 CALL_FAILED 随后才到。此时要按
+// CTI 话务 ID 找回刚结束的那通电话，照样发布 cti.failed（页面才看得到提示）。
+func TestCallFailedAfterLocalEnd(t *testing.T) {
+	bus := NewBus()
+	sub := bus.Subscribe()
+	defer bus.Unsubscribe(sub)
+	app := New(config.Default(), nil, bus)
+	app.OnIncoming("c1", IncomingCall{Remote: "1381003"})
+	app.OnMSPEvent("call_incoming", map[string]any{
+		"callId": "CTI-1", "callerNo": "1381003", "calledNo": "110"})
+	app.OnFailed("c1", "remote_cancel") // 本地先结束：activeCall 变 nil
+
+	app.OnMSPEvent("call_failed", map[string]any{"callId": "CTI-1", "reason": "cancel"})
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-sub:
+			if ev.Name != "cti.failed" {
+				continue
+			}
+			data, _ := ev.Data.(map[string]any)
+			if data["kind"] != "call" || data["message"] != "呼叫已取消" {
+				t.Fatalf("cti.failed 内容不符：%+v", data)
+			}
+			return
+		case <-deadline:
+			t.Fatal("本地先结束后收到 CALL_FAILED，仍应提示失败消息")
+		}
+	}
+}
+
+// TestCallFailedCtiManaged 收到过 CALL_RINGING 的话务在 SIP 失败事件里带
+// ctiManaged=true：界面不再显示 SIP 原因（如「603 Decline」），改由随后到达的
+// CALL_FAILED → cti.failed 给统一中文消息（避免两条失败提示）。
+func TestCallFailedCtiManaged(t *testing.T) {
+	bus := NewBus()
+	sub := bus.Subscribe()
+	defer bus.Unsubscribe(sub)
+	app := New(config.Default(), nil, bus)
+	app.OnIncoming("c1", IncomingCall{Remote: "1381003"})
+	app.OnMSPEvent("call_ringing", map[string]any{
+		"callId": "CTI-1", "callerNo": "1381003", "calledNo": "110"})
+	app.OnFailed("c1", "603 Decline")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-sub:
+			if ev.Name != "call.failed" {
+				continue
+			}
+			data, _ := ev.Data.(map[string]any)
+			if data["reason"] != "603 Decline" {
+				t.Fatalf("call.failed 原因不符：%+v", data)
+			}
+			if managed, _ := data["ctiManaged"].(bool); !managed {
+				t.Fatalf("收到过 CALL_RINGING 的话务应标记 ctiManaged：%+v", data)
+			}
+			return
+		case <-deadline:
+			t.Fatal("应发布 call.failed")
+		}
+	}
+}
+
+// TestAgentOnlineStatusMismatch AGENT_ONLINE 新增的 status 字段（协议 §16.1）：
+// 与话机本地状态一致时不动；不一致时立即补发一次 MSP_HEARTBEAT 上报本地状态。
+func TestAgentOnlineStatusMismatch(t *testing.T) {
+	app, tel := newRegTestApp(t)
+	app.OnRegisterState(RegRegistered, "")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if n, _, _, _, _ := tel.heartbeat(); n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("注册成功后应立即发送一次心跳")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// 本地进入振铃（来电）：等"话务状态变化"补发的心跳落地后再取基线
+	app.OnIncoming("c1", IncomingCall{Remote: "1001"})
+	time.Sleep(200 * time.Millisecond)
+	before, _, _, _, _ := tel.heartbeat()
+
+	// 一致（大小写不敏感）：不补发
+	app.OnMSPEvent("agent_online", map[string]any{
+		"displayName": "张三", "agentMode": "normal", "status": "RINGING"})
+	time.Sleep(200 * time.Millisecond)
+	if n, _, _, _, _ := tel.heartbeat(); n != before {
+		t.Fatalf("status 一致时不应补发心跳（%d → %d）", before, n)
+	}
+
+	// 不一致：立即补发，且上报的是本地状态 ringing
+	app.OnMSPEvent("agent_online", map[string]any{
+		"displayName": "张三", "agentMode": "normal", "status": "free"})
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if n, _, _, _, _ := tel.heartbeat(); n > before {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("status 不一致时应立即补发心跳")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st := tel.heartbeatStatus(); st != "ringing" {
+		t.Fatalf("补发的心跳应上报本地状态 ringing，实际 %q", st)
+	}
+}
+
+// TestConferenceMemberRemovedHangsUp 会议成员退出（协议 §16.6 新增
+// CONFERENCE_MEMBER_REMOVED）：被移出/退出的成员本人会收到这条事件（不再收到
+// MEMBERS_CHANGED），收到即关闭通话面板（挂断本端）；member 不是本机时忽略。
+func TestConferenceMemberRemovedHangsUp(t *testing.T) {
+	tel := &ctiHangupTel{ch: make(chan string, 2)}
+	cfg := config.Default()
+	cfg.Account.Account = "2001"
+	app := New(cfg, tel, NewBus())
+	app.OnIncoming("c1", IncomingCall{Remote: "1381003"})
+	app.OnEstablished("c1")
+	app.OnMSPEvent("conference_started", map[string]any{"confId": "conf-1", "owner": "2001"})
+
+	// 不是本机：忽略（防御性，不误挂别人的通话）
+	app.OnMSPEvent("conference_member_removed", map[string]any{"member": "2002"})
+	select {
+	case id := <-tel.ch:
+		t.Fatalf("他人退出会议不应挂断本机通话，实际挂了 %q", id)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// 本机被移出：关闭通话面板（挂断）
+	app.OnMSPEvent("conference_member_removed", map[string]any{"member": "2001", "memberName": "张三"})
+	select {
+	case id := <-tel.ch:
+		if id != "c1" {
+			t.Fatalf("应挂断 c1，实际 %q", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("收到 CONFERENCE_MEMBER_REMOVED 应关闭通话面板（挂断本端）")
+	}
+}
+
+// TestConsultConsulteeUnaffected 协议修订：CONSULT_RINGING / CONSULT_CONNECTED
+// 现在也发给被咨询方（以及原通话的另一方）。这些非咨询发起方**不能**被切成
+// 咨询面板：保持双方通话，只置 ConsultInProgress（隐藏咨询/转移/会议入口）。
+func TestConsultConsulteeUnaffected(t *testing.T) {
+	body := map[string]any{
+		"consulter": "2001", "consulterName": "张三",
+		"consultee": "2002", "consulteeName": "李四",
+		"callerNo": "2001", "calledNo": "1381003",
+	}
+	// 被咨询方（本机 2002）
+	st := CTIState{}
+	for _, ev := range []string{"consult_started", "consult_ringing", "consult_connected"} {
+		applyMSPEvent(&st, ev, body, "2002")
+		if st.TalkState != TalkTwoParty || !st.ConsultInProgress {
+			t.Fatalf("被咨询方收到 %s 后应保持双方通话 + ConsultInProgress：%+v", ev, st)
+		}
+		if st.ConsultPhase != "" {
+			t.Fatalf("非咨询发起方不应进入咨询阶段：%+v", st)
+		}
+	}
+	// 原通话的另一方（本机 1381003）同理
+	st = CTIState{}
+	applyMSPEvent(&st, "consult_connected", body, "1381003")
+	if st.TalkState != TalkTwoParty || !st.ConsultInProgress {
+		t.Fatalf("原通话另一方也应保持双方通话：%+v", st)
+	}
+	// CONSULT_FINISHED 后恢复
+	applyMSPEvent(&st, "consult_finished", body, "1381003")
+	if st.ConsultInProgress || st.TalkState != TalkTwoParty {
+		t.Fatalf("咨询结束后应恢复入口：%+v", st)
+	}
+
+	// 咨询发起方（本机 2001）仍然切到咨询面板
+	st = CTIState{}
+	applyMSPEvent(&st, "consult_connected", body, "2001")
+	if st.TalkState != TalkConsult || st.ConsultPhase != "talking" || st.ConsultInProgress {
+		t.Fatalf("咨询发起方应进入咨询面板：%+v", st)
+	}
+
+	// body 缺 consulter 时沿用已有状态：发起方的 RINGING 不能被误判成非咨询方
+	st = CTIState{}
+	applyMSPEvent(&st, "consult_started", body, "2001")
+	applyMSPEvent(&st, "consult_ringing", nil, "2001")
+	if st.TalkState != TalkConsult || st.ConsultPhase != "ringing" {
+		t.Fatalf("缺 body 的 RINGING 不应把发起方切回双方通话：%+v", st)
+	}
+}
+
+// TestCleanDisplayName 过滤网关的占位显示名（FreeSWITCH 的 "Outbound Call"）：
+// 过滤后界面回退到号码，正常名称原样保留。
+func TestCleanDisplayName(t *testing.T) {
+	cases := map[string]string{
+		"Outbound Call":  "",
+		"outboundcall":   "",
+		"Outbound  Call": "",
+		"Unknown":        "",
+		" 张三 ":           "张三",
+		"测试1":            "测试1",
+	}
+	for in, want := range cases {
+		if got := CleanDisplayName(in); got != want {
+			t.Fatalf("CleanDisplayName(%q) = %q，应为 %q", in, got, want)
+		}
 	}
 }

@@ -30,6 +30,7 @@ type regTel struct {
 	hbBusy    bool
 	hbExpires time.Duration
 	hbName    string
+	hbStatus  string
 	hbErr     error // 非 nil 时 SendHeartbeat 返回它（模拟服务端不支持 NOTIFY）
 
 	// 远端指令实际调到的动作
@@ -220,6 +221,7 @@ func (r *regTel) SendHeartbeat(agentMode string, isBusy bool, displayName, statu
 	r.hbBusy = isBusy
 	r.hbExpires = expires
 	r.hbName = displayName
+	r.hbStatus = status
 	return r.hbErr
 }
 
@@ -228,4 +230,11 @@ func (r *regTel) heartbeat() (int, string, bool, time.Duration, string) {
 	r.hbMu.Lock()
 	defer r.hbMu.Unlock()
 	return r.hbs, r.hbMode, r.hbBusy, r.hbExpires, r.hbName
+}
+
+// heartbeatStatus 最近一次心跳上报的话机状态（status 字段）。
+func (r *regTel) heartbeatStatus() string {
+	r.hbMu.Lock()
+	defer r.hbMu.Unlock()
+	return r.hbStatus
 }

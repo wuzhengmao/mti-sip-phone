@@ -238,7 +238,8 @@ func (s *Store) Start(r core.CallRecord) {
 			(call_id, direction, remote, remote_name, display_name, started_at, answered_at,
 			 ended_at, has_video, missed, reason, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			truncate(r.CallID), truncate(r.Direction), truncate(r.Remote), truncate(r.RemoteName),
+			truncate(r.CallID), truncate(r.Direction), truncate(r.Remote),
+			truncate(core.CleanDisplayName(r.RemoteName)),
 			truncate(r.DisplayName),
 			toMillis(r.StartedAt), toMillis(r.AnsweredAt), toMillis(r.EndedAt),
 			boolToInt(r.HasVideo), boolToInt(r.Missed), truncate(r.Reason),
@@ -316,6 +317,9 @@ func (s *Store) Query(f core.CallLogFilter) (core.CallLogPage, error) {
 			}
 			r.StartedAt, r.AnsweredAt, r.EndedAt = fromMillis(started), fromMillis(answered), fromMillis(ended)
 			r.HasVideo, r.Missed = hasVideo != 0, missed != 0
+			// 老记录里可能存着网关的占位显示名（如 "Outbound Call"）：
+			// 读出来时同样过滤，界面显示回退到号码。
+			r.RemoteName = core.CleanDisplayName(r.RemoteName)
 			records = append(records, r)
 		}
 		if err := rows.Err(); err != nil {

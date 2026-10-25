@@ -389,6 +389,18 @@ details.diag .body { margin-top: 10px; }
   .bar-actions .mini-icon { width: 30px; height: 30px; }
   .bar-actions .mini-icon svg { fill: #fff; }
   .party-row .who .nm { color: var(--gray); font-size: 12px; }
+  /* 技能组小标签（CALL_RINGING 的 skillGroup）：紧跟在号码/名称后面 */
+  .party-row .who .tag, .bar-party .who .tag {
+    margin: 0 0 0 6px; padding: 0 6px; font-size: 11px; vertical-align: middle;
+  }
+
+  /* 只读的会控按钮（普通成员视角的 禁视频/禁音/禁听）：不可点击、鼠标不显示手型、
+     悬停没有底色变化，并置灰——看起来就是"不能使用"的状态。 */
+  .mini-icon:disabled, .mini-icon[disabled] { cursor: default; opacity: .45; }
+  .mini-icon:disabled:hover, .mini-icon[disabled]:hover,
+  .bar-party .mini-icon:disabled:hover, .bar-party .mini-icon[disabled]:hover {
+    background: transparent;
+  }
 
 /* ---------- 1.0.18 修订：Edge 风格页签 / 跟随鼠标的弹层 / 文字按钮 ---------- */
   .popover { position: fixed; z-index: 90; }
@@ -407,7 +419,8 @@ details.diag .body { margin-top: 10px; }
     cursor: pointer; border-radius: 6px; flex: none;
   }
   .popover-close:hover { background: #eef0f3; }
-  .dtmf-dialog { position: fixed; width: 190px; padding: 10px; }
+  /* 迷你 DTMF 拨号盘：收窄成约 3:4 的竖长比例（内容宽 110px） */
+  .dtmf-dialog { position: fixed; width: 130px; padding: 10px; }
   .dtmf-dialog .dtmf-pad { max-width: none; margin: 0; }
   .mini-text {
     border: none; background: transparent; color: var(--primary); font-size: 12px;

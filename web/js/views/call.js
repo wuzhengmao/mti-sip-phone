@@ -61,62 +61,38 @@ window.SipApp.views = window.SipApp.views || {};
 
   function show(id, on) { $(id).style.display = on ? '' : 'none'; }
 
-  /** 按话务状态显示/隐藏全局操作按钮（规则与桌面通话面板一致）。 */
+  /** 通话卡片里的全部操作按钮（显隐由面板事件的 state 决定）。 */
+  const ACTION_BUTTONS = [
+    'btnDtmfPad', 'btnConsult', 'btnTransfer', 'btnConference', 'btnThreeWay',
+    'btnConsultTransferBtn', 'btnWhisper', 'btnIntervene', 'btnIntercept',
+    'btnAddMember', 'btnFinishConference', 'btnAnswer', 'btnAnswerVideo',
+    'btnReject', 'btnMute', 'btnHangup',
+  ];
+
+  /** 按面板快照（call.panel）决定显示哪些操作按钮、以及挂断/保持的文案与图标。 */
   function renderActions(call) {
-    const st = call.cti || {};
-    const ringing = call.state === 'ringing';
-    const incoming = call.direction === 'incoming';
-    const established = call.state === 'established';
-    const talk = st.talkState || 'twoParty';
-    const agent = App.callui.isAgent();
-    const two = App.callui.twoPartyEstablished(call);
-    const consultTalking = talk === 'consult' && st.consultPhase === 'talking';
-    const monitor = talk === 'monitor';
-    const owner = st.owner && App.callui.norm(st.owner) === App.callui.selfNumber();
-
-    // 来电振铃：接听/视频接听/拒接；**不显示挂断**（挂断与拒接同义）
-    show('btnAnswer', ringing && incoming);
-    show('btnAnswerVideo', ringing && incoming && call.hasVideo);
-    show('btnReject', ringing && incoming);
-    show('btnHangup', !(ringing && incoming));
-    $('btnHangup').textContent = talk === 'conference' ? '退出会议'
-      : talk === 'threeWay' ? '退出三方'
-        : talk === 'monitor' ? '结束监听' : '挂断';
-    $('btnHangup').title = talk === 'conference' ? '退出会议'
-      : talk === 'threeWay' ? '退出三方通话'
-        : talk === 'monitor' ? '结束监听' : '挂断';
-    // 图标随动作切换（与 UI 一致）：退出多方用"离开话务"图标，挂断/结束监听用方块
-    App.callui.decorateButton($('btnHangup'),
-      (talk === 'conference' || talk === 'threeWay')
-        ? { img: '/img/exit-conference.png' } : { svg: 'stop' });
-    show('btnMute', established && talk === 'twoParty');
-    $('btnMute').textContent = call.muted ? '取消保持' : '保持';
-    // textContent 会清掉子节点：图标必须在这之后补（否则保持按钮没图标）
-    App.callui.decorateButton($('btnMute'), { svg: call.muted ? 'replay' : 'pause' });
-    show('btnVideoToggle', established && call.hasVideo);
-    show('btnDtmfPad', established);
-
-    // 两方已接通（坐席模式）：咨询 / 转移 / 会议（添加成员）
-    show('btnConsult', agent && two);
-    show('btnTransfer', agent && two);
-    show('btnConference', agent && two);
-    // 咨询已接通：三方 / 咨询转移
-    show('btnThreeWay', agent && consultTalking);
-    show('btnConsultTransferBtn', agent && consultTalking);
-    // 监听
-    show('btnWhisper', monitor && st.monitorPhase !== 'whisper');
-    show('btnIntervene', monitor && st.monitorPhase !== 'whisper');
-    show('btnIntercept', monitor && st.monitorPhase !== 'whisper');
-    // 会议（owner）
-    show('btnAddMember', talk === 'conference' && !!owner);
-    show('btnFinishConference', talk === 'conference' && !!owner);
+    const byId = {};
+    App.callui.panelControls(call).forEach(function (sp) { byId[sp.id] = sp; });
+    ACTION_BUTTONS.forEach(function (id) { show(id, !!byId[id]); });
+    Object.keys(byId).forEach(function (id) {
+      const sp = byId[id];
+      const btn = $(id);
+      if (!btn) return;
+      if (sp.label) {
+        btn.textContent = sp.label; // 会清掉子节点：图标必须在设置文字之后再补
+        btn.title = sp.label;
+      }
+      if (id !== 'btnDtmfPad' && sp.icon) App.callui.decorateButton(btn, sp.icon);
+      // 该动作仍在途（面板在点击后重画过）：把转圈贴回这个静态按钮
+      App.callui.attachPending(id, btn);
+    });
   }
 
   function renderParties(call) {
     const box = $('callParties');
     App.dom.clear(box);
-    // 每方一行（会议行带左侧的移除/主持人图标），与话务条悬停成员列表同一套 DOM
-    App.callui.parties(call).forEach(function (p) {
+    // 面板行（callList / 会议成员）优先，与话务条同一套 DOM
+    App.callui.displayRows(call).forEach(function (p) {
       box.appendChild(App.callui.partyRowEl(p));
     });
   }
@@ -126,12 +102,14 @@ window.SipApp.views = window.SipApp.views || {};
     $('noCall').style.display = 'none';
     $('idleDialRow').style.display = 'none';
 
-    $('callStatus').textContent = App.callui.status(call);
+    // 标题优先用面板快照的 title（拨号中/振铃中/咨询呼叫中…）
+    $('callStatus').textContent = App.callui.displayStatus(call);
     renderParties(call);
     renderActions(call);
 
     const established = call.state === 'established';
     $('mediaRows').style.display = established ? '' : 'none';
+    show('btnVideoToggle', established && call.hasVideo);
     if (established) startTimer(); else stopTimer();
     applyMediaButtons(call);
   }
@@ -303,6 +281,20 @@ window.SipApp.views = window.SipApp.views || {};
     $('btnUpdApply').hidden = st.phase !== 'ready';
   }
 
+  // ---------------- 通话结束提示 ----------------
+
+  /** 通话结束：**SIP 呼叫失败**（call.failed）把原因提示出来，与桌面版
+   *  showCallFailed 一致（如「486 Busy Here」）；正常挂断不提示。
+   *  CTI 接管的话务（收到过 CALL_RINGING，事件带 ctiManaged）不显示 SIP 原因——
+   *  CTI 随后会下发 CALL_FAILED，由 cti.failed 给出统一的中文消息，
+   *  否则「603 …」和「呼叫未接通」会同时出现（用户实测）。 */
+  function noticeCallEnded(info) {
+    if (!info || info.event !== 'call.failed') return;
+    if (info.data && info.data.ctiManaged) return;
+    const reason = (info.data && info.data.reason) || '';
+    App.ui.toast('呼叫失败：' + (reason || '未知原因'), 'err');
+  }
+
   // ---------------- 挂载 ----------------
 
   App.views.call = {
@@ -329,7 +321,7 @@ window.SipApp.views = window.SipApp.views || {};
       // 会议：与桌面 UI 一致——直接把当前两方通话转成会议（空成员），
       // 进入会议模式后才显示「添加成员」（点它才打开拨号对话框）。
       $('btnConference').addEventListener('click', function () {
-        App.callui.runCTI($('btnConference'), function () { return sdk.addConferenceMembers([]); });
+        App.callui.runCTI($('btnConference'), function () { return sdk.addConferenceMembers([]); }, undefined, 'btnConference');
       });
       $('btnAddMember').addEventListener('click', function (e) {
         App.dialpad.open('conference', e.clientX, e.clientY);
@@ -337,13 +329,20 @@ window.SipApp.views = window.SipApp.views || {};
 
       // MSP_ACTION 类按钮：统一 runCTI（转圈 + 在途期间不可再点）
       const ctiBtn = function (id, fn) {
-        $(id).addEventListener('click', function () { App.callui.runCTI($(id), fn); });
+        $(id).addEventListener('click', function () {
+          App.callui.runCTI($(id), fn, undefined, id);
+        });
       };
       // 咨询接通后的三方/咨询转移（不带 target：沿用当前咨询）
       ctiBtn('btnThreeWay', function () { return sdk.consultThreeWay(); });
       ctiBtn('btnConsultTransferBtn', function () { return sdk.consultTransfer(); });
       // 监听
-      ctiBtn('btnWhisper', function () { return sdk.whisper(); });
+      // 耳语态同一个按钮是「监听」：调用 stopWhisper 回到静默监听
+      ctiBtn('btnWhisper', function () {
+        const cp = App.callui.panelCall();
+        if (cp && cp.state === 'whispering') return sdk.stopWhisper();
+        return sdk.whisper();
+      });
       ctiBtn('btnIntervene', function () { return sdk.intervene(); });
       ctiBtn('btnIntercept', function () { return sdk.intercept(); });
       // 会议
@@ -440,18 +439,33 @@ window.SipApp.views = window.SipApp.views || {};
       dec($('btnHangup'), { svg: 'stop' });
       dec($('btnMute'), { svg: 'pause' });
 
+      // CTI 指令结束：按钮按当前面板重新渲染（在途期间面板可能已变化，
+      // 不能恢复点击前的文案/图标）
+      App.callui.onRender(function () {
+        if (store.state.call) renderActions(store.state.call);
+      });
+
       store.on('call', function (c) {
-        if (c) showCall(c);
+        // null = 没有进行中的通话（含重连快照里只剩已结束通话）：收起卡片，
+        // 否则上一通电话的"呼叫中"会一直挂在那里
+        if (c) showCall(c); else resetCall();
         if (c && c.video && c.video.negotiated) applyNoUIVideoMode();
       });
-      store.on('callEnded', resetCall);
+      store.on('callEnded', function (info) {
+        resetCall();
+        noticeCallEnded(info);
+      });
+      // 面板快照变化（call.panel）：标题/各方/按钮都以它为准
+      store.on('panel', function () {
+        if (store.state.call) showCall(store.state.call); else resetCall();
+      });
       store.on('update', renderUpdate);
       store.on('state', function () {
         $('chkAutoAnswer').checked = !!store.state.autoAnswer;
         renderUpdate(store.state.update);
         refreshTransformButtons();
         applyNoUIVideoMode();
-        if (store.state.call) showCall(store.state.call);
+        if (store.state.call) showCall(store.state.call); else resetCall();
       });
       store.on('agent', function () {
         if (store.state.call) renderActions(store.state.call);
@@ -466,6 +480,12 @@ window.SipApp.views = window.SipApp.views || {};
       });
       store.on('autoAnswer', function (on) { $('chkAutoAnswer').checked = on; });
       sdk.on('video.transform', refreshTransformButtons);
+      // CTI 话务失败（协议 §16.2/§16.3）：CALL_FAILED 的 refuse/cancel/takeover
+      // 与 CONSULT_FAILED 的 refuse/cancel——软电话已把原因翻成中文，直接提示。
+      sdk.on('cti.failed', function (data) {
+        if (!data || !data.message) return;
+        App.ui.toast(data.message, data.kind === 'call' ? 'err' : '');
+      });
 
       refreshTransformButtons();
       resetCall();

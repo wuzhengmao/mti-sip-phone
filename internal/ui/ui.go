@@ -214,9 +214,12 @@ type App struct {
 	finishConsultBtn   *compactButton // 结束咨询（被咨询方行右侧）
 	exitThreeWayBtn    *compactButton // 三方：发起方强制挂断一方（X）
 	// 监听第一行按钮
-	whisperBtn   *compactButton // 耳语
+	whisperBtn   *compactButton // 耳语（耳语态时改为「监听」= 退出耳语）
 	interceptBtn *compactButton // 拦截
 	interveneBtn *compactButton // 强插（三方）
+	// monitorWhisper 当前监听是否处于耳语态：决定 whisperBtn 的动作
+	// （whisper / stopWhisper）与悬停提示（耳语 / 监听）。
+	monitorWhisper bool
 	// 会议按钮
 	addMemberBtn        *compactButton // 添加成员（owner，结束会议左侧）
 	finishConferenceBtn *compactButton // 结束会议（owner）
@@ -2178,8 +2181,8 @@ func (a *App) onEvent(ev core.Event) {
 				a.agentBusy = false
 			}
 			a.agentOnline = on
-			logx.Logger().Info("坐席模式变化", "online", on, "mode", a.agentMode,
-				"busy", a.agentBusy, "displayName", a.agentDisplayName)
+			// 这里不再打日志：core 的 setAgentOnline 已经打过一条「坐席模式变化」，
+			// 两边同一句文案会让日志里出现两条一模一样的记录（用户实测）。
 			a.applyAgentState()
 			if a.uiState == uiInCall && a.talkState() == core.TalkTwoParty {
 				a.rebuildPanel(incallButtons)
@@ -2204,16 +2207,22 @@ func (a *App) onEvent(ev core.Event) {
 		// 振铃面板错误地变成"通话中"（接听/拒接按钮都不见了）。状态字段照常更新，
 		// 接通时 setCallUI(uiInCall) 会用新状态重建（届时入口按钮按 ConsultInProgress 隐藏）。
 		if callID, call := callData(ev.Data); call != nil && callID == a.activeCallID {
-			prev := a.activeCall
 			a.activeCall = call
-			// 咨询在拨号/振铃阶段就结束了（CONSULT_FINISHED）：面板直接回到
-			// 双方通话，用户看不到任何结果，补一条提示（见 consultEndNotice）。
-			if msg := consultEndNotice(prev, call); msg != "" {
-				a.toastError(msg)
-			}
 			a.setCallName(call)
+			a.applyCallPhase(call)
 			if a.uiState == uiInCall {
 				a.rebuildPanel(incallButtons)
+			}
+		}
+
+	case "cti.failed":
+		// CTI 报的话务失败（协议 §16.2/§16.3）：CALL_FAILED 的 refuse/cancel/
+		// takeover、CONSULT_FAILED 的 refuse/cancel。消息由 core 翻好（cti.failed
+		// 事件），这里就地弹提示条。
+		if data, ok := ev.Data.(map[string]any); ok {
+			msg, _ := data["message"].(string)
+			if msg != "" {
+				a.toastError(msg)
 			}
 		}
 
@@ -2272,9 +2281,11 @@ func (a *App) onEvent(ev core.Event) {
 		// 停止振铃音，并按结果放提示音：遇忙放忙音，其余放挂断音
 		reason := ""
 		missed := false
+		ctiManaged := false
 		if m, ok := ev.Data.(map[string]any); ok {
 			reason, _ = m["reason"].(string)
 			missed, _ = m["missed"].(bool)
+			ctiManaged, _ = m["ctiManaged"].(bool)
 		}
 		if missed {
 			// 未接来电（REQ-UI-010）：是否未接由核心判定（core.missedOnEnd），
@@ -2299,6 +2310,15 @@ func (a *App) onEvent(ev core.Event) {
 			}
 		}
 		if ev.Name == "call.failed" {
+			if ctiManaged {
+				// CTI 接管的话务（收到过 CALL_RINGING）：SIP 侧原因不弹窗——
+				// CTI 随后下发的 CALL_FAILED 会经 cti.failed 给出中文消息
+				//（否则「603 …」与「呼叫未接通」两条提示同时出现）。
+				logx.Logger().Info("呼叫失败（CTI 接管，失败消息由 cti.failed 提示）",
+					"reason", reason)
+				a.restoreIdle()
+				return
+			}
 			if reason == "" {
 				reason = "未知原因"
 			}

@@ -58,6 +58,10 @@ func (s *Server) serveConn(ctx context.Context, conn *websocket.Conn) {
 		defer c.wmu.Unlock()
 		msg := Message{Type: "event", Event: "system.state", Data: s.app.State()}
 		_ = writeMsg(connCtx, conn, msg)
+		// 通话面板快照（REQ-WS-023）：让刚连上的页面立刻有面板可渲染，
+		// 不用等下一次话务事件。
+		panelMsg := Message{Type: "event", Event: "call.panel", Data: s.app.PanelState()}
+		_ = writeMsg(connCtx, conn, panelMsg)
 	}()
 
 	// 心跳：定期 Ping 探测连接活性并保持链路畅通。

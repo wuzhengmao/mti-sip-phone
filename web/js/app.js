@@ -52,7 +52,8 @@ window.SipApp = window.SipApp || {};
     const ag = store.state.agent || { online: false };
     const badge = $('agentBadge');
     if (!badge) return;
-    if (!ag.online) {
+    // 未连接话机时不显示坐席状态：此时留的是断线前的快照，点了也发不出去。
+    if (!store.isConnected() || !ag.online) {
       badge.hidden = true;
       return;
     }
@@ -179,6 +180,7 @@ window.SipApp = window.SipApp || {};
     store.on('register', refreshTop);
     store.on('connected', refreshTop);
     store.on('disconnected', refreshTop);
+    store.on('disconnected', refreshAgent);  // 断线后收起坐席状态徽章
 
     // 坐席徽章点击 = 置忙/置闲（与桌面顶栏的座席按钮同一动作；
     // 生效状态由 cti.agent 事件回显，不在本地乐观更新）

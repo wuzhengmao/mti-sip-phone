@@ -189,17 +189,19 @@
 
     /**
      * 订阅事件。
-     * 事件名：call.incoming / call.ringing / call.established / call.terminated /
-     *         call.failed / call.muted / call.audio（麦克风/扬声器开关）/
-     *         call.dialing / call.video / video.web /
-     *         register.state / system.state /
-     *         system.update（自动更新状态：phase/progress/error 等）/
-     *         video.frame（订阅视频后逐帧推送，data 为 {channel, seq, blob, size}）/
-     *         system.updateConfig（自动更新配置变化）/
+     * 事件名：call.incoming / call.ringing / call.dialing / call.established /
+     *         call.terminated / call.failed / call.muted / call.audio（麦克风/扬声器开关）/
+     *         call.video / call.panel（通话面板快照，见 SipCallPanelState）/
      *         cti.agent（坐席模式/置忙变化：{online, displayName, agentMode, isBusy}）/
      *         cti.state（通话话务状态变化：{call}，call.cti 见协议 §16）/
+     *         cti.failed（CTI 话务失败：{callId, kind, reason, message}）/
      *         cti.result（CTI 指令结果：{seq, success, code, message, action, data?}）/
-     *         connected / disconnected
+     *         video.web / video.transform /
+     *         video.frame（订阅视频后逐帧推送，data 为 {channel, seq, blob, size}）/
+     *         register.state / system.state / system.ready /
+     *         system.update（自动更新状态：phase/progress/error 等）/
+     *         system.updateConfig（自动更新配置变化）/ system.autoAnswer /
+     *         connected / disconnected（SDK 本地事件）
      * 注：SDK 本地事件（connected / disconnected）不会派发给 '*' 订阅者。
      * @param {string} event 事件名，'*' 订阅全部
      * @param {Function} fn 回调 (data) => {}
@@ -432,8 +434,8 @@
      *   consult / consultThreeWay / transfer / consultTransfer /
      *   monitor / takeover / exitThreeWay          → target（号码字符串）
      *   addConferenceMembers / removeConferenceMembers → members（号码数组）
-     *   finishConsult / finishConference / whisper / intervene / intercept /
-     *   setBusy / setIdle                          → 不需要参数
+     *   finishConsult / finishConference / whisper / stopWhisper /
+     *   intervene / intercept / setBusy / setIdle  → 不需要参数
      *
      * @param {string} action 动作名
      * @param {string|string[]} [arg] target 或 members
@@ -480,6 +482,9 @@
 
     /** 监听耳语 */
     whisper() { return this.ctiAction('whisper'); }
+
+    /** 退出监听耳语（恢复静默监听） */
+    stopWhisper() { return this.ctiAction('stopWhisper'); }
 
     /** 监听插话（强插） */
     intervene() { return this.ctiAction('intervene'); }

@@ -120,7 +120,7 @@
 | `deafConferenceMember` / `undeafConferenceMember` | `member` | 会议成员禁听/取消禁听（owner） |
 | `vmuteConferenceMember` / `unvmuteConferenceMember` | `member` | 会议成员禁视频/取消禁视频（owner） |
 | `finishConsult` / `finishConference` | — | 结束咨询 / 结束会议（owner） |
-| `whisper` / `intervene` / `intercept` | — | 监听耳语 / 插话（强插）/ 强拦 |
+| `whisper` / `stopWhisper` / `intervene` / `intercept` | — | 监听耳语 / 退出耳语（恢复静默监听）/ 插话（强插）/ 强拦 |
 | `setBusy` / `setIdle` | — | 坐席置忙 / 置闲（结果经 `cti.agent` 事件回显） |
 
 | `system.setUpdateConfig` | `{ "url": "https://update.example.com", "appId": "mti-sip-phone", "intervalMinutes": 5, "prerelease": false }` | 生效后的完整配置 `{url, appId, intervalMinutes, prerelease}` | 写入软电话的**自动更新配置**（REQ-UPD-018）：软电话据此自己定时查询更新站点（**url 留空 = 不检查**，周期 1–1440 分钟，prerelease 默认 false）。字段**都是可选的**，只改传入的那些；写入后落盘、立即生效（配了站点马上查一次）并广播 `system.updateConfig`。url 非 http/https 或周期越界返回 `invalid_params` |
@@ -269,7 +269,7 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `call.ringing` | `{ "callId", "call", "earlyMedia" }` | 呼出已振铃（180/183）；`earlyMedia: true` 表示本次振铃带**早期媒体**（183+SDP，回铃音由对端下发，软电话不再放本地回铃音） |
 | `call.established` | `{ "callId", "call" }` | 通话建立 |
 | `call.terminated` | `{ "callId", "call", "reason", "missed" }` | 通话结束；reason：`local_hangup`（本端挂断）/ `remote_hangup`（对端挂断）/ `remote_cancel`（振铃中收到 CANCEL）/ `rejected`（本端拒接）。**`missed: true` = 未接来电**（呼入、从未接通、且非本端当场处理——本端拒接/振铃中挂断不算），桌面端据此弹系统通知（REQ-UI-010） |
-| `call.failed` | `{ "callId", "call", "reason", "missed" }` | 呼叫失败；reason：`busy` / `no_answer` / `not_found` / `failed`（协商或媒体失败）等；`missed` 含义同上 |
+| `call.failed` | `{ "callId", "call", "reason", "missed", "ctiManaged" }` | 呼叫失败；`reason` 是**SIP 信令给出的原因原文**（如 `486 Busy Here`、`404 Not Found`、`408 Request Timeout`、`SDP 协商失败: …`），可直接展示给用户（网页控制台显示为「呼叫失败：<reason>」）；`missed` 含义同上。**`ctiManaged=true`** 表示这通电话在 CTI 接管中（收到过 `CALL_RINGING`）：SIP 原因**不要提示**，CTI 随后下发的 `CALL_FAILED` 会经 `cti.failed` 给出统一中文消息（避免两条失败提示） |
 | `call.muted` | `{ "callId", "muted" }` | 保持（静音）状态变化 |
 | `call.audio` | `{ "callId", "call" }` | 麦克风/扬声器开关与音量变化（`call.micMuted` / `call.speakerMuted` / `call.micGain` / `call.speakerVolume`，REQ-UI-023 / REQ-MEDIA-006）。**连续调节（桌面滚轮、网页拖滑块）时事件会被合并**：最多 150ms 一条（首次立即发、最后一次必发）——页面不要按"一条事件 = 一步"来计数 |
 | `call.video` | `{ "callId", "call" }` | 视频状态变化（协商成功/开关切换/拿到对端分辨率）；状态见 `call.video` |
@@ -284,8 +284,10 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `system.config` | `{ "section": "account|audio|video|log|ws|autoStart", "values": {...} }` | 配置被改写（REQ-WS-019）：本机配置页保存或网页 `system.set*` 写入都会广播，其它网页据此同步表单 |
 | `audio.ready` | `{ "ready": true }` | 音频后端后台初始化完成（REQ-WS-016）：网页据此刷新设备列表（无 UI 版没有桌面界面，这是唯一的信号） |
 | `cti.agent` | `{ "online", "displayName", "agentMode", "isBusy" }` | **坐席模式/置忙变化**（REQ-ACC-028 / REQ-ACC-034）：`MSP_EVENT_AGENT_ONLINE/OFFLINE` 与网页/桌面的 `setBusy`/`setIdle` 结果都经这里回显；`agentMode` 为 `none`/`normal`/`dial_out`/`monitor`，`agentMode=none` 时 `online=false`。重连时也可从 `system.state` 的 `agentOnline`/`agentDisplayName`/`agentMode`/`agentBusy` 取当前值 |
-| `cti.state` | `{ "callId", "call" }` | **通话的复杂话务状态变化**（REQ-ACC-026）：`MSP_EVENT_*`（咨询/三方/监听/会议）翻译后的完整通话快照，`call.cti` 是 `CTIState`（`talkState`：`twoParty`/`consult`/`threeWay`/`monitor`/`conference`，其余字段见协议 §16 与 `docs/cti-sip-phone-protocol.md`） |
+| `cti.state` | `{ "callId", "call" }` | **通话的复杂话务状态变化**（REQ-ACC-026）：`MSP_EVENT_*` 翻译后的完整通话快照，`call.cti` 是 `CTIState`（`talkState`：`twoParty`/`consult`/`threeWay`/`monitor`/`conference`；双方通话另有 `mspCallId`（CTI 侧话务 ID）、`callPhase`（`dialing`/`ringing`/`talking`）、`callerNo/callerName`/`calledNo/calledName`/`agent`/`agentName`，其余字段见协议 §16 与 `docs/cti-sip-phone-protocol.md`）。`CALL_RINGING` 时页面把「呼叫中」显示为「振铃中」；`cti.finish` 类事件（`CALL_FINISHED`/`CALL_FAILED`）由软电话挂断，页面收到 `call.terminated` 关闭通话卡片 |
+| `cti.failed` | `{ "callId", "kind", "reason", "message" }` | **CTI 话务失败提示**（REQ-ACC-026）：`kind=call`（`CALL_FAILED`：`refuse` 呼叫未接通 / `cancel` 呼叫已取消 / `takeover` 呼叫被代接）或 `kind=consult`（`CONSULT_FAILED`：`refuse` 咨询未接通 / `cancel` 咨询已取消）；`message` 是软电话翻好的中文提示，页面直接显示即可 |
 | `cti.result` | `{ "seq", "success", "code", "message", "action", "data"? }` | **CTI 指令结果**（MSP_RESULT）：与 `cti.action` 的同步回包等价（桌面界面按 `seq` 对齐，网页/SDK 可直接用 `cti.action` 的 Promise）。超时结果也会走这里（`code: "TIMEOUT"`） |
+| `call.panel` | `{ "agentMode", "isBusy", "callPanel", "conferencePanel" }` | **通话面板快照**（REQ-WS-023 / REQ-ACC-026）：由 CTI 的 `MSP_CALL_PANEL_UPDATED` / `MSP_CONFERENCE_PANEL_UPDATED`（整份面板）驱动，连接建立时也推一份，应用直接据此构建自己的通话面板。**快照保留协议属性名、不丢弃话机未用到的属性**（应用可能要用），唯一改写是 `peer`/`member` 合并成 `{number,name,note}` 对象（`note` 只在协议没给名称、回退到通信录时才有）。`callPanel` = `{callId, agent?, callType?, callMode?, owner?, state, startTime, title, failCause?, callList}`：`callType` = incoming/outgoing/transfer/monitor，`callMode` = normal/consult/three-way/monitor，**`owner` = 当前操作的发起方（咨询=咨询方、三方=发起方、监听=班长；normal 时无）**，`failCause` = cancel/refuse/takeover/fail，`title` = 状态文案（本端补充）、`state` = `dialing`/`ringing`/`incoming`/`talking`/`consult-dialing`/`consult-ringing`/`consult-talking`/`three-way`/`monitoring`/`whispering`。`callList` 项字段与协议 §16.2 一致：`{callerNo, calledNo, peer:{number,name,note}, intercom?, skillGroup?, callType?, callStatus: incoming/dialing/ringing/talking/holding, startTime, ringingTime?, offhookTime?, target?}`（`target` 是本端补充：监听时的被叫）。**角色判定用 `owner`**：`callMode=normal` 才显示咨询/转移/会议入口；`callMode=consult` 时 **owner 显示三方/咨询转移/结束咨询，非 owner（被咨询方）不显示咨询相关控制、按普通通话显示**（owner 缺失的老服务端回退「存在 `callType=consult` 的腿」）；`callMode=three-way` 时**只有 owner 显示移除/强制挂断**。`conferencePanel` = `{confId, owner, memberList:[{member:{number,name,note}, intercom, owner, state, timestamp}]}`（字段与协议 §16.3 一致，`member` 与 `peer` 同为对象；`owner` 是主持人号码、主持人第一行，`state` 透传 dialing/ringing/talking/holding 与会控 muted/deafened/vmuted）。**两个面板互斥**：会议接通后只给 `conferencePanel`（`callPanel` 为 `null`）；被叫在会议邀请振铃阶段只有 `callPanel`（来电），接通后才切换。**没有进行中的通话时两者均为 `null`**（页面据此关闭面板） |
 
 `call` 对象中的视频相关字段（REQ-VIDEO-*）：
 

@@ -36,27 +36,28 @@ window.SipApp = window.SipApp || {};
     timerHandle = setInterval(tick, 1000);
   }
 
-  /** 通话各方（会议只留主持人块 + 悬停成员列表）。 */
+  /** 通话各方（会议只留主持人块 + 悬停成员列表）。数据来自 call.panel 快照。 */
   function renderParties(call) {
     const box = $('barParties');
     App.dom.clear(box);
-    const st = call.cti || {};
+    const conf = App.callui.panelConf();
 
-    if (st.talkState === 'conference') {
-      const members = st.members || [];
-      const hostNo = st.owner || App.callui.selfNumber();
-      const host = members.find(function (m) {
-        return App.callui.norm(m.telNo) === App.callui.norm(hostNo);
-      });
+    if (conf) {
+      // 协议 §16.3：conf.owner 是主持人号码，成员是 member:{number,name,note} 对象
+      const hostNo = conf.owner || '';
+      const hostMember = (conf.memberList || []).find(function (m) {
+        return App.callui.norm((m.member || {}).number) === App.callui.norm(hostNo);
+      }) || {};
+      const hostName = (hostMember.member || {}).name || '';
       const block = App.dom.el('div', { class: 'bar-party' });
       block.appendChild(App.dom.el('span', { class: 'who' },
-        host ? host.telNo + (host.displayName ? ' ' + host.displayName : '') : hostNo));
+        hostNo + (hostName ? ' ' + hostName : '')));
       // 悬停展开的成员列表：与通话卡片里的会议列表同一套行（主持人第一行、
       // 左侧移除/主持人图标、右侧会控）
       const list = App.dom.el('div', { class: 'bar-members' });
-      const parties = App.callui.parties(call);
-      parties.forEach(function (p) { list.appendChild(App.callui.partyRowEl(p)); });
-      if (!parties.length) list.appendChild(App.dom.el('div', null, '暂无成员'));
+      const rows = App.callui.displayRows(call);
+      rows.forEach(function (p) { list.appendChild(App.callui.partyRowEl(p)); });
+      if (!rows.length) list.appendChild(App.dom.el('div', null, '暂无成员'));
       // 展开/收起只由鼠标是否停在方块（含列表自身）上决定：
       // 点列表里的会控按钮会触发重画，这里按标志保持展开，鼠标离开才收起。
       list.style.display = confMembersOpen ? 'block' : 'none';
@@ -69,10 +70,10 @@ window.SipApp = window.SipApp || {};
         list.style.display = 'none';
       });
       // 主持人块左侧也带主持人图标
-      const hostParty = parties.find(function (p) { return p.host; });
-      if (hostParty && (hostParty.lead || []).length) {
+      const hostRow = rows.find(function (p) { return p.host; });
+      if (hostRow && (hostRow.lead || []).length) {
         const lead = App.dom.el('span', { class: 'lead' });
-        hostParty.lead.forEach(function (a) { lead.appendChild(App.callui.actionEl(a)); });
+        hostRow.lead.forEach(function (a) { lead.appendChild(App.callui.actionEl(a)); });
         block.insertBefore(lead, block.firstChild);
       }
       block.appendChild(list);
@@ -80,92 +81,46 @@ window.SipApp = window.SipApp || {};
       return;
     }
 
-    App.callui.parties(call).forEach(function (p) {
+    App.callui.displayRows(call).forEach(function (p) {
       const block = App.dom.el('div', { class: 'bar-party' });
       const who = App.dom.el('span', { class: 'who' });
       App.callui.fillPartyText(who, p, '#e5e7eb');
+      if (p.tag) who.appendChild(App.dom.el('span', { class: 'tag skill-tag' }, p.tag));
       block.appendChild(who);
       block.appendChild(App.callui.partyActions(p));
       box.appendChild(block);
     });
   }
 
-  /** 右侧全局操作按钮（每次重建；显隐规则同桌面通话面板）。 */
+  /** 右侧全局操作按钮：全部来自面板快照（call.panel）的 panelControls。 */
   function renderActions(call) {
     const box = $('barActions');
     App.dom.clear(box);
-    const st = call.cti || {};
-    const ringing = call.state === 'ringing';
-    const incoming = call.direction === 'incoming';
-    const established = call.state === 'established';
-    const talk = st.talkState || 'twoParty';
-    const agent = App.callui.isAgent();
-    const two = App.callui.twoPartyEstablished(call);
-    const owner = st.owner && App.callui.norm(st.owner) === App.callui.selfNumber();
     const fail = function (e) { App.ui.toast(App.util.errText(e), 'err'); };
-    const add = function (el) { box.appendChild(el); };
-    // 文字按钮：都带图标（与 UI 同一套、颜色随文字）；useCTI=true 时走统一的
-    // 在途处理（转圈 + 不可重复点击）。
-    const mk = function (label, cls, fn, icon, useCTI) {
-      const b = App.dom.el('button', { class: cls || '' }, label);
-      if (icon) App.callui.decorateButton(b, icon);
-      b.addEventListener('click', function () {
-        if (useCTI) App.callui.runCTI(b, fn);
-        else fn();
+
+    App.callui.panelControls(call).forEach(function (sp) {
+      // 拨号盘（发送 DTMF）是唯一的图形按钮
+      if (sp.id === 'btnDtmfPad') {
+        const b = App.dom.el('button', { class: 'mini-icon dialpad-btn', title: '拨号盘（发送 DTMF）' });
+        b.innerHTML = App.icons.svg(App.icons.PATH.dialpad, '#ffffff', 16);
+        b.addEventListener('click', function (e) { App.dialpad.openDtmf(e.clientX, e.clientY); });
+        box.appendChild(b);
+        return;
+      }
+      const b = App.dom.el('button', { class: sp.cls || '' }, sp.label);
+      if (sp.icon) App.callui.decorateButton(b, sp.icon);
+      b.addEventListener('click', function (ev) {
+        if (sp.cti) {
+          App.callui.runCTI(b, sp.run, undefined, sp.id);
+          return;
+        }
+        const p = sp.run(ev);
+        if (p && p.catch) p.catch(fail);
       });
-      add(b);
-      return b;
-    };
-    const text = function (label, cls, fn) { return mk(label, cls, fn, null, false); };
-
-    // 来电振铃：接听/视频接听/拒接（没有挂断）
-    if (ringing && incoming) {
-      mk('接听', 'green', function () { sdk.answer(store.callID()).catch(fail); }, { img: '/img/phone-out.png' }, false);
-      if (call.hasVideo) {
-        mk('视频接听', 'green', function () { sdk.answerVideo(store.callID()).catch(fail); }, { img: '/img/video-out.png' }, false);
-      }
-      mk('拒接', 'red', function () { sdk.reject(store.callID()).catch(fail); }, { svg: 'stop' }, false);
-      return;
-    }
-
-    // 通话中：拨号盘（DTMF，唯一的图形按钮），其后是文字操作按钮
-    if (established) {
-      const b = App.dom.el('button', { class: 'mini-icon dialpad-btn', title: '拨号盘（发送 DTMF）' });
-      b.innerHTML = App.icons.svg(App.icons.PATH.dialpad, '#ffffff', 16);
-      b.addEventListener('click', function (e) { App.dialpad.openDtmf(e.clientX, e.clientY); });
-      add(b);
-    }
-    if (agent && two) {
-      mk('咨询', '', function (e) { App.dialpad.open('consult', e.clientX, e.clientY); }, { img: '/img/consult.png' }, false);
-      mk('转移', '', function (e) { App.dialpad.open('transfer', e.clientX, e.clientY); }, { img: '/img/transfer.png' }, false);
-      mk('会议', '', function () { return sdk.addConferenceMembers([]); }, { img: '/img/conference.png' }, true);
-    }
-    if (talk === 'consult' && st.consultPhase === 'talking') {
-      mk('三方通话', '', function () { return sdk.consultThreeWay(); }, { img: '/img/threeway.png' }, true);
-      mk('咨询转移', '', function () { return sdk.consultTransfer(); }, { img: '/img/consult-transfer.png' }, true);
-    }
-    if (talk === 'monitor') {
-      if (st.monitorPhase !== 'whisper') {
-        mk('耳语', '', function () { return sdk.whisper(); }, { img: '/img/whisper.png' }, true);
-        mk('插话', '', function () { return sdk.intervene(); }, { img: '/img/intervene.png' }, true);
-        mk('强拦', '', function () { return sdk.intercept(); }, { img: '/img/intercept.png' }, true);
-      }
-    }
-    if (talk === 'conference' && owner) {
-      mk('添加成员', '', function (e) { App.dialpad.open('conference', e.clientX, e.clientY); }, { img: '/img/add-member.png' }, false);
-      mk('结束会议', 'red', function () { return sdk.finishConference(); }, { img: '/img/end-conference.png' }, true);
-    }
-
-    if (established && talk === 'twoParty') {
-      mk(call.muted ? '取消保持' : '保持', 'yellow', function () {
-        sdk.mute(store.callID(), !call.muted).catch(fail);
-      }, { svg: call.muted ? 'replay' : 'pause' }, false);
-    }
-    mk(talk === 'conference' ? '退出会议' : talk === 'threeWay' ? '退出三方'
-      : talk === 'monitor' ? '结束监听' : '挂断',
-      'red', function () { sdk.hangup(store.callID()).catch(fail); },
-      (talk === 'conference' || talk === 'threeWay')
-        ? { img: '/img/exit-conference.png' } : { svg: 'stop' }, false);
+      box.appendChild(b);
+      // 该动作仍在途（面板在点击后重画过、按钮已重建）：把转圈贴到新按钮
+      App.callui.attachPending(sp.id, b);
+    });
   }
 
   function render(call) {
@@ -183,7 +138,11 @@ window.SipApp = window.SipApp || {};
   }
 
   function bind() {
+    // CTI 指令结束：操作按钮按当前面板重新渲染（转圈不能恢复点击前的快照）
+    App.callui.onRender(function () { renderActions(store.state.call); });
     store.on('call', render);
+    // 面板快照变化（call.panel）：各方与操作按钮都以它为准
+    store.on('panel', function () { render(store.state.call); });
     store.on('agent', function () { if (store.state.call) render(store.state.call); });
     render(null);
   }

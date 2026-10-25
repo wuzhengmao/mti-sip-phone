@@ -6,9 +6,53 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
-## [1.0.18] - 待发布
+## [1.0.18] - 2026-10-25
 
 ### 新增
+
+- **CTI 按钮「在途转圈」的状态恢复修复**：耳语→监听这类按钮在指令回执前就收到面板更新时，转圈结束会用点击前的快照覆盖新状态（桌面/网页卡片上「耳语」转一圈又变回「耳语」）。现在：桌面在途期间保留待恢复项，面板重建换图标时同步更新（`setCTIButtonIcon`），回执只恢复**最新**图标；网页在途结束后按**当前面板**重新渲染按钮，不再恢复旧 `innerHTML`。**话务条与通话卡片统一机制**：`runCTI(btn, fn, okText, id)` 带上动作 id，面板重画后 `attachPending(id, btn)` 把转圈贴到新按钮上（话务条每次面板变化都会整条重建），结束时统一恢复并重新渲染。回归：`TestCTISpinRestoresLatestIcon`。
+
+- **监听耳语态的控制按钮**：耳语状态下「耳语」按钮改为「监听」（**图标换成监听图标**、桌面悬停提示同步改为「监听」），点击调用 `stopWhisper` 恢复静默监听；插话（强插）与强拦照常显示（桌面通话面板与网页控制台一致，用户口径）。SDK 新增 `stopWhisper()`，WS `cti.action` 的动作白名单同步加入 `stopWhisper`。
+
+- **`CALL_PANEL` 新增 `owner`：按发起方决定谁能看到操作按钮**（协议 §16.2）：`owner` 是当前操作的发起方分机——咨询是咨询方、三方是发起方（咨询方/强插班长）、监听是班长；`callMode=normal` 时没有。现在**咨询角色以 owner 为准**：`callMode=consult` 且 `owner` 不是本机时（被咨询方）按普通通话显示、不出现任何咨询相关控制（三方/转移/结束咨询），只有 owner 显示；`callMode=three-way` 时**只有 owner 显示移除/强制挂断（X）**，其他参与方只看到号码。桌面（`Call.CTI.Owner`）与网页（`callPanel.owner`）都按它判定；`owner` 缺失的老服务端仍回退「`callList` 里有 `callType=consult` 的腿」。回归：`TestServerConsultOwnerWins` / `TestServerThreeWayOwner` / `TestServerMonitorOwner`。
+
+- **对外面板保持协议属性名、不丢弃话机未用到的属性**：`call.panel` 的 `callPanel`/`conferencePanel` 现在与 CTI 协议一一对应（SDK 原样交给应用，应用也许要用）——`callList` 每项保留 `callerNo`/`calledNo`/`intercom`/`skillGroup`/`callType`/`callStatus`（**不再改名为 `state`**）/`startTime`/`ringingTime`/`offhookTime`，`callPanel` 增加 `agent`/`owner`；会议面板改为协议口径 `{confId, owner（主持人号码）, memberList:[{member:{number,name,note}, intercom, owner, state, timestamp}]}`（主持人仍排第一行）。唯一认可的改写是 `peer`/`member` 合并成 `{number,name,note}` 对象，且**协议已经给了名称时不带通信录备注**——只有名称为空、回退到通信录时才同时给出 name 与 note（用户口径）；监听另有本端补充的 `target`；顶层 `callPanel` 不再单列 `skillGroup`（腿里已经带了）。SDK 类型声明、`docs/ws-protocol.md`、`docs/sdk-guide.md` 同步更新；`sdk.on('call.panel', …)` 增加类型重载，`SipCallPanelState` 会被 IDE 正确推断（之前 `on` 只有 `any`，该类型声明实际没被引用）。回归：`TestServerCallPanel`（`ringingTime`/`offhookTime`/`intercom` 等原样保留）、`TestServerConferencePanel`、`TestPanelPartyNoteOnlyOnFallback`、`TestPanelJSONKeepsProtocolFields`。
+
+- **咨询转移后桌面按钮不显示**：2999 咨询 2901 再做咨询转移，服务端面板回到 `callMode=normal`，网页正常显示咨询/转移/会议，桌面却没有。原因是剩余话务的 INVITE 带着 `Call-Info: call-type=consult`（`Call.Consult=true`），桌面据此把入口藏掉了。现在**服务端面板是权威口径**：应用每次通话面板时清掉本地 `Call.Consult`（是否咨询腿由 `callMode`/`callType` 决定），桌面按翻译后的 `TalkState` 正常显示。回归：`TestServerPanelClearsConsultFlag`。
+
+- **咨询相关的网页按钮修正**：① 来电振铃改以**本地 SIP 通话**判定（`call.state=ringing` + incoming）——被咨询方（2901）的咨询腿面板 state 是 `ringing`，之前只认 `incoming` 导致**没有接听按钮**（桌面正常）；② **咨询发起方（2999）不再显示通用「挂断」**：与桌面一致，退出咨询走各方行上的「取消咨询/结束咨询」；咨询腿振铃/拨号时文案为「取消咨询」，接通后为「结束咨询」。CDP 实测：被咨询方振铃 `接听|拒接`；咨询振铃 `取消咨询`、无挂断；咨询通话 `三方通话|咨询转移` + `结束咨询`、无挂断。
+
+- **咨询角色按服务端面板判定**：`callMode=normal` 才显示「咨询/转移/会议」；`callMode=consult` **且 `callList` 里有 `callType=consult` 的腿**才是咨询发起方（显示三方通话/咨询转移/结束咨询），仅 callMode=consult 没有该腿的是**被咨询方**——按普通通话显示，不出现咨询行与咨询按钮（2901 作为被咨询方时桌/网页都不再错误显示咨询入口）。网页据此判定（`isConsultingPanel`），桌面经 `Call.CTI` 翻译（被咨询方保持双方通话 + `ConsultInProgress`）。回归：`TestServerConsultConsultee`。
+
+- **协议 2026-10 修订：话务面板改由服务端整份下发**：细粒度 `MSP_EVENT_CALL_*` / `CONSULT_*` / `MONITOR_*` / `THREE_WAY_*` / `CONFERENCE_*` 不再下发，改为 `MSP_CALL_PANEL_UPDATED`（`callId/agent/callType/callMode/state/startTime/failCause/callList[...]`）与 `MSP_CONFERENCE_PANEL_UPDATED`（`confId/owner/memberList[...]`）。话机**整份覆盖**面板并发布 `call.panel`（桌面通话面板/话务条、网页控制台与 SDK 都据此渲染）：`callId` 为空关闭通话面板、会议 `memberList` 为空退出会议界面（挂断本端）、`failCause` 翻成中文经 `cti.failed` 提示。服务端面板同时翻译进 `Call.CTI`，桌面既有面板布局（咨询/三方/监听/会议）直接复用；旧细粒度事件仅作老服务端兜底（收到过服务端面板后忽略）。回归：`TestServerCallPanel` / `TestServerConsultPanel` / `TestServerConferencePanel` / `TestServerConferenceEnded`。
+
+- **过滤网关的占位显示名**：FreeSWITCH 等网关把出局腿 `From` 的 display-name 固定写成 `Outbound Call`，导致通话记录/通话面板显示成「91381003 Outbound Call」。现在统一过滤占位名（`core.CleanDisplayName`：Outbound Call / OutboundCall / Outbound / Inbound Call / Unknown / Anonymous，大小写与多余空格不敏感）：**新记录写入时过滤，老记录读取时也过滤**，界面回退到号码/通信录名称。回归：`TestCleanDisplayName`、`TestPlaceholderRemoteName`。
+
+- **CONSULT_RINGING/CONSULT_CONNECTED 也发给被咨询方**（协议修订）：`applyMSPEvent` 现在对三个咨询事件统一判断——**只有咨询发起方（本机 = `consulter`）才切换咨询面板**，被咨询方与原通话另一方保持双方通话、只置 `ConsultInProgress`（隐藏咨询/转移/会议入口），`CONSULT_FINISHED/FAILED` 恢复；body 缺 `consulter` 时沿用已有状态，避免把发起方误判。回归：`TestConsultConsulteeUnaffected`。
+
+- **会议成员退出事件 `CONFERENCE_MEMBER_REMOVED`**（协议 §16.6 新增）：被移出/退出的成员不再收到 `CONFERENCE_MEMBERS_CHANGED`（变化后的列表里已经没有他），改为收到这条事件；话机收到即**挂断本端、关闭通话面板**（`member` 不是本机时忽略；旧字段 `telNo` 兼容；`CONFERENCE_FINISHED`/`CONFERENCE_MEMBER_REMOVED` 已不含名称字段，实现只用号码）。回归：`TestConferenceMemberRemovedHangsUp`。
+
+- **协议修订：CALL_INCOMING 取消 + 技能组标签**：来电改为只看 `CALL_RINGING`（外线呼入分配到坐席时带 `agent`/`agentName`/`skillGroup`；老服务端仍发 `CALL_INCOMING` 的继续兼容）；`skillGroup` 有值时在**对端号码右侧显示一个小的技能组标签**（桌面通话面板是圆角小标签，网页控制台是 `.tag`，随 `call.panel.callList[].skillGroup` 下发）。回归：`TestCallLifecycleEvents`（CALL_RINGING/CALL_INCOMING 兼容 + skillGroup）、`TestPanelTwoParty`（腿带 skillGroup）。
+
+- **通话面板快照事件 `call.panel`**（REQ-WS-023 / REQ-SDK-010）：核心在每次话务/坐席状态变化以及连接建立时推送 `{agentMode, isBusy, callPanel, conferencePanel}`——`callPanel` 带 `callId`、`startTime`、`title`（拨号中/振铃中/咨询呼叫中…）、`state`（dialing/ringing/incoming/talking/consult-dialing/consult-ringing/consult-talking/three-way/monitoring/whispering）与 `callList`（`peer`/`target`、子状态、开始时间，监听时 peer=主叫、target=被叫）；会议时 `conferencePanel` 带 `confId`、`startTime`、`owner` 与 `members`（主持人第一行、成员状态与加入时间）；**`callPanel` 与 `conferencePanel` 互斥**：会议接通后只推 `conferencePanel`；被叫在会议邀请振铃阶段只有 `callPanel`（来电），CTI 提前下发的会议事件不生成会议面板，接通后才切换。**没有通话时两个 panel 都是 `null`**。应用/SDK 直接基于它构建通话面板，不必解析 `call.*` / `cti.*` 明细（SDK 无需新方法：`sdk.on('call.panel', fn)`）。网页控制台的通话控制卡片与话务条改为由该快照驱动（标题、各方、会议成员、按钮显隐都由 `callPanel.state`/`callList`/`conferencePanel` 决定），无快照时回退旧口径。回归：`TestPanelTwoParty` / `TestPanelConsultAndThreeWay` / `TestPanelMonitor` / `TestPanelConference` / `TestPanelAgentMode` / `TestPanelEmpty`。
+
+- **AGENT_ONLINE 的 `status` 对齐**（协议 §16.1）：`MSP_EVENT_AGENT_ONLINE` 新增 `status`（CTI 侧记录的话机状态：`free`/`dialing`/`ringing`/`talking`/`holding`，大小写不敏感）。话机收到后与本地 `callStatus()` 比对，**不一致时立即补发一次 `MSP_HEARTBEAT`** 上报本地真实状态（不再等下一个心跳周期）；一致时不动，`status` 缺失（老服务端）时同样不动作。回归：`TestAgentOnlineStatusMismatch`。顺带去掉 UI 侧重复的「坐席模式变化」日志（core 的 `setAgentOnline` 已记录，同一事件原来在日志里出现两条一模一样的行）。
+
+- **会议成员会控按钮的只读样式**：普通成员（非主持人）视角的 禁视频/禁音/禁听 是只读的——按钮禁用且**置灰（opacity .45）、鼠标为默认箭头、悬停不出现底色**（之前 `disabled` 了但仍显示手型和 hover 高亮，看起来像能点）。
+
+- **网页与心跳的调整**：① **迷你 DTMF 拨号盘**（话务条拨号盘按钮弹出的那个）收窄为约 3:4 的竖长比例（内容宽 110px）；**呼叫/咨询/转移对话框里的号码盘保持原样**（用户要求）；② 修复**话务条的咨询/转移（以及会议「添加成员」）按钮点了没反应**——`mk()` 的点击处理器调用动作时没传事件对象，动作里的 `e.clientX` 抛错；③ 网页**未连接软电话时顶栏坐席状态徽章隐藏**（断线快照点了也发不出去），断线事件同时刷新徽章。
+
+- **网页显示 SIP 呼叫失败原因**：`call.failed`（SIP 信令失败，`reason` 为 `486 Busy Here`、`408 Request Timeout`、`SDP 协商失败: …` 这类原文）在网页控制台 toast「呼叫失败：<原因>」，与桌面 `showCallFailed` 一致；同时修复 store 处理结束事件时的 `const last` 赋值 `TypeError`（网页没拿到当前通话快照时，整个 `callEnded` 事件会被抛掉、卡片与提示都不更新）。**CTI 接管的话务不再重复提示**：收到过 `CALL_RINGING` 的话务，`call.failed` 带 `ctiManaged=true`，桌面/网页都不显示 SIP 原因（如「603 Decline」），改由随后 `CALL_FAILED` 的 `cti.failed` 中文消息（「呼叫未接通」）提示——此前两条会同时出现（用户实测）。
+
+- **CTI 失败原因提示 + 网页「呼叫中」卡片残留修复**：① `CALL_FAILED` 的 `refuse`（呼叫未接通）/ `cancel`（呼叫已取消）/ `takeover`（呼叫被代接）与 `CONSULT_FAILED` 的 `refuse`（咨询未接通）/ `cancel`（咨询已取消；协议把原 `fail` 改为 `cancel`，旧值仍兼容）由 core 翻成中文，经新的 **`cti.failed`** 总线/WS 事件下发（`{callId, kind, reason, message}`）：桌面提示条与网页控制台 toast 直接显示（桌面按当前可见窗口落在通话面板或主窗体下缘）。**本端信令先结束**（真机常见：对端 CANCEL → 本端 `call.failed`，CTI 的 `CALL_FAILED` 几十毫秒后才到、此时已无活动通话）时，按 CTI 话务 ID 找回刚结束的那通电话补发提示，同一通只提示一次（`Call.CTI.failNoticed`）。② 修复网页在通话结束后仍显示「呼叫中」通话卡片（话机 UI 已空闲、心跳上报 `free` 也正常）：core 的 `calls` 快照保留已结束的通话，网页把 `system.state` 里的第一条/迟到的 `call.audio`、`call.video` 快照当成当前通话；现在 store 只认 `ringing`/`established` 状态（`setCall`），重连快照取最后一条进行中的通话，并在没有通话时同步收起通话卡片与话务条。
+
+- **CTI 双方通话生命周期事件（CALL_*，协议 §16.2）**：接入 `MSP_EVENT_CALL_STARTED / CALL_RINGING / CALL_INCOMING / CALL_CONNECTED / CALL_FINISHED / CALL_FAILED`——这些事件提供 SIP 信令里没有的属性（CTI 侧 `callId`、双方名称 `callerName`/`calledName`、接听坐席 `agentName`）：
+  - `Call.CTI` 新增 `mspCallId`、`callPhase`（`dialing`/`ringing`/`talking`）、`agent`/`agentName`，双方主被叫复用 `callerNo/calledNo` 及名称字段（`NameOf` 可查）。
+  - 对端显示名：按 `agent`/`caller`/`called` 判定本机之外的一方，号码与本地 SIP 对端一致时把 `xxxName` 写进 `Call.PeerName`（桌面通话面板与网页控制台的对端展示都自动跟随）。
+  - **`CALL_RINGING` 时通话面板状态由「呼叫中」改为「振铃中」**（服务端外呼时 SIP 侧不一定有 180；桌面 UI 与网页控制台同步）。
+  - **`CALL_FINISHED` / `CALL_FAILED` 表示话务已结束：本端挂断，通话面板随 `call.terminated` 关闭**；事件里的 `callId` 与本通记录的 `mspCallId` 不一致时视为别的话务/迟到事件并忽略，避免误挂下一通电话。
+  - 咨询/三方/监听/会议进行中收到基础话务事件时只补 `callId`，不把面板改回双方通话。
+- **CTI 协议文档**：`MSP_EVENT_CONSULT_FINISHED` 去掉未使用的 `success` 字段（实现侧从未读取，无需改动代码）。
 
 - **网页控制台导航与拨号入口细节**：① **去掉导航栏的「在线座席」**（列表只保留在拨号对话框的在线座席页签）；② 导航当前页改为**下划线高亮**（与对话框页签一致，不再是实心按钮）；③ 通话控制卡片空闲时的「呼叫」按钮加上呼叫图标；④ 顶栏应用名由 `mti-sip-phone` 改为「**MTI 软电话**」（与桌面版一致）。
 

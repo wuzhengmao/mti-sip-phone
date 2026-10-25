@@ -68,6 +68,9 @@ type Call struct {
 	// CTI 复杂话务状态（咨询/三方/监听/会议，REQ-ACC-026）：双方通话时为零值
 	// （TalkState 为 twoParty）。由服务端 MSP_EVENT_* 驱动，UI 据此重建面板。
 	CTI CTIState `json:"cti,omitempty"`
+
+	// startedAt 通话创建时间：call.panel 事件的 startTime 用（内部字段，不下发）。
+	startedAt time.Time
 }
 
 // RegisterInfo 注册状态快照。
@@ -164,6 +167,14 @@ type App struct {
 	// agent 坐席模式（MSP_EVENT_AGENT_ONLINE/OFFLINE，见 cti.go）：
 	// 只有坐席模式才在通话面板显示高级话务按钮。
 	agent agentState
+	// 服务端下发的面板（协议 §16.2/§16.3，2026-10 修订）：CTI 统一下发计算好的
+	// 完整通话/会议面板（MSP_CALL_PANEL_UPDATED / MSP_CONFERENCE_PANEL_UPDATED），
+	// 话机直接整份覆盖。收到过面板事件后（srvPanelSeen）就以它为准，不再用本地
+	// 事件推算面板（本地推算仅作为老服务端的兜底）。
+	srvPanelSeen  bool
+	srvCallPanel  *CallPanel
+	srvConfPanel  *ConferencePanel
+	lastPanelFail string // 已经提示过的 failCause（callId|failCause，去重）
 	// heartbeat CTI 心跳循环（协议 §10）：注册成功启动、注销停止，
 	// 报文里如实上报坐席模式与显示名（见 cti.go）。
 	heartbeat heartbeatState
@@ -779,11 +790,14 @@ func (a *App) VideoDevices() []VideoDevice {
 
 // OnIncoming 呼入。创建呼入通话并进入振铃状态。
 func (a *App) OnIncoming(callID string, info IncomingCall) {
+	// From 的 display-name 可能只是网关的占位（如 FreeSWITCH 的
+	// "Outbound Call"）：过滤掉，显示回退到号码/通信录名称。
+	remoteName := CleanDisplayName(info.RemoteName)
 	a.upsertCall(&Call{
 		ID:         callID,
 		Direction:  "incoming",
 		Remote:     info.Remote,
-		RemoteName: info.RemoteName,
+		RemoteName: remoteName,
 		PeerName:   info.PeerName,
 		Consult:    info.Consult,
 		State:      CallRinging,
@@ -800,7 +814,7 @@ func (a *App) OnIncoming(callID string, info IncomingCall) {
 			CallID:     callID,
 			Direction:  "incoming",
 			Remote:     info.Remote,
-			RemoteName: info.RemoteName,
+			RemoteName: remoteName,
 			StartedAt:  time.Now(),
 			HasVideo:   info.HasVideo,
 		})
@@ -862,22 +876,33 @@ func (a *App) OnTerminated(callID, reason string) {
 	}
 	logx.Logger().Info("通话结束", "callId", callID, "reason", reason, "missed", missed)
 	a.logFinish(callID, reason, missed) // 通话记录：先写记录再发事件
+	// 服务端面板随通话结束清空（页面据此关闭面板）
+	a.clearServerPanels()
 	a.publishCall("call.terminated", callID, "reason", reason, "missed", missed)
 	a.notifyCallStatus() // 心跳 status：idle
 }
 
 // OnFailed 呼叫失败。
+//
+// **CTI 接管的话务**（收到过 `CALL_RINGING`，`CTI.CallPhase` 为 ringing/talking）
+// 在事件里带 `ctiManaged=true`：SIP 侧的原因（如「603 Decline」）不再由界面
+// 弹提示——CTI 随后会下发 `CALL_FAILED`，由 `cti.failed` 给出统一的中文消息
+// （「呼叫未接通」等）。否则用户会同时看到两条失败消息（用户实测）。
 func (a *App) OnFailed(callID, reason string) {
-	var missed bool
+	var missed, ctiManaged bool
 	if !a.updateCall(callID, func(c *Call) {
 		missed = missedOnEnd(c, reason)
+		ctiManaged = c.CTI.CallPhase == "ringing" || c.CTI.CallPhase == "talking"
 		c.State = CallTerminated
 	}) {
 		return
 	}
-	logx.Logger().Info("呼叫失败", "callId", callID, "reason", reason, "missed", missed)
+	logx.Logger().Info("呼叫失败", "callId", callID, "reason", reason,
+		"missed", missed, "ctiManaged", ctiManaged)
 	a.logFinish(callID, reason, missed) // 通话记录：先写记录再发事件
-	a.publishCall("call.failed", callID, "reason", reason, "missed", missed)
+	a.clearServerPanels()               // 服务端面板随通话结束清空
+	a.publishCall("call.failed", callID, "reason", reason, "missed", missed,
+		"ctiManaged", ctiManaged)
 	a.notifyCallStatus() // 心跳 status：idle
 }
 
@@ -1069,6 +1094,9 @@ func (a *App) upsertCall(c *Call) {
 	a.mu.Lock()
 	if _, ok := a.calls[c.ID]; !ok {
 		a.callOrder = append(a.callOrder, c.ID)
+		if c.startedAt.IsZero() {
+			c.startedAt = time.Now()
+		}
 		// 新通话的音量/增益默认 100%（0 在这两个字段里表示"禁用"，不能靠零值默认；
 		// 界面在通话建立时会按会话内记忆再下发一次真实值）
 		if c.MicGain == 0 {
@@ -1114,4 +1142,7 @@ func (a *App) publishCall(event, callID string, extra ...any) {
 		}
 	}
 	a.bus.Publish(event, data)
+	// 通话面板快照随之更新（REQ-WS-023）：页面/SDK 基于 call.panel 构建面板，
+	// 不必自己解析 call.* / cti.* 明细；面板关闭时两个 panel 为 null。
+	a.publishCallPanel()
 }

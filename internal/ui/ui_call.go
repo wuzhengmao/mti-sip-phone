@@ -1581,6 +1581,44 @@ func (a *App) onCallPanelDragEnd() {
 	logx.Logger().Info("通话面板位置已保存", "x", x, "y", y)
 }
 
+// callSkillTag 通话面板上的技能组小标签（协议 §16.2 CALL_RINGING 的
+// skillGroup：外线呼入分配坐席时用的技能组），显示在对端号码右侧。
+// 与在线座席页的 tag 同一套外观（tagLayout + 圆角底色 + 小字）。
+type callSkillTag struct {
+	widget.BaseWidget
+	bg  *canvas.Rectangle
+	txt *plainText
+	box *fyne.Container
+}
+
+func newCallSkillTag() *callSkillTag {
+	size := fyne.CurrentApp().Settings().Theme().Size(theme.SizeNameText)
+	b := &callSkillTag{}
+	b.txt = newThemedText("", float32(size)-3, false)
+	b.bg = canvas.NewRectangle(theme.Color(theme.ColorNameButton))
+	b.bg.CornerRadius = 3
+	b.box = container.New(tagLayout{padX: 5, padY: 1}, b.bg, b.txt)
+	b.ExtendBaseWidget(b)
+	b.Hide()
+	return b
+}
+
+func (b *callSkillTag) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.box)
+}
+
+// Set 更新技能组；空串表示隐藏标签（该通话没有技能组）。
+func (b *callSkillTag) Set(s string) {
+	if s == "" {
+		b.Hide()
+		return
+	}
+	b.txt.SetText(s)
+	b.Show()
+	b.box.Refresh()
+	b.Refresh()
+}
+
 // callNameBox 通话面板行1的对端名称：号码 + 通信录名称 + ★（常用），
 // 名称上可悬停出备注提示（REQ-UI-037）。
 //
@@ -1592,6 +1630,7 @@ type callNameBox struct {
 
 	note *hoverNote
 	star *canvas.Image
+	tag  *callSkillTag
 	box  *fyne.Container
 }
 
@@ -1603,7 +1642,8 @@ func newCallNameBox(tip *tooltipLayer) *callNameBox {
 	b.star.FillMode = canvas.ImageFillContain
 	b.star.SetMinSize(fyne.NewSize(contactsStarSize, contactsStarSize))
 	b.star.Hide()
-	b.box = container.New(markAfterLayout{gap: 4}, b.note, b.star)
+	b.tag = newCallSkillTag()
+	b.box = container.New(markAfterLayout{gap: 4}, b.note, b.star, b.tag)
 	b.ExtendBaseWidget(b)
 	return b
 }
@@ -1624,14 +1664,18 @@ func (b *callNameBox) MinSize() fyne.Size {
 		w += 4 + b.star.MinSize().Width // 4 = newCallNameBox 里 markAfterLayout 的间距
 		h = fyne.Max(h, b.star.MinSize().Height)
 	}
+	if b.tag.Visible() {
+		w += 4 + b.tag.MinSize().Width
+		h = fyne.Max(h, b.tag.MinSize().Height)
+	}
 	if w > callNameMaxW {
 		w = callNameMaxW
 	}
 	return fyne.NewSize(w, h)
 }
 
-// Set 更新对端展示：文本、是否常用（★）、备注（悬停提示）。
-func (b *callNameBox) Set(text string, starred bool, note string) {
+// Set 更新对端展示：文本、是否常用（★）、备注（悬停提示）、技能组标签。
+func (b *callNameBox) Set(text string, starred bool, note, skill string) {
 	b.note.SetText(text)
 	b.note.SetNote(note)
 	if starred {
@@ -1639,6 +1683,7 @@ func (b *callNameBox) Set(text string, starred bool, note string) {
 	} else {
 		b.star.Hide()
 	}
+	b.tag.Set(skill)
 	b.box.Refresh()
 	b.Refresh()
 }
@@ -1691,7 +1736,12 @@ func (a *App) setCallName(call *core.Call) {
 		return
 	}
 	text, starred, note := a.callDisplay(call)
-	a.callName.Set(text, starred, note)
+	// 技能组（协议 §16.2 CALL_RINGING 的 skillGroup）：对端号码右侧的小标签
+	skill := ""
+	if call != nil {
+		skill = call.CTI.SkillGroup
+	}
+	a.callName.Set(text, starred, note, skill)
 }
 
 // callRemoteName 通话对象的展示名称（Call-Info 名称优先，其次 SIP 显示名，最后号码）。

@@ -76,8 +76,8 @@ func (s *Server) dispatchCTI(ctx context.Context, msg Message) (Message, bool) {
 //   - target 可选（缺省用当前咨询）：consultThreeWay / consultTransfer；
 //   - 带 members：addConferenceMembers / removeConferenceMembers；
 //   - 带 member：会议成员会控（禁音/禁听/禁视频的开关）；
-//   - 无参数：finishConsult / finishConference / whisper / intervene / intercept /
-//     setBusy / setIdle。
+//   - 无参数：finishConsult / finishConference / whisper / stopWhisper /
+//     intervene / intercept / setBusy / setIdle。
 func ctiParams(action, target string, members []string, member string) (map[string]any, error) {
 	switch action {
 	case "consult", "transfer", "monitor", "takeover", "exitThreeWay":
@@ -118,7 +118,7 @@ func ctiParams(action, target string, members []string, member string) (map[stri
 			return nil, fmt.Errorf("动作 %s 需要参数 member", action)
 		}
 		return map[string]any{"member": member}, nil
-	case "finishConsult", "finishConference", "whisper", "intervene", "intercept",
+	case "finishConsult", "finishConference", "whisper", "stopWhisper", "intervene", "intercept",
 		"setBusy", "setIdle":
 		return nil, nil
 	}
