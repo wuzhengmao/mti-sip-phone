@@ -10,17 +10,35 @@ import (
 )
 
 // setTargetBase 把固定数据目录的基目录指到临时目录：
-// Windows 的 TargetDir 走 os.UserConfigDir（APPDATA 环境变量），
-// 其它平台走 XDG_DATA_HOME。返回该基目录（目标目录 = 基目录/mti-sip-phone）。
+// Windows 的 TargetDir 走 os.UserConfigDir（APPDATA 环境变量），macOS 走
+// os.UserConfigDir（$HOME/Library/Application Support），其它平台走
+// XDG_DATA_HOME。返回该基目录。
 func setTargetBase(t *testing.T) string {
 	t.Helper()
 	base := t.TempDir()
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		t.Setenv("APPDATA", base)
-	} else {
+	case "darwin":
+		t.Setenv("HOME", base)
+	default:
 		t.Setenv("XDG_DATA_HOME", base)
 	}
 	return base
+}
+
+// targetDirOfTest 测试环境下 TargetDir 的实际值（macOS 比基目录多一层
+// Library/Application Support，不要自己拼）。与 Relocate 同样解析符号链接：
+// macOS 的 /var → /private/var 会让未解析路径与 exe 路径前缀对不上。
+func targetDirOfTest(t *testing.T) string {
+	t.Helper()
+	dir, err := TargetDir()
+	if err != nil {
+		t.Fatalf("TargetDir 失败: %v", err)
+	}
+	// 与 Relocate 同一口径：按符号链接解析后的形式比较（macOS 的 /var →
+	// /private/var），目录可能还不存在，交给 resolvePath 逐级解析。
+	return resolvePath(dir)
 }
 
 // writeFakeExe 写一个假的"可执行文件"（内容唯一，用于比对复制结果）。
@@ -95,10 +113,10 @@ func TestRelocateSkipsTempDir(t *testing.T) {
 
 // TestRelocateSkipsWhenAlreadyInTargetDir 已在固定数据目录 → 无事可做。
 func TestRelocateSkipsWhenAlreadyInTargetDir(t *testing.T) {
-	base := setTargetBase(t)
+	setTargetBase(t)
 	// 重定向临时目录，确保跳过理由不是"临时目录规则"而是"已在固定目录"
 	setTempDir(t, filepath.Join(t.TempDir(), "fake-temp"))
-	target := filepath.Join(base, "mti-sip-phone")
+	target := targetDirOfTest(t)
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +131,9 @@ func TestRelocateSkipsWhenAlreadyInTargetDir(t *testing.T) {
 // TestRelocateCopiesStartsShortcut 正常路径：复制到固定目录（保留原名、
 // 内容一致）、生成快捷方式、按原参数拉起新进程，临时文件被清理。
 func TestRelocateCopiesStartsShortcut(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS 的安装形态是 .app 应用包，见 macinstall_darwin_test.go")
+	}
 	base := setTargetBase(t)
 	noShortcut(t)
 	started := fakeStart(t)
@@ -152,11 +173,14 @@ func TestRelocateCopiesStartsShortcut(t *testing.T) {
 
 // TestRelocateOverwritesExistingCopy 目标位置已有同名文件（非运行中）→ 覆盖。
 func TestRelocateOverwritesExistingCopy(t *testing.T) {
-	base := setTargetBase(t)
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS 的安装形态是 .app 应用包，见 macinstall_darwin_test.go")
+	}
+	setTargetBase(t)
 	noShortcut(t)
 	fakeStart(t)
 	src := writeFakeExe(t, newSrcDir(t), "mti-sip-phone.exe")
-	target := filepath.Join(base, "mti-sip-phone")
+	target := targetDirOfTest(t)
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		t.Fatal(err)
 	}

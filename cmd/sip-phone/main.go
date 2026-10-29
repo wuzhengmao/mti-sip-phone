@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"mti-sip-phone/internal/contacts"
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
+	"mti-sip-phone/internal/macurl"
 	"mti-sip-phone/internal/protocol"
 	"mti-sip-phone/internal/selfinstall"
 	"mti-sip-phone/internal/single"
@@ -45,8 +47,26 @@ var headless = flag.Bool("headless", false, "无界面模式（不启动 GUI）"
 // 查询参数 instance=N 指定（见 internal/protocol）。
 var instanceSlot = flag.Int("instance", 0, "实例槽位（多实例沙箱，0=主实例）")
 
+// showVersion 打印版本与目标平台后退出（CI 冒烟测试用：不需要图形会话）。
+var showVersion = flag.Bool("version", false, "打印版本号后退出")
+
 func main() {
+	// macOS：AppKit 只能在**主线程**上使用。仅托盘无 UI 版的 systray.Run 只做
+	// LockOSThread（锁住"调用它的当前线程"），Fyne 的 GLFW 同理——main 一开始
+	// 就把主 goroutine 锁在主线程上，才能保证那个"当前线程"就是主线程。
+	// 其余平台无副作用（本行不会执行）。
+	if runtime.GOOS == "darwin" {
+		runtime.LockOSThread()
+	}
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("mti-sip-phone %s (%s)\n", core.Version, core.Platform())
+		return
+	}
+
+	// macOS 的 sip:// 链接走苹果事件（点击链接时系统不给命令行参数）：处理器
+	// 要尽早装上，否则"点链接冷启动"的那一次会漏掉。其余平台为空操作。
+	macurl.Start()
 
 	// 1. 解析 sip:// / sips:// 协议拉起参数（Windows 下形如 "proto:sips://..."）
 	sipURL := protocol.FindURL(os.Args[1:])
@@ -114,10 +134,16 @@ func main() {
 	// 固定自更新的替换目标与自启/协议注册目标，避免下载产物被清理后程序
 	// "消失"。必须在单实例锁之前：本进程不碰锁直接退出，新进程正常拿锁，
 	// 没有转发竞态；复制/启动失败回退原地运行（不阻断启动）。
+	// macOS：点链接冷启动时 URL 是苹果事件（已缓存在 macurl），而自安装会把
+	// 进程搬迁到 .app 并重启——事件不会跟着新进程走。先取出来：要搬迁就并入
+	// 重启参数，不搬迁则在下方 SetHandler 之后补处理（否则首个 sip:// 链接会丢）。
+	pendingURLs := macurl.Pending()
+
 	exePath, exeErr := os.Executable()
 	if exeErr != nil {
 		logx.Logger().Warn("无法获取可执行文件路径，跳过自安装检查", "err", exeErr)
-	} else if relocated, dst, err := selfinstall.Relocate(exePath, os.Args[1:]); err != nil {
+	} else if relocated, dst, err := selfinstall.Relocate(exePath,
+		append(append([]string{}, os.Args[1:]...), pendingURLs...)); err != nil {
 		logx.Logger().Warn("自安装失败，继续从当前位置运行", "err", err)
 	} else if relocated {
 		logx.Logger().Info("已复制到固定数据目录并重启", "src", exePath, "dst", dst)
@@ -357,6 +383,18 @@ func main() {
 	// 8. 处理启动时的 sip:// 参数
 	if sipURL != "" {
 		handleLaunchArgs(app, cfg, []string{sipURL}, nil)
+	}
+
+	// 8.5 macOS：接上苹果事件的 sip:// 链接（点击链接拉起/唤醒本实例时，
+	// 系统是把 URL 投递给运行中的应用，而不是重新起进程带参数——那条路走
+	// 单实例转发，这条路走这里）。其余平台为空操作。
+	macurl.SetHandler(func(u string) {
+		logx.Logger().Info("收到苹果事件的 sip:// 链接", "url", u)
+		go handleLaunchArgs(app, cfg, []string{u}, nil)
+	})
+	// 搬迁前取出、又没搬迁（仍在原位置运行）的链接在这里补处理
+	for _, u := range pendingURLs {
+		go handleLaunchArgs(app, cfg, []string{u}, nil)
 	}
 
 	// 启动信息：GUI 子系统构建下无控制台（REQ-UI-013），统一写入日志；

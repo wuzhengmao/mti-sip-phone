@@ -10,6 +10,21 @@
 
 ### 新增
 
+- **macOS 平台支持（构建 / 安装 / 协议 / 打包 / CI）**：
+  - **构建**：`./build.sh --target darwin`（或 `darwin-arm64` / `darwin-amd64` / `macos`）在 macOS 宿主上**一次出 amd64 与 arm64 两个架构**（Apple clang 的 `-arch` 跨编，不需要第二台机器），完整版与仅托盘无 UI 版各一份：`dist/sip-phone-darwin-<arch>`、`dist/sip-phone-no-ui-darwin-<arch>`。固定为基础版（G.711/G.722 + 音频设备 + 界面/托盘 + 信令 + WS）——macOS 摄像头采集未实现（`internal/video/camera_other.go`），第三方视频/Opus/AEC 静态库也还没有 darwin 版本。另外修正：非 Linux 宿主不再误编出 `linux-*` 产物（`linux-native` 目标加宿主判断）。
+  - **自安装（REQ-UPD-025）**：裸二进制直接运行时在 `~/Library/Application Support/mti-sip-phone/` 生成 **`.app` 应用包**（完整版 `MTI软电话.app` / 无 UI 版 `MTI软电话-无UI版.app`）——可执行文件进 `Contents/MacOS/`、`Info.plist` 写明 bundle 标识/版本/`LSUIElement`/麦克风与摄像头用途/`CFBundleURLTypes`、`Contents/Resources/AppIcon.icns` 由 `internal/appicon.ICNS`（纯 Go，多尺寸 PNG 内嵌）生成——再从包内可执行文件重启；桌面放指向该包的符号链接。**已在任一 `.app` 内不再搬迁**（DMG 挂载点 `/Volumes/…` 与 `AppTranslocation` 的临时路径除外，仍会装到固定目录）。`Info.plist`/图标内容没变就不重写，避免每次启动刷新 LaunchServices 的图标缓存。
+  - **sip:// / sips:// 协议（REQ-PROTO-006）**：`Info.plist` 的 `CFBundleURLTypes` 声明两个 scheme → `lsregister -f` 让 LaunchServices 收录 → `LSSetDefaultHandlerForURLScheme` 设为默认处理器。**URL 走苹果事件而不是命令行参数**：新增 `internal/macurl` 在 main 最早期装上 `NSAppleEventManager` 的 `kAEGetURL` 处理器（事件早于核心组装时先缓存、接上回调后补发），接到后复用 `handleLaunchArgs`（写账户配置 → 注册）。裸二进制（不在 `.app` 内）注册会得到明确错误。
+  - **开机自启**：`~/Library/LaunchAgents/cn.mti.sip-phone.plist`（`RunAtLoad` + `LimitLoadToSessionType=Aqua`），只写文件、不扰动 launchd 的已加载状态。
+  - **打包（REQ-REL-007）**：`scripts/package-macos.sh` 出新版——`--arch universal` 用 `lipo` 合并两个架构并**重新 ad-hoc 签名**（lipo 会让切片签名失效，Apple Silicon 上签名无效的二进制无法执行），`.app` 再整体 ad-hoc 签名；`Info.plist` 补齐 `sip`/`sips` URL scheme（与自安装同一套字段）；DMG 内含「应用程序」快捷方式。
+  - **CI（REQ-REL-008）**：`.github/workflows/build.yml` 在 macOS runner 上跑 `go vet ./...` → `./build.sh --target darwin` → 关键包单测 → `--version` 冒烟 → `package-macos.sh --arch universal --variant both` → 校验 `lipo -info` / `plutil -lint` → **运行期冒烟**（裸二进制自安装成 `.app`、包内进程启动、无崩溃记录、`lsregister` 收录、LaunchAgent 生成、`open sip://` 后日志出现「收到苹果事件的 sip:// 链接」）→ 上传 DMG 与冒烟截图/日志。触发器收紧为 **push 到 master + PR**，且只在这些路径变化时跑：`internal/**`、`cmd/**`、`web/**`、`go.mod`、`go.sum`、`build.sh`、`scripts/package-macos.sh`、`.github/workflows/build.yml`（私仓 macOS 分钟 10 倍计费）；dev 上要验证在 Actions 页面手动 Run workflow。
+  - **自动更新**：macOS 替换包内可执行文件后重做 ad-hoc 签名（`internal/updater/resign_darwin.go`，失败只告警）。
+  - **新增 `-version` 命令行开关**：打印版本与目标平台后退出（不需要图形会话，供 CI 冒烟）。
+- **`internal/macbundle`**：macOS 应用包的目录结构、`Info.plist`、`AppIcon.icns` 与 LaunchServices 注册的统一实现（自安装、协议注册、打包脚本三处同一套字段与名字）。
+- **macOS 窗口行为（`internal/ui/topmost_darwin.go` + `.m`，AppKit）**：通话面板吸附工作区右下角、悬浮层级（`NSFloatingWindowLevel`）、`collectionBehavior` 不进 Mission Control 与 Cmd+` 切换、拖动跟随并记住位置（REQ-UI-040 沿用同一份配置）；更新提示窗同样悬浮。坐标统一为「主屏左上原点的物理像素」（与 Windows/Linux 保存的位置同口径），Cocoa 的左下原点/point 换算集中在 `.m` 里。注意 AppKit 只能在主线程调用，全部走 `fyne.DoAndWait` 且由后台 goroutine 发起；`endCallPanelDrag` 不等待拖动会话退出（否则与主线程互等）。
+- **发布接入 macOS（`scripts/release.sh --darwin-ci`）**：一次发布 = 本地容器编 10 个 Windows/Linux 产物 + GitHub Actions 编 macOS（两个架构的裸二进制 + universal DMG，两个并行），下载回来合并上传。发布物新增 `mti-sip-phone-macos-x64` / `-arm64`（裸 Mach-O，自动更新的下载目标）与 `mti-sip-phone-macos-universal.dmg`（`kind=installer`，首次安装包）；`release.json` 的 `kind` 按产物输出。
+- **macOS 自动更新的下载校验**：`checkExecutableMagic` 补 Mach-O 魔数判断（单架构 + universal），此前 darwin 分支等于不校验。
+- **`internal/appicon.ICNS`**：纯 Go 生成 macOS `.icns`（icp4/icp5/icp6/ic07/ic08/ic09 六档 PNG 内嵌），无需 sips/iconutil，可跨平台单测。
+
 - **CTI 按钮「在途转圈」的状态恢复修复**：耳语→监听这类按钮在指令回执前就收到面板更新时，转圈结束会用点击前的快照覆盖新状态（桌面/网页卡片上「耳语」转一圈又变回「耳语」）。现在：桌面在途期间保留待恢复项，面板重建换图标时同步更新（`setCTIButtonIcon`），回执只恢复**最新**图标；网页在途结束后按**当前面板**重新渲染按钮，不再恢复旧 `innerHTML`。**话务条与通话卡片统一机制**：`runCTI(btn, fn, okText, id)` 带上动作 id，面板重画后 `attachPending(id, btn)` 把转圈贴到新按钮上（话务条每次面板变化都会整条重建），结束时统一恢复并重新渲染。回归：`TestCTISpinRestoresLatestIcon`。
 
 - **监听耳语态的控制按钮**：耳语状态下「耳语」按钮改为「监听」（**图标换成监听图标**、桌面悬停提示同步改为「监听」），点击调用 `stopWhisper` 恢复静默监听；插话（强插）与强拦照常显示（桌面通话面板与网页控制台一致，用户口径）。SDK 新增 `stopWhisper()`，WS `cti.action` 的动作白名单同步加入 `stopWhisper`。

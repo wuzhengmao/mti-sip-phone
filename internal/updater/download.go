@@ -234,8 +234,28 @@ func checkExecutableMagic(path string) error {
 		if n < 4 || head[0] != 0x7f || head[1] != 'E' || head[2] != 'L' || head[3] != 'F' {
 			return errors.New("下载内容不是有效的程序文件")
 		}
+	case "darwin":
+		// macOS 没有"可执行扩展名"，只能靠 Mach-O 魔数（含 universal/fat）
+		if !isMachO(head) {
+			return errors.New("下载内容不是有效的程序文件")
+		}
 	}
 	return nil
+}
+
+// isMachO 判断前 4 字节是否为 Mach-O 魔数（单架构或 universal/fat）。
+// 小端文件在磁盘上是 CE FA ED FE / CF FA ED FE；universal 是 CA FE BA BE。
+func isMachO(head []byte) bool {
+	if len(head) < 4 {
+		return false
+	}
+	switch binary.BigEndian.Uint32(head[:4]) {
+	case 0xFEEDFACE, 0xFEEDFACF, // 大端 Mach-O
+		0xCEFAEDFE, 0xCFFAEDFE, // 小端 Mach-O
+		0xCAFEBABE, 0xCAFEBABF: // universal / fat
+		return true
+	}
+	return false
 }
 
 // friendlyError 把底层错误转成面向用户的中文提示（尽量简短，

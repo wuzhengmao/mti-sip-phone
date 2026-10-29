@@ -11,3 +11,5 @@ import "fmt"
 func registerWindows(exePath string) error {
 	return fmt.Errorf("当前平台不支持 Windows 注册表协议注册")
 }
+
+// registerDarwin 实现在 register_darwin.go（构建标签 darwin）。

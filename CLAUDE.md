@@ -4,9 +4,9 @@
 
 ## 项目概述
 
-mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x64 / arm64）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
+mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x64 / arm64，macOS arm64 / amd64——macOS 为基础版，见「macOS（darwin）」一节）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.15**（2026-10-07 定版并合并 master）：新增**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）**与**网页控制台（五个页面，取代原测试页，REQ-WEB-001~004）**，补齐 26 个 WS 方法（通话记录 / 通信录增删改查 / 配置读写 / 设备枚举 / 网页触发更新，REQ-WS-016~019 + REQ-UPD-020/021），拨号框边打边查通信录；另新增「允许远程连接」开关与沙箱端口 `8765+10×槽位`。当前版本 **1.0.17**（2026-10-14 定版并合并 master）：新增 **Windows exe 文件图标（绿色话机，REQ-UI-042）**、**自安装到固定数据目录与桌面快捷方式「MTI 软电话」（REQ-UPD-024）**、**SDK `sipUri` 连上即登录与 `unregisterOnDisconnect` 断线自动注销（REQ-SDK-007 / REQ-WS-020）**；另修复 Linux 应用菜单里 sip:// 协议处理器的重复条目（补 NoDisplay）。当前版本 **1.0.18**（2026-10-25 定版并合并 master）：**CTI 话务面板改由服务端整份下发**（`MSP_CALL_PANEL_UPDATED` / `MSP_CONFERENCE_PANEL_UPDATED`，原细粒度 `MSP_EVENT_CALL_*` / `CONSULT_*` / `MONITOR_*` / `THREE_WAY_*` / `CONFERENCE_*` 不再下发），`call.panel` 增加 `owner` 角色判定（咨询方/三方发起方/监听班长）与协议属性保真（`callStatus`/`callerNo`/`calledNo` 等原样透传、`peer`/`member` 合并为对象），补齐技能组标签、`CALL_INCOMING` 取消、`CONFERENCE_MEMBER_REMOVED` 退出会议、`stopWhisper`（耳语→监听切换）；另有咨询转移后桌面入口修复、网页通话卡片/话务条改由面板驱动、网关占位显示名过滤；另含对端 BYE/CANCEL 的 Call-ID 失配降级（`matchForTeardown`）、`docker/build.bat` Windows 容器构建入口与 release.sh/build.sh 的 CRLF 版本解析修复。
+当前版本 **1.0.15**（2026-10-07 定版并合并 master）：新增**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）**与**网页控制台（五个页面，取代原测试页，REQ-WEB-001~004）**，补齐 26 个 WS 方法（通话记录 / 通信录增删改查 / 配置读写 / 设备枚举 / 网页触发更新，REQ-WS-016~019 + REQ-UPD-020/021），拨号框边打边查通信录；另新增「允许远程连接」开关与沙箱端口 `8765+10×槽位`。当前版本 **1.0.17**（2026-10-14 定版并合并 master）：新增 **Windows exe 文件图标（绿色话机，REQ-UI-042）**、**自安装到固定数据目录与桌面快捷方式「MTI 软电话」（REQ-UPD-024）**、**SDK `sipUri` 连上即登录与 `unregisterOnDisconnect` 断线自动注销（REQ-SDK-007 / REQ-WS-020）**；另修复 Linux 应用菜单里 sip:// 协议处理器的重复条目（补 NoDisplay）。当前版本 **1.0.18**（2026-10-25 定版并合并 master）：**CTI 话务面板改由服务端整份下发**（`MSP_CALL_PANEL_UPDATED` / `MSP_CONFERENCE_PANEL_UPDATED`，原细粒度 `MSP_EVENT_CALL_*` / `CONSULT_*` / `MONITOR_*` / `THREE_WAY_*` / `CONFERENCE_*` 不再下发），`call.panel` 增加 `owner` 角色判定（咨询方/三方发起方/监听班长）与协议属性保真（`callStatus`/`callerNo`/`calledNo` 等原样透传、`peer`/`member` 合并为对象），补齐技能组标签、`CALL_INCOMING` 取消、`CONFERENCE_MEMBER_REMOVED` 退出会议、`stopWhisper`（耳语→监听切换）；另有咨询转移后桌面入口修复、网页通话卡片/话务条改由面板驱动、网关占位显示名过滤；另含对端 BYE/CANCEL 的 Call-ID 失配降级（`matchForTeardown`）、`docker/build.bat` Windows 容器构建入口与 release.sh/build.sh 的 CRLF 版本解析修复；同版另含 **macOS（darwin）平台支持**：本机构建 amd64 + arm64、`.app` / universal DMG 打包、裸二进制自安装成应用包、sip:// 走苹果事件、LaunchAgent 开机自启与 GitHub Actions 验证（细节见「macOS（darwin）」一节）。
 
 <details>
 <summary>1.0.14 已完成内容（点击展开）</summary>
@@ -71,6 +71,17 @@ build.bat
 #   dist/sip-phone-windows-arm64.exe          Windows ARM64 托盘版（交叉，基础版，需 llvm-mingw，缺失则跳过）
 ./build.sh
 
+# macOS（须在 macOS 宿主上构建；一次出 amd64 + arm64 两个架构，完整版 + 无 UI 版）：
+./build.sh --target darwin        # 也可 darwin-arm64 / darwin-amd64 / macos
+#   dist/sip-phone-darwin-<arch> / dist/sip-phone-no-ui-darwin-<arch>
+#   固定为基础版（无视频：macOS 摄像头采集未实现；无 Opus/AEC 静态库）
+# 打成 .app + DMG（默认仅托盘无 UI；--variant both 同时出完整版）：
+./scripts/package-macos.sh --arch universal   # universal = lipo 合并两架构 + 重新 ad-hoc 签名
+#   dist/macos/MTI软电话.app（完整版）、MTI软电话-无UI版.app、*.dmg
+# GitHub Actions（.github/workflows/build.yml）在 macOS runner 上做同样的验证：
+#   go vet ./... → ./build.sh --target darwin → 关键包单测 → --version 冒烟
+#   → package-macos.sh --variant both --arch universal → 上传 DMG artifact
+
 # 测试（推荐）：固定路径运行器——把测试二进制构建到仓库内 .testbin/ 再执行。
 # Windows 防火墙按"程序路径"放行，go test 每次换临时目录会被当成新程序反复弹窗，
 # 这个脚本让路径固定（放行一次即可）。会自动探测 WinLibs gcc，参数见脚本头部：
@@ -119,6 +130,20 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 `release/release.conf` + `release/app.json`（APP_ID `mti-sip-phone`），无 UI 版用
 `release/release-no-ui.conf` + `release/app-no-ui.json`（APP_ID `mti-sip-phone-no-ui`，独立令牌）。
 一个应用失败不影响另一个，最后统一报错退出；`--only full|no-ui`（或旧的 `--no-ui`）只发一个。
+
+**macOS 产物走 GitHub Actions（`--darwin-ci`）**：macOS 只能在 macOS 上编，所以
+`scripts/release.sh --darwin-ci` 会先 `workflow_dispatch` 触发 `.github/workflows/build.yml`
+（`release=true` → `SIP_PHONE_RELEASE=1`），**与本地容器编译并行**，跑完用 REST API
+下载 `darwin-binaries`（两个架构的裸二进制）与 `macos-dmg`（universal DMG），裸二进制
+放进 `dist/`、DMG 另存为 `dist/macos-dmg-{full,no-ui}.dmg`（发布文件名不含版本号）。
+需要能触发/读取 Actions 的 GitHub 令牌——**不设 `GH_TOKEN` 也行**：脚本会用
+`git credential fill` 从 git 凭据助手取（能 `git push` 到该仓库的机器就取得到，实测可用）；
+也可显式给 `GH_TOKEN`，或用 `GH_REPO`（默认 `wuzhengmao/mti-sip-phone`）、`GH_REF`（默认当前分支）。
+**CI 编的是已提交的 HEAD**，工作区有未提交改动时脚本会提示；**本地 HEAD 必须已推到远端
+该分支**，否则脚本在触发前直接报错（不会干等）。发布物里 macOS 的三项：`mti-sip-phone-macos-x64` / `-arm64`
+（裸 Mach-O、`kind=portable`，自动更新下载的就是它——**不做 universal**，按 GOARCH
+分架构更小）与 `mti-sip-phone-macos-universal.dmg`（`kind=installer`，首次安装用）；
+`release.json` 的 `kind` 按产物逐条输出（其余平台仍是 portable）。
 
 - 配置在 `release/release.conf`：`UPDATE_SITE`（当前 `https://update.wuzm219.cn`）/ `APP_ID`
   （mti-sip-phone）/ `UPLOAD_TOKEN`（由站点 `UPLOAD_SECRET` 按应用 ID 推导）/ 可选的
@@ -229,27 +254,44 @@ internal/
   wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳、网页视频订阅 video.go）
   updater/    自动更新：前端经 WS 告知新版本 → 用户确认后下载（sha256/
               可执行魔数校验）→ 替换当前可执行文件（.old 备份）→ 重启；
-              向总线发布 system.update 事件
+              向总线发布 system.update 事件（macOS 替换后重做 ad-hoc 签名，
+              见 resign_darwin.go）
+  macbundle/  macOS 应用包（.app）的统一实现：目录结构、Info.plist（含
+              sip/sips URL scheme）、AppIcon.icns、lsregister 收录与
+              LSSetDefaultHandlerForURLScheme 默认处理器。自安装、协议注册、
+              打包脚本三处共用同一套名字与字段（自安装与 DMG 两条路径行为一致）
+  macurl/     macOS 的 sip:// 链接接收：NSAppleEventManager 的 kAEGetURL 处理器
+              （cgo + ObjC，appleevent_darwin.m）。macOS 点链接**不给命令行
+              参数**，URL 以苹果事件投递；main 最早期 Start()，核心组装好后
+              SetHandler()，之前到达的 URL 先缓存后补发
   ui/         Fyne 界面：主窗口/拨号盘/设置页/通话面板/更新提示窗/托盘。
               通话面板与更新提示窗的去装饰/右下角吸附/不进任务栏按平台
               拆分：topmost_windows.go（Win32）、topmost_linux.go（X11：
               _MOTIF_WM_HINTS 去装饰 + _NET_WM_STATE SKIP_TASKBAR +
-              _NET_WORKAREA 定位）、topmost_other.go（其余平台空实现）
+              _NET_WORKAREA 定位）、topmost_darwin.go（AppKit：悬浮层级 +
+              collectionBehavior 不进 Mission Control + 右下角定位 + 拖动
+              记忆，坐标换算在 topmost_darwin.m）、topmost_other.go（其余平台空实现）
   ui/ui_update.go  更新提示窗 + 主窗体提示行（REQ-UPD-003）
   ui/folderdlg_windows.go  系统文件夹选择对话框（IFileOpenDialog，Windows）
   ui/folderdlg_other.go    其他平台回退（用 Fyne 内置对话框）
-  protocol/   sip:// 协议解析与系统协议注册（Windows 注册表 / Linux .desktop）
+  protocol/   sip:// 协议解析与系统协议注册（Windows 注册表 / Linux .desktop /
+              macOS .app + LaunchServices，见 register_darwin.go）
   single/     单实例（命名互斥体/flock）+ 第二实例参数转发（随机 token）
-  selfinstall/ 自安装（REQ-UPD-024）：启动早期（单实例锁之前）把自身复制到固定
+  selfinstall/ 自安装（REQ-UPD-024/025）：启动早期（单实例锁之前）把自身复制到固定
               数据目录（Windows %APPDATA%\mti-sip-phone、Linux
-              ~/.local/share/mti-sip-phone）+ 快捷方式（Windows 桌面 .lnk；
-              Linux 桌面与应用菜单各一份 .desktop——GNOME 默认关闭桌面图标，
-              菜单入口最可靠）+ 从固定目录重启；失败回退原地运行。Linux 侧：
-              ELF 不能内嵌图标，.desktop 的 Icon 引用写到程序旁的 icon.png
-              （appicon.Rasterize 光栅化）；桌面目录按 xdg-user-dir/
-              user-dirs.dirs 解析（本地化目录如「~/桌面」），并尽力
-              gio set metadata::trusted true
-  autostart/  开机自启（Windows HKCU Run / Linux XDG autostart，其他平台 no-op）
+              ~/.local/share/mti-sip-phone、macOS
+              ~/Library/Application Support/mti-sip-phone）+ 快捷方式（Windows
+              桌面 .lnk；Linux 桌面与应用菜单各一份 .desktop——GNOME 默认关闭
+              桌面图标，菜单入口最可靠；macOS 建 .app 包 + 桌面符号链接）+
+              从固定目录重启；失败回退原地运行。Linux 侧：ELF 不能内嵌图标，
+              .desktop 的 Icon 引用写到程序旁的 icon.png（appicon.Rasterize
+              光栅化）；桌面目录按 xdg-user-dir/user-dirs.dirs 解析（本地化
+              目录如「~/桌面」），并尽力 gio set metadata::trusted true。
+              **macOS 侧**：安装形态是 .app 应用包（图标与 URL scheme 只能从
+              Info.plist 读），建包细节全在 internal/macbundle；已在任一 .app
+              内则不搬迁（/Volumes 与 AppTranslocation 例外）
+  autostart/  开机自启（Windows HKCU Run / Linux XDG autostart /
+              macOS ~/Library/LaunchAgents，其他平台 no-op）
 web/          网页控制台（**内嵌进二进制**，改完必须重新构建 + 重启才生效）
   index.html  控制台外壳（单页 + hash 路由 #/call #/history #/contacts
               #/settings #/diag；顶栏应用名「MTI 软电话」）
@@ -268,7 +310,9 @@ release/      发布到更新站点的配置与元数据：release.conf + app.js
               icon.svg（两个应用各写一次）；app.json 经站点 metadata 接口整份替换
 assets/       exe 文件图标中间产物 app-icon.ico（tools/gen-appicon 生成，见下）
 scripts/      第三方库构建（build-video-libs.*、build-audio-libs.*）、固定路径测试运行器
-              （test.sh，防火墙只弹一次）与一键发布（release.sh/.bat）
+              （test.sh，防火墙只弹一次）、一键发布（release.sh/.bat）与 macOS
+              打包（package-macos.sh：.app + DMG，--arch universal 用 lipo + 重签）
+.github/workflows/build.yml  GitHub Actions：macOS runner 上 vet/编译/单测/打包 DMG
 docs/         design.md（架构设计：分层与依赖、各模块职责、关键决策、目录地图——新同学先看这份）、
               requirements.md（需求）、ws-protocol.md（WS 协议）、auto-update.md（自动更新与
               更新站点接入：规范摘要、REST API、参考实现、接入清单）、
@@ -330,6 +374,91 @@ main（组装）
 - **发布是站点上的独立应用**：`release/release-no-ui.conf`（APP_ID `mti-sip-phone-no-ui`
   + 独立令牌）+ `release/app-no-ui.json`；`scripts/release.sh` **默认两个应用一起发**
   （按变体各自读配置/收产物/上传），`--only no-ui` 只发这一个。
+
+## macOS（darwin）
+
+macOS 与 Windows/Linux 的三处结构性差异，改相关代码前必读：
+
+1. **程序图标与 URL scheme 只能来自 `.app` 应用包**（`Contents/Info.plist` +
+   `Contents/Resources/AppIcon.icns`）。裸二进制没有图标、也注册不了 sip://。
+   所以「自安装」在 macOS 上落成**建包**（`internal/macbundle`）：
+   `~/Library/Application Support/mti-sip-phone/MTI软电话.app`（完整版）与
+   `MTI软电话-无UI版.app`（无 UI 版），
+   包内可执行文件名固定为 `mti-sip-phone[-no-ui]`（必须与 `CFBundleExecutable`
+   一致），桌面放指向包的符号链接。已在任一 `.app` 内则不再搬迁；`/Volumes/…`
+   （DMG 挂载点）与 `…/AppTranslocation/…`（系统把 DMG 里的应用搬家到随机
+   只读路径）例外——那两处随时消失，仍要装到固定目录。
+2. **sip:// 链接走苹果事件，不走命令行参数**：点链接时系统给已注册的 `.app`
+   投递 `kAEGetURL` Apple Event（应用没运行就先启动再投递）。`internal/macurl`
+   用 cgo + ObjC（`appleevent_darwin.m`）注册 `NSAppleEventManager` 处理器；
+   main 里 `Start()` 尽早装、核心组装好再 `SetHandler()`（先到的 URL 缓存后补发）。
+   回调在主线程，**必须尽快返回**（main 里转 goroutine 再走 `handleLaunchArgs`）。
+3. **构建与打包都要在 macOS 上做**，但一次能出两个架构：Apple clang 支持
+   `-arch x86_64|arm64` 跨编，`build.sh --target darwin` 编 amd64 + arm64，
+   `package-macos.sh --arch universal` 用 `lipo` 合并。**lipo 会让每个切片的
+   Go 自带签名失效，合并后必须重新 ad-hoc 签名**（`codesign --force --sign -`），
+   否则 Apple Silicon 上签名为无效的二进制直接被内核杀掉。`.app` 也整体
+   ad-hoc 签名（尽力而为，失败只提示）。
+
+其它口径：
+
+- 产物固定为**基础版**：G.711/G.722 + 音频设备 + 界面/托盘 + 信令 + WS。
+  **macOS 没有摄像头采集后端**（`internal/video/camera_other.go`），第三方
+  视频/Opus/AEC 静态库也没有 darwin 版本——`build.sh` 的 darwin 目标刻意不走
+  `codec_setup`（与 windows-arm64 同理，避免打印对该目标无效的提示）。
+- 自安装/协议注册/打包三处共用 `internal/macbundle` 的名字与字段（bundle 标识
+  `cn.mti.sip-phone` / `cn.mti.sip-phone-no-ui`、图标 `AppIcon.icns`、
+  `CFBundleURLTypes` 声明 sip + sips、仅托盘变体 `LSUIElement=true`）。
+  `Info.plist`/图标内容没变就不重写（LaunchServices 按 mtime 缓存图标）。
+  早期版本（dev-macOs 分支）的包缺 `CFBundleURLTypes`：`NeedsRefresh` 会识别并
+  只补写**本项目的**包，别人的应用包不动。
+- 自更新替换包内可执行文件后要重做 ad-hoc 签名（`internal/updater/resign_darwin.go`），
+  失败只告警。
+- `os.UserConfigDir()` 在 macOS 上是 `~/Library/Application Support`，所以
+  `selfinstall.TargetDir()` 与配置目录是同一处（与 Windows 同口径）。测试里
+  重定向它要改 **`HOME`**（`selfinstall_test.go` 的 `setTargetBase`），不是
+  XDG 变量。
+- **路径比较要按符号链接解析后的形式**：macOS 的 `/var → /private/var` 会让
+  「临时目录下的 exe 不复制」「已在固定目录不复制」两条规则漏判（CI 实测：
+  `t.TempDir()` 给 `/var/folders/…`，exe 解析后是 `/private/var/folders/…`）。
+  `selfinstall.resolvePath` 逐级解析到最近的存在目录再拼回剩余部分（首次安装时
+  固定目录还不存在，直接 `EvalSymlinks` 会失败）——新增的路径比较都用它。
+- 开机自启是 `~/Library/LaunchAgents/cn.mti.sip-phone.plist`（`RunAtLoad` +
+  `LimitLoadToSessionType=Aqua`）。**只写文件、不 bootstrap**：bootout/bootstrap
+  会在程序运行时再拉起一份（撞单实例锁），对下次登录也没有额外作用。
+- 运行要求 macOS 12+（`LSMinimumSystemVersion`）；没有 Apple 开发者证书，
+  未签名/未公证，首次打开要右键「打开」或 `xattr -cr <应用>`。
+- **通话面板/更新提示窗的窗口行为**在 `internal/ui/topmost_darwin.go`（AppKit，
+  坐标换算在同名 `.m`）：面板本来就是 Fyne splash 窗口（GLFW 创建即无边框），
+  这里只调 `setLevel`（悬浮）+ `setCollectionBehavior`（`CanJoinAllSpaces |
+  Transient | IgnoresCycle` → 不进 Mission Control / Cmd+\` 切换）+ 右下角
+  定位 + 拖动会话（60Hz 跟随光标，位置记忆与 Windows/Linux 共用口径：
+  主屏左上原点的物理像素）。**AppKit 只能在主线程调用**：所有 C 调用都包在
+  `fyne.DoAndWait` 里，并且一律由后台 goroutine 发起（`DoAndWait` 在主线程
+  会 panic）；`screenBounds`/`screenWorkArea` 是同步接口、由主线程调用，
+  直接调 C。`endCallPanelDrag` **不能等拖动会话退出**（会话最后一次移动要
+  主线程执行，主线程正等它就互相等死）——位置在每次移动时已记下，直接读。
+- 验证走 GitHub Actions（`.github/workflows/build.yml`，macOS runner）：
+  `go vet ./...`（覆盖 darwin 专有文件）→ `./build.sh --target darwin` →
+  关键包单测 → `--version` 冒烟 → universal DMG → **运行期冒烟**（用裸二进制跑一次
+  自安装：断言生成 `MTI软电话-无UI版.app`、进程从包内启动、无 `crash.log`、
+  `lsregister` 收录、LaunchAgent 生成，再 `open "sip://…"` 断言日志出现
+  「收到苹果事件的 sip:// 链接」）→ 上传 artifact（含冒烟截图与日志）。
+  **Windows 开发机上 `go vet`/`go build` 看不见 darwin 专有文件**，改完必须让 CI 跑一遍。
+  **触发策略**：只有 push 到 `master` 或 PR，且改动落在 `internal/**`、`cmd/**`、
+  `web/**`、`go.mod`、`go.sum`、`build.sh`、`scripts/package-macos.sh`、
+  `.github/workflows/build.yml` 时才自动跑（私仓 macOS 分钟 10 倍计费，dev 上
+  日常推送到此为止）；dev 上要验证就去 Actions 页面手动 **Run workflow**；
+  发版时 `release.sh --darwin-ci` 会自己 `workflow_dispatch`，**不依赖 push 触发**。
+- **cgo 文件里的注释组与前导块之间必须空一行**：cgo 把 `import "C"` 前面
+  **连续不断**的注释组整体当前导块喂给 C 编译器——文件级 `//` 说明（中文）若
+  与 `/* #cgo … */` 紧邻，会被当成 C 代码解析（CI 实测报
+  `character <U+3001> not allowed in an identifier`）。写成
+  「`//` 说明 + 空行 + `/* */` + `import "C"`」。
+- **传递不透明句柄（如 `driver.MacWindowContext.NSWindow`）时按 `uintptr_t` 走，不要转
+  `unsafe.Pointer`**：Go 侧只有 `uintptr`，`unsafe.Pointer(h)` 会被 `go vet` 的
+  unsafeptr 检查判为 `possible misuse of unsafe.Pointer`（CI 的 vet 直接失败）。
+  C 侧签名用 `uintptr_t`、Go 侧传 `C.uintptr_t(h)`，在 C 里再转回 `NSWindow *`。
 
 ## 视频呼叫
 
@@ -448,7 +577,7 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 
 - **交流、文档、注释、提交信息、界面文案一律中文**。
 - **Git 工作流**：开发在分支上进行（工作分支 dev，master 为收口分支）；**会话中修改的代码不得自动提交**——提交与 push 必须经用户人工确认后执行，且**不自动合并到 master**（合并 master 需用户明确指示）。
-- **测试阶段只构建 windows-amd64**（2026-10-20 用户要求）：日常改完代码用 `./build.sh --target windows-amd64`（容器里同样参数；只出完整版 + 无 UI 版的 Windows amd64 产物，几十秒完成），**不要跑全部 5 个目标**；只有用户明确要求 release 时才全量构建（不带 `--target`，或走 `scripts/release.sh`）。
+- **测试阶段只构建 windows-amd64**（2026-10-20 用户要求）：日常改完代码用 `./build.sh --target windows-amd64`（容器里同样参数；只出完整版 + 无 UI 版的 Windows amd64 产物，几十秒完成），**不要跑全部 5 个目标**；只有用户明确要求 release 时才全量构建（不带 `--target`，或走 `scripts/release.sh`）。**macOS 产物不在本机构建**（Windows 上编不了）：改到 darwin 相关代码就推分支让 `.github/workflows/build.yml` 在 macOS runner 上跑（编译 + 单测 + universal DMG），本机的 `go vet` 看不见 darwin 专有文件。
 - **改完代码就重新构建 + 重启应用**：每次改完代码，跑 `build.bat`（Linux 上 `./build.sh`）重新构建，并重启正在运行的软电话实例（先结束旧进程再启动新产物；运行中的 exe 在 Windows 上不能被覆盖，顺序不能反）。**重启只针对"本来就在跑的那几个"**：先 `Get-CimInstance Win32_Process … | Select CommandLine` **记录下当前实例（含 `-instance N` / `sip://…` 之类的启动参数）**，kill 之后**按原参数把这一组拉起来**——不要无条件启动 3 个实例（用户没开的别替他开）。**不需要推送到更新站点**——发版只在用户明确要求时做（见上「发布到更新站点」），日常改动一律不发。
 - **简单的界面改动（文案、占位提示、字段增删）不用自动截图确认**——用户自己会看（2026-10-06 明确要求："这些简单的 ui 改动，不用每次都自动点击截图确认"）。合成鼠标截图那套探针（`D:\cache\temp\guiprobe\probe.ps1`）只在**布局/交互类改动**（新页面、自定义布局、定位、滚轮）或**用户报障需要复现**时才用。
 - **自安装（REQ-UPD-024）**：程序从非固定目录（dist/、下载目录等）启动时会先把自己复制到固定数据目录（Windows `%APPDATA%\mti-sip-phone`、Linux `~/.local/share/mti-sip-phone`）、在桌面生成快捷方式，再从那里重启——重启工作流里记录的进程 CommandLine 会指向新位置，属预期；开发调试想原地运行就设 `SIP_PHONE_NO_RELOCATE=1`（`go run` 的临时 exe 自动跳过）。固定目录里的 exe 就是自更新的替换目标，别手删。

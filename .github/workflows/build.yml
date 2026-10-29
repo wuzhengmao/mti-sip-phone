@@ -1,0 +1,211 @@
+name: 构建
+
+# macOS 产物只能在 macOS 上编译（Fyne/OpenGL 与 miniaudio 都要 CGO + Apple SDK），
+# 本仓库的开发机以 Windows 为主，所以用 GitHub Actions 的 macOS runner 做
+# 「编译 + 单测 + universal DMG 打包」的验证。Windows/Linux 产物仍走各自的构建机。
+
+on:
+  # 只在收口分支 master 与 PR 上自动跑，并且只看会**影响 macOS 构建**的路径
+  # （私有仓库的 macOS runner 是 10 倍计费）。dev 上日常推送不再自动构建：
+  # 需要验证就在 Actions 页面手动 Run workflow，发版时 scripts/release.sh
+  # --darwin-ci 会自己 workflow_dispatch，不依赖这里的触发器。
+  push:
+    branches: [master]
+    paths:
+      - 'internal/**'
+      - 'cmd/**'
+      - 'web/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'build.sh'
+      - 'scripts/package-macos.sh'
+      - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'internal/**'
+      - 'cmd/**'
+      - 'web/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'build.sh'
+      - 'scripts/package-macos.sh'
+      - '.github/workflows/build.yml'
+  # 发布时由 scripts/release.sh --darwin-ci 触发（release=true → SIP_PHONE_RELEASE=1）
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 按正式版构建（SIP_PHONE_RELEASE=1，版本号不带 -rc）
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS universal DMG
+    # macos-14 = Apple Silicon（arm64）。build.sh 会用 clang -arch 同时编出
+    # amd64 与 arm64 两份裸二进制，再由 package-macos.sh lipo 成 universal。
+    runs-on: macos-14
+    timeout-minutes: 40
+    # 空值 = 开发版（版本带 -rc）；"1" = 正式版。build.sh / package-macos.sh 都认它。
+    env:
+      SIP_PHONE_RELEASE: ${{ inputs.release == 'true' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 环境信息
+        run: |
+          go version
+          uname -m
+          clang --version | head -1
+
+      - name: 静态检查（涵盖 darwin 专有文件）
+        run: go vet ./...
+
+      - name: 编译 darwin（amd64 + arm64，两个变体）
+        run: |
+          chmod +x build.sh scripts/package-macos.sh
+          ./build.sh --target darwin
+
+      - name: 单元测试
+        run: >
+          go test ./internal/appicon/ ./internal/macbundle/ ./internal/macurl/
+          ./internal/selfinstall/ ./internal/protocol/
+
+      - name: 冒烟测试（本机架构）
+        run: |
+          ./dist/sip-phone-darwin-arm64 --version
+          ./dist/sip-phone-no-ui-darwin-arm64 --version
+
+      - name: 打包 universal DMG（完整版 + 无 UI 版）
+        run: ./scripts/package-macos.sh --variant both --arch universal
+
+      - name: 校验产包
+        run: |
+          set -e
+          lipo -info "dist/macos/MTI软电话-无UI版.app/Contents/MacOS/mti-sip-phone-no-ui"
+          lipo -info "dist/macos/MTI软电话.app/Contents/MacOS/mti-sip-phone"
+          plutil -lint "dist/macos/MTI软电话-无UI版.app/Contents/Info.plist"
+          plutil -lint "dist/macos/MTI软电话.app/Contents/Info.plist"
+          # URL scheme 与仅托盘（LSUIElement）必须在 plist 里
+          plutil -extract CFBundleURLTypes xml1 -o - "dist/macos/MTI软电话-无UI版.app/Contents/Info.plist"
+          ls -lh dist/macos/*.dmg
+
+      # 运行期冒烟：macOS runner 有真实图形会话，可以启动 App 验证自安装、LaunchServices
+      # 收录与 sip:// 苹果事件——这三条是 macOS 专用的、单元测试覆盖不到的路径。
+      # 交互观感（拖拽、吸附、菜单栏点击）仍需真机，这里不做。
+      - name: 冒烟测试（自安装 / 启动 / sip:// 苹果事件 / 注册项）
+        run: |
+          set -uo pipefail
+          APP_DIR="$HOME/Library/Application Support/mti-sip-phone"
+          BUNDLE="$APP_DIR/MTI软电话-无UI版.app"
+          EXE="$BUNDLE/Contents/MacOS/mti-sip-phone-no-ui"
+          LOG="$APP_DIR/logs/sip-phone.log"
+          pkill -f "$EXE" 2>/dev/null || true
+          pkill -f 'sip-phone-no-ui-darwin' 2>/dev/null || true
+          sleep 1
+          rm -rf "$APP_DIR"
+
+          echo "== 1) 裸二进制自安装成 .app =="
+          ./dist/sip-phone-no-ui-darwin-arm64 >/tmp/bare.log 2>&1 &
+          for i in $(seq 1 30); do [ -x "$EXE" ] && break; sleep 1; done
+          [ -x "$EXE" ] || { echo "::error::没有生成应用包"; cat /tmp/bare.log; exit 1; }
+          [ -f "$BUNDLE/Contents/Info.plist" ] || { echo "::error::缺 Info.plist"; exit 1; }
+          [ -f "$BUNDLE/Contents/Resources/AppIcon.icns" ] || { echo "::error::缺图标"; exit 1; }
+          plutil -lint "$BUNDLE/Contents/Info.plist"
+          ls -la "$HOME/Desktop" || true
+
+          echo "== 2) 进程从包内可执行文件启动 =="
+          PID=""
+          for i in $(seq 1 30); do PID="$(pgrep -f "$EXE" | head -1 || true)"; [ -n "$PID" ] && break; sleep 1; done
+          [ -n "$PID" ] || { echo "::error::进程没起来"; tail -80 "$LOG" 2>/dev/null; exit 1; }
+          echo "PID=$PID"
+
+          echo "== 3) 启动日志与崩溃记录 =="
+          for i in $(seq 1 20); do grep -q "mti-sip-phone 启动" "$LOG" 2>/dev/null && break; sleep 1; done
+          grep -q "mti-sip-phone 启动" "$LOG" || { echo "::error::没有启动日志"; tail -80 "$LOG" 2>/dev/null; exit 1; }
+          # crash.log 启动时**一定会写一行标题**（"=== 时间 banner ==="），只有标题行
+          # 说明正常；标题行之外还有内容才是真崩溃（logx/crash.go 的口径）。
+          if [ -f "$APP_DIR/logs/crash.log" ]; then
+            EXTRA="$(grep -vc '^=== ' "$APP_DIR/logs/crash.log" || true)"
+            if [ "${EXTRA:-0}" -gt 0 ]; then
+              echo "::error::崩溃记录里有内容"
+              cat "$APP_DIR/logs/crash.log"
+              exit 1
+            fi
+          fi
+          sleep 5
+          kill -0 "$PID" 2>/dev/null || {
+            echo "::error::进程启动后很快退出（疑似崩溃）"
+            tail -120 "$LOG" 2>/dev/null
+            cat "$APP_DIR/logs/crash.log" 2>/dev/null
+            exit 1
+          }
+
+          echo "== 4) LaunchServices 收录 =="
+          LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+          if "$LSREG" -dump 2>/dev/null | grep -qi "cn.mti.sip-phone-no-ui"; then
+            echo "已收录"
+          else
+            echo "::warning::lsregister 里没看到条目（协议注册可能没生效）"
+          fi
+
+          echo "== 5) 开机自启 LaunchAgent =="
+          [ -f "$HOME/Library/LaunchAgents/cn.mti.sip-phone.plist" ] &&
+            echo "LaunchAgent OK" || echo "::warning::没有 LaunchAgent 文件"
+
+          echo "== 6) sip:// 苹果事件 =="
+          open "sip://1001:pwd@127.0.0.1:5060" || echo "::warning::open sip:// 返回非零"
+          for i in $(seq 1 20); do grep -q "收到苹果事件的 sip:// 链接" "$LOG" 2>/dev/null && break; sleep 1; done
+          grep -q "收到苹果事件的 sip:// 链接" "$LOG" || {
+            echo "::error::没有收到苹果事件（sip:// 拉起失败）"
+            tail -120 "$LOG" 2>/dev/null
+            exit 1
+          }
+
+          echo "== 7) 截图（仅供参考）=="
+          screencapture -x /tmp/macos-smoke.png 2>/dev/null || echo "::warning::screencapture 失败"
+          cp "$LOG" /tmp/sip-phone.log 2>/dev/null || true
+
+          pkill -f "$EXE" 2>/dev/null || true
+          echo "冒烟测试通过"
+
+      # 发布用：两个架构的裸二进制（自动更新下载的就是它，不能是 DMG）
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-binaries
+          path: |
+            dist/sip-phone-darwin-amd64
+            dist/sip-phone-darwin-arm64
+            dist/sip-phone-no-ui-darwin-amd64
+            dist/sip-phone-no-ui-darwin-arm64
+          if-no-files-found: error
+          retention-days: 14
+
+      # 首次安装用：universal DMG（完整版 + 无 UI 版各一个）
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/macos/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      # 冒烟测试的截图与运行日志（失败也上传，方便排查）
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-smoke
+          path: |
+            /tmp/macos-smoke.png
+            /tmp/sip-phone.log
+            /tmp/bare.log
+          if-no-files-found: ignore
+          retention-days: 14

@@ -202,6 +202,7 @@
 | REQ-PROTO-003 | 协议拉起时：解析参数 → 写入/更新账户配置 → 启动注册 → 展示主界面确认 | P0 | 已完成|
 | REQ-PROTO-004 | 已运行实例处理：再次通过 sip:// 拉起时，将新参数交给已有进程，不重复启动 | P1 | 已完成|
 | REQ-PROTO-005 | 参数校验：非法 URL（缺账号、端口非法、主机缺失）需给出可见错误提示 | P0 | 已完成|
+| REQ-PROTO-006 | **macOS 协议注册与链接接收**：URL scheme 只能由 `.app` 应用包声明——`Info.plist` 的 `CFBundleURLTypes` 同时声明 `sip`/`sips`，用系统自带的 `lsregister -f` 让 LaunchServices 立刻收录，再经 `LSSetDefaultHandlerForURLScheme` 设为默认处理器（失败只告警，应用仍作为候选）。**URL 不走命令行参数**：macOS 点击链接时系统投递 Apple Event（`kAEGetURL`），由 `internal/macurl` 在 main 最早期装好 `NSAppleEventManager` 处理器接收，接到后走与命令行参数相同的 `handleLaunchArgs`（账户配置入盘 → 注册）；"核心还没组装好"时先缓存、接上回调后补发。裸二进制（不在 `.app` 内）无法注册，返回明确错误 | P1 | 已完成|
 
 ### 4.7 JS SDK（SDK）
 
@@ -285,6 +286,7 @@
 | REQ-UPD-023 | **网页配置页「使用主站点」按钮**：自动更新卡片「更新站点」标签旁新增小按钮，点击把官方站点填进输入框、**不自动保存**（与桌面版一致）。官方地址单一真相源为 `config.PrimaryUpdateSite`（桌面/网页共用），网页经 `system.state.updatePrimarySite` 下发、**不硬编码** | P1 | 已完成 |
 | REQ-UPD-019 | **SDK 只保留强制推送**：SDK 移除全部站点查询能力（`checkUpdate`/`listReleases`/`setUpdateSource`/定时器/`update.check` 事件与相关构造参数），只保留 `notifyUpdate(info)`——**恒为强制推送**（不受版本高低与预览版约束），供页面手动推送/联调；「有没有新版本」由软电话自己查询 | P1 | 已完成 |
 | REQ-UPD-024 | **自安装到固定数据目录**：首次从"临时位置"（下载目录等）运行时，程序把自身复制到固定数据目录（Windows `%APPDATA%\mti-sip-phone`——与配置目录同一处；Linux `~/.local/share/mti-sip-phone`）、**生成指向副本的快捷方式「MTI 软电话」**（Windows 桌面 .lnk / Linux 桌面与应用菜单各一份 .desktop，失败只告警），再从固定目录重启。Linux 侧细节：**ELF 二进制不能内嵌图标**，把绿色话机 256px PNG 写到程序旁、由 .desktop 的 `Icon=` 引用；**桌面目录按 `xdg-user-dir`/`~/.config/user-dirs.dirs` 解析**（本地化目录如「~/桌面」也能命中，取不到只跳过桌面那份）；桌面那份尽力 `gio set metadata::trusted true`（GNOME 43+ 未标记的桌面快捷方式双击不执行、图标显示成通用齿轮，gio 缺失静默忽略）；**应用菜单入口不受桌面图标开关影响**（GNOME 默认关闭桌面图标）——自更新替换、开机自启、sip:// 协议注册、更新后重启全部围绕这个固定位置，不受"下载产物被清理"影响。行为细节：**已在固定目录则直接运行不复制**；**复制/启动失败回退原地运行**（绝不因此启动失败）；`go run` 的临时 exe 与 `SIP_PHONE_NO_RELOCATE=1` 环境变量跳过（开发逃生口）；复制**保留原文件名**（完整版与无 UI 版互不覆盖）；检查点在**单实例锁之前**（旧进程不碰锁直接退出、新进程正常拿锁，无转发竞态）；多实例沙箱各槽位共用同一个 exe 位置 | P1 | 已完成 |
+| REQ-UPD-025 | **macOS 自安装（.app 应用包形态）**：裸二进制直接运行时在固定数据目录（`~/Library/Application Support/mti-sip-phone/`）生成**应用包** `MTI软电话.app`（完整版）或 `MTI软电话-无UI版.app`（仅托盘无 UI 版），把可执行文件放进 `Contents/MacOS/`、写 `Info.plist`（bundle 标识、版本、`LSUIElement`、麦克风/摄像头用途说明、`CFBundleURLTypes`）与 `Contents/Resources/AppIcon.icns`（`internal/appicon.ICNS` 纯 Go 生成，多尺寸 PNG 内嵌），再**从包内可执行文件重启**（进程因此带应用包身份：Dock/菜单栏图标、协议注册都成立）。桌面放一个指向该包的**符号链接**（Finder 显示应用图标；同名真实文件不覆盖）。**已在任一 `.app` 内则不再搬迁**（`/Volumes/…` DMG 挂载点与 `…/AppTranslocation/…` 临时路径除外——那两处随时消失，仍要装到固定目录）。两个变体的包名、bundle 标识、包内可执行文件名都不同（互不覆盖）；`Info.plist`/图标内容没变就不重写（避免每次启动刷新 LaunchServices 缓存） | P1 | 已完成 |
 
 ### 4.11 非功能需求（NFR）
 
@@ -297,6 +299,7 @@
 | REQ-NFR-005 | WS 服务绑定 127.0.0.1，不对外网暴露 | P0 | 已完成 |
 | REQ-NFR-006 | 单实例运行：重复启动时激活已有进程而非新开进程 | P1 | 已完成|
 | REQ-NFR-007 | **多实例（沙箱槽位）**：用 `-instance N`（N=1–99）或 `sip://账号:密码@服务器:端口?instance=N` 再启动实例：**槽位 0 = 主实例**（原目录与行为完全不变）；**槽位 ≥1 使用独立数据目录** `<配置目录>/instances/N/`（配置、通话记录、通信录、日志、单实例锁各自一份，互不影响），首次启动生成**空白默认配置**并把 WS 端口起点设为 **8765 + 10×N**（槽位 1 → 8775、槽位 2 → 8785…，被占用仍自动 +1 并存入该实例自己的配置；之后以该实例配置里保存的端口为准，可在控制台配置页修改）。沙箱实例**不做系统级注册**（sip:// 协议与开机自启只由主实例负责，避免互相覆盖）；**没有配置开关**——槽位只能显式指定（不带参就是主实例，日常启动行为一字不变）；sip:// 拉起仍转发给**主实例**。用途：多端点联调/对比（如两个账号互相打视频） | P1 | 已完成 |
+| REQ-NFR-008 | **macOS 平台产物**：darwin/arm64 与 darwin/amd64（Apple Silicon / Intel），完整版与仅托盘无 UI 版各一份；支持 `lipo` 合成 universal。**在 macOS 宿主上用 Apple clang 构建**（Fyne OpenGL 与 miniaudio CoreAudio 都要 CGO；Apple clang 可 `-arch` 跨编对侧架构，不需要第二台机器）。**固定为基础版**：G.711/G.722 + 音频设备 + 界面/托盘 + 信令 + WS，无视频（`internal/video/camera_other.go`：macOS 摄像头采集未实现）、无 Opus/AEC 静态库。运行要求 macOS 12+（`LSMinimumSystemVersion`）；未做 Apple 开发者签名/公证，首次打开需右键「打开」或 `xattr -cr` 去隔离属性。**窗口行为与 Windows/Linux 对齐**：通话面板吸附工作区右下角、悬浮置顶、不进 Mission Control/窗口切换器、拖动记忆位置（`internal/ui/topmost_darwin.go`，AppKit；坐标口径同为「主屏左上原点物理像素」） | P1 | 已完成 |
 
 ### 4.12 视频（VIDEO）
 
@@ -331,6 +334,8 @@
 | REQ-REL-004 | **发布物内容**符合站点规范：产物按 `<应用ID>-<平台>-<架构>[.exe]` 命名（**不含版本号**，同一平台的下载地址跨版本不变；平台/架构用规范 id，Windows 用 x64/x86/arm64、Linux 用 x64/arm64）；`release.json` 显式声明 channel/title/publishedAt/prerelease/mandatory 与每个产物的 file/name/kind/os/arch/sha256/size；`CHANGELOG.md` 取自根 changelog.md 的对应版本段（预发布版回落到底版本段）；`SHA256SUMS` 校验和清单；打包为 tar.gz 上传 | P0 | 已完成 |
 | REQ-REL-005 | **应用级元数据走站点接口**（不直接操作归档目录）：`release/app.json` → `PUT /api/v1/apps/<应用ID>/metadata`（整份替换，字段须写全，`icon` 字段由图标接口维护）；`release/icon.svg` → `PUT /api/v1/apps/<应用ID>/icon`（类型按内容判定）。两个接口与上传同令牌（站点未配置 `UPLOAD_SECRET` 时返回 403），失败即中止本次发布并打印服务端错误 | P1 | 已完成 |
 | REQ-REL-006 | **发布物新鲜度校验**：只发布本次构建之后写出的产物，跳过 dist/ 里上次构建留下的旧二进制并告警；缺失的平台（如 Windows 上无法产出 Linux 产物）显式列出并提示去对应平台构建；发布完成后核对站点 check 接口 | P1 | 已完成 |
+| REQ-REL-007 | **macOS 打包**（`scripts/package-macos.sh`，须在 macOS 上跑）：把 dist/ 里的裸二进制打成 `.app`（结构与自安装一致：`Info.plist` + `AppIcon.icns` + `sip/sips` URL scheme + `LSUIElement`），再打成 DMG（内含「应用程序」快捷方式，拖入即安装）。`--arch universal` 用 `lipo` 合并 amd64 + arm64 两份二进制并**重新 ad-hoc 签名**（lipo 会让每个切片的签名失效，Apple Silicon 上签名无效的二进制无法执行）；`.app` 再整体 ad-hoc 签名（失败只提示）。默认打无 UI 版，`--variant both` 同时出完整版 | P1 | 已完成 |
+| REQ-REL-008 | **GitHub Actions 的 macOS 构建验证**（`.github/workflows/build.yml`）：macOS runner（Apple Silicon）上 `go vet ./...`（涵盖 darwin 专有文件）→ `./build.sh --target darwin`（一次出 amd64 + arm64 两个变体）→ 关键包单测 → `--version` 冒烟 → `package-macos.sh --arch universal --variant both` 出两个 DMG → 校验 `lipo -info` / `plutil -lint` 并上传 artifact（保留 14 天）。Windows/Linux 产物仍走各自的构建机 | P1 | 已完成 |
 
 ### 4.14 通信录（CONTACT）
 

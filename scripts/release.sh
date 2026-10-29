@@ -14,11 +14,18 @@ fi
 #   ./scripts/release.sh --no-build       # 用 dist/ 里已有的产物打包（跳过新鲜度校验）
 #   ./scripts/release.sh --only no-ui     # 只发「仅托盘无 UI 版」（默认两个应用都发）
 #   ./scripts/release.sh --title "体验优化版" --mandatory
+#   ./scripts/release.sh --darwin-ci      # 同时出 macOS 产物：触发 GitHub Actions 编 darwin，
+#                                         # 与本地容器编译并行，跑完自动下载回来一起发布
 #
 # 配置：release/release.conf（站点地址 / 应用 ID / 上传令牌 / 可选站点证书），
 #       同名环境变量可覆盖（UPDATE_SITE / APP_ID / UPLOAD_TOKEN / CA_CERT /
 #       INSECURE_TLS）。站点启用 TLS 时 UPDATE_SITE 必须直接写 https 地址
 #       （HTTP 端口会 301 跳转，而 POST 跟随 301 会退化成 GET）。
+#       --darwin-ci 需要能触发/读取 Actions 的 GitHub 令牌：**不设 GH_TOKEN 也行**——
+#       脚本会从 git 凭据助手取（能 git push 到该仓库就取得到）；也可显式给
+#       GH_TOKEN，或用 GH_REPO（默认 wuzhengmao/mti-sip-phone）、GH_REF（默认当前分支）。
+#       **脚本不会提交或推送代码**：CI 编的是远端分支的最新提交，本地 HEAD 必须
+#       已经推上去（不一致时脚本会直接报错，不会干等）。
 #
 # 产物打包内容（站点规范）：
 #   mti-sip-phone-<平台>-<架构>[.exe]          发布产物（**不含版本号**：下载地址跨版本不变）
@@ -51,7 +58,10 @@ usage() {
   ./scripts/release.sh --no-build       # 用 dist/ 里已有的产物打包（跳过新鲜度校验）
   ./scripts/release.sh --only no-ui     # 只发「仅托盘无 UI 版」（默认：完整版 + 无 UI 版一起发）
   ./scripts/release.sh --title "体验优化版" --mandatory
+  ./scripts/release.sh --darwin-ci      # 同时经 GitHub Actions 编 macOS 产物并一起发布
 选项：--pre / --dry-run / --no-build / --only <full|no-ui> / -v <版本> / --title <标题> / --channel <通道> / --mandatory
+      --darwin-ci                       不需要设 GH_TOKEN：默认取 git 凭据助手的令牌
+                                        （可选 GH_REPO / GH_REF 覆盖默认仓库与分支）
 配置：**两个应用各一份**——release/release.conf（完整版 mti-sip-phone）与
       release/release-no-ui.conf（无 UI 版 mti-sip-phone-no-ui），各自一份上传令牌；
       两份都读同名的环境变量覆盖：
@@ -71,6 +81,7 @@ TITLE=""
 CHANNEL=""
 MANDATORY=0
 ONLY="" # 只发某个应用（full / no-ui）；留空 = 两个都发
+DARWIN_CI=0 # 1 = 触发 GitHub Actions 编 macOS 产物（--darwin-ci）
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -83,6 +94,7 @@ while [ $# -gt 0 ]; do
         --title) TITLE="${2:-}"; shift ;;
         --channel) CHANNEL="${2:-}"; shift ;;
         --mandatory) MANDATORY=1 ;;
+        --darwin-ci) DARWIN_CI=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "未知参数：$1" >&2; usage >&2; exit 2 ;;
     esac
@@ -188,6 +200,240 @@ esac
 TITLE_GIVEN="$TITLE" # 命令行给了 --title 就两个应用共用，否则各自 <APP_ID> <版本>
 TITLE=""
 
+# ---------- macOS 产物（GitHub Actions，--darwin-ci） ----------
+# macOS 只能在 macOS 上编译：本地容器在编 Windows/Linux 的 10 个产物时，同时
+# 触发 GitHub Actions 编 darwin 两个架构，跑完把 artifact 下载回 dist/：
+#   裸二进制（自动更新下载的目标）→ dist/sip-phone[-no-ui]-darwin-<arch>
+#   universal DMG（首次安装包）    → dist/macos/，另存稳定副本 dist/macos-dmg-<变体>.dmg
+# dispatch 放在容器编译之前、collect 放在之后，两边并行，总时长取较慢的一边。
+GH_REPO="${GH_REPO:-wuzhengmao/mti-sip-phone}"
+GH_WORKFLOW="${GH_WORKFLOW:-build.yml}"
+GH_REF="${GH_REF:-}"
+GH_API="https://api.github.com"
+GH_BODY="$(mktemp)"
+CI_WORKDIR=""
+cleanup_gh() {
+    rm -f "$GH_BODY"
+    [ -n "$CI_WORKDIR" ] && rm -rf "$CI_WORKDIR"
+}
+trap cleanup_gh EXIT
+
+if [ "$DARWIN_CI" = 1 ] && [ -z "${GH_TOKEN:-}" ]; then
+    # GH_TOKEN 没设时退回 git 的凭据助手：能 git push 到该仓库的机器上，
+    # 这里就能拿到同一份令牌（Git Credential Manager / 系统钥匙串 / store）。
+    # 注意 host 是 github.com（不是 GH_REPO 的第一段），取不到也不能让 set -e 退出。
+    GH_HOST="${GH_HOST:-github.com}"
+    GH_TOKEN="$(printf 'protocol=https\nhost=%s\n\n' "$GH_HOST" |
+        GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null |
+        sed -n 's/^password=//p')" || true
+    if [ -n "$GH_TOKEN" ]; then
+        echo "GH_TOKEN 未设置：已从 git 凭据助手取到 $GH_HOST 的令牌。"
+    fi
+fi
+if [ "$DARWIN_CI" = 1 ] && [ -z "${GH_TOKEN:-}" ]; then
+    echo "--darwin-ci 需要能访问 Actions 的 GitHub 令牌，以下二选一：" >&2
+    echo "  1) 让 git 记住凭据（git push 过该仓库后一般就有）：git credential approve" >&2
+    echo "  2) 显式设置：bash: export GH_TOKEN=<token>；PowerShell: \$env:GH_TOKEN=\"<token>\"" >&2
+    echo "  （令牌需 Actions 读写权限；可选 GH_REPO / GH_REF 覆盖默认仓库与分支）" >&2
+    exit 1
+fi
+
+# gh_api <METHOD> <PATH> [JSON]：响应体写到 $GH_BODY，HTTP 状态码在 $GH_CODE。
+# （不用命令替换是为了让调用方还能读到状态码与响应体。）
+gh_api() {
+    local method="$1" path="$2" body="${3:-}" code
+    if [ -n "$body" ]; then
+        code="$(curl -sS --max-time 60 -o "$GH_BODY" -w '%{http_code}' -X "$method" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d "$body" "$GH_API$path")" || code=000
+    else
+        code="$(curl -sS --max-time 60 -o "$GH_BODY" -w '%{http_code}' -X "$method" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$GH_API$path")" || code=000
+    fi
+    GH_CODE="$code"
+}
+
+# dispatch_darwin_ci 触发 workflow_dispatch：正式版传 release=true（构建不带 -rc）。
+dispatch_darwin_ci() {
+    local ref="$GH_REF" release_input remote_sha
+    if [ -z "$ref" ]; then
+        ref="$(git rev-parse --abbrev-ref HEAD)"
+    fi
+    CI_SHA="$(git rev-parse HEAD)"
+    CI_REF="$ref"
+    if [ "$PRERELEASE" = true ]; then release_input=false; else release_input=true; fi
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        echo "提示：工作区有未提交改动——GitHub Actions 编的是已提交的 HEAD（$CI_SHA）。" >&2
+    fi
+    # 本脚本**不提交也不推送**：CI 编的是远端分支的最新提交。本地 HEAD 还没推上去
+    # 的话，远程根本不会有这个提交对应的运行（后面要干等二十分钟再报错），这里先拦。
+    gh_api GET "/repos/$GH_REPO/commits/$ref"
+    if [ "$GH_CODE" = 200 ]; then
+        remote_sha="$(sed -n 's/^ *"sha": "\([0-9a-f]\{40\}\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+        if [ -n "$remote_sha" ] && [ "$remote_sha" != "$CI_SHA" ]; then
+            echo "本地 HEAD（$CI_SHA）与远端 $ref（$remote_sha）不一致。" >&2
+            echo "本脚本不会提交/推送代码；请先把要发布的提交推到 $GH_REPO 的 $ref，再重跑。" >&2
+            exit 1
+        fi
+    else
+        echo "提示：读不到远端 $ref 的最新提交（HTTP $GH_CODE），继续尝试触发。" >&2
+    fi
+    echo "触发 GitHub Actions：$GH_REPO / $GH_WORKFLOW @ $ref（正式版=$release_input）…"
+    gh_api POST "/repos/$GH_REPO/actions/workflows/$GH_WORKFLOW/dispatches" \
+        "{\"ref\":\"$ref\",\"inputs\":{\"release\":\"$release_input\"}}"
+    if [ "$GH_CODE" != 204 ]; then
+        echo "触发失败（HTTP $GH_CODE）：" >&2
+        cat "$GH_BODY" >&2
+        echo >&2
+        echo "检查：GH_TOKEN 是否有 Actions 写权限；分支 $ref 是否已推送到 $GH_REPO；" >&2
+        echo "      工作流文件是否在该分支上（默认 $GH_WORKFLOW）。" >&2
+        exit 1
+    fi
+}
+
+# extract_zip 解压 artifact（git-bash 不一定有 unzip，逐个回退）。
+extract_zip() {
+    local zip="$1" dir="$2"
+    mkdir -p "$dir"
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q -o "$zip" -d "$dir"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -m zipfile -e "$zip" "$dir"
+    elif command -v powershell.exe >/dev/null 2>&1; then
+        powershell.exe -NoProfile -Command \
+            "Expand-Archive -Force -LiteralPath '$(cygpath -w "$zip" 2>/dev/null || echo "$zip")' -DestinationPath '$(cygpath -w "$dir" 2>/dev/null || echo "$dir")'"
+    else
+        echo "解压 artifact 需要 unzip / python3 / powershell 之一" >&2
+        return 1
+    fi
+}
+
+# collect_darwin_ci 等 Actions 跑完，把裸二进制与 DMG 收进 dist/。
+collect_darwin_ci() {
+    local i run_id="" run_sha="" run_status="" conclusion="" aid bins aid_size bins_size
+    local zip full_dmg no_dmg f waited
+    CI_WORKDIR="$(mktemp -d)"
+    echo "等待 GitHub Actions 编译 macOS（最多 40 分钟）…"
+    if [ -n "${GH_RUN_ID:-}" ]; then
+        # 复用一次已完成的运行（省一次 macOS 构建/调试用）：跳过"找运行"。
+        run_id="$GH_RUN_ID"
+        echo "复用已有运行 ID：$run_id（GH_RUN_ID）"
+    else
+        for i in $(seq 1 120); do
+        gh_api GET "/repos/$GH_REPO/actions/runs?event=workflow_dispatch&branch=$CI_REF&per_page=5"
+        run_id=""
+        run_sha=""
+        if [ "$GH_CODE" = 200 ]; then
+            run_id="$(sed -n 's/^ *"id": \([0-9]\+\),[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+            run_sha="$(sed -n 's/^ *"head_sha": "\([0-9a-f]\{40\}\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+        fi
+        if [ -n "$run_id" ] && [ "$run_sha" = "$CI_SHA" ]; then
+            break
+        fi
+        if [ "$i" = 1 ] || [ $((i % 3)) = 0 ]; then
+            echo "  排队中…已等 $((i * 10)) 秒（找到运行后会打印运行 ID）"
+        fi
+        sleep 10
+        done
+    fi
+    if [ -z "${GH_RUN_ID:-}" ] && { [ -z "$run_id" ] || [ "$run_sha" != "$CI_SHA" ]; }; then
+        echo "没找到 $CI_SHA 的 GitHub Actions 运行（检查 $GH_REPO 的 Actions 页面）" >&2
+        exit 1
+    fi
+    echo "运行 ID：$run_id${CI_SHA:+（$CI_SHA）}"
+
+    run_status=""
+    for i in $(seq 1 240); do
+        gh_api GET "/repos/$GH_REPO/actions/runs/$run_id"
+        local st
+        st="$(sed -n 's/^ *"status": "\([a-z_]*\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+        if [ "$st" != "$run_status" ] && [ -n "$st" ]; then
+            run_status="$st"
+            case "$run_status" in
+                queued) echo "  等待 macOS runner（queued）…" ;;
+                in_progress) echo "  开始构建（in_progress）…" ;;
+                completed) echo "  构建结束（completed）" ;;
+            esac
+        fi
+        if [ "$run_status" = completed ]; then
+            conclusion="$(sed -n 's/^ *"conclusion": "\([a-z_]*\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+            break
+        fi
+        if [ $((i % 6)) = 0 ]; then
+            echo "  ……仍是 ${run_status:-unknown}，已等 $((i * 10)) 秒"
+        fi
+        sleep 10
+    done
+    if [ "$run_status" != completed ] || [ "$conclusion" != success ]; then
+        echo "GitHub Actions 未成功（status=$run_status conclusion=${conclusion:-无}）" >&2
+        echo "  查看：https://github.com/$GH_REPO/actions/runs/$run_id" >&2
+        exit 1
+    fi
+    echo "Actions 完成（success），下载产物…"
+
+    gh_api GET "/repos/$GH_REPO/actions/runs/$run_id/artifacts"
+    if [ "$GH_CODE" != 200 ]; then
+        echo "读取 artifact 列表失败（HTTP $GH_CODE）" >&2
+        cat "$GH_BODY" >&2
+        exit 1
+    fi
+    # artifact 对象里的顺序是 id → name → size_in_bytes（workflow_run.id 在
+    # size 之后，不会污染配对）；只取我们认识的两个名字。
+    local arts
+    arts="$(awk '
+        /"id": [0-9]+,?$/ { id=$2; gsub(/,/,"",id) }
+        /"name": "[^"]+"/ { n=$2; gsub(/[",]/,"",n); cur=n }
+        /"size_in_bytes": [0-9]+/ {
+            s=$2; gsub(/,/,"",s)
+            if (cur=="darwin-binaries" || cur=="macos-dmg") print cur, id, s
+        }' "$GH_BODY")"
+    aid="$(printf '%s\n' "$arts" | awk '$1=="darwin-binaries"{print $2}')"
+    aid_size="$(printf '%s\n' "$arts" | awk '$1=="darwin-binaries"{print $3}')"
+    bins="$(printf '%s\n' "$arts" | awk '$1=="macos-dmg"{print $2}')"
+    bins_size="$(printf '%s\n' "$arts" | awk '$1=="macos-dmg"{print $3}')"
+    if [ -z "$aid" ] || [ -z "$bins" ]; then
+        echo "artifact 列表里缺 darwin-binaries 或 macos-dmg（工作流是否更新过？）" >&2
+        exit 1
+    fi
+
+    # 国内网络下 artifact 走 blob 存储可能只有 ~100KB/s，一定是分钟级——带进度条，
+    # 并给足超时，允许断点续传/重试（-C - 配合 --retry 在中断后接着下）。
+    echo "下载 darwin-binaries（约 $(( ${aid_size:-0} / 1048576 )) MB）…"
+    zip="$CI_WORKDIR/bins.zip"
+    curl -fSL --progress-bar --retry 3 --retry-delay 5 --retry-all-errors --max-time 1800 -C - \
+        -H "Authorization: Bearer $GH_TOKEN" \
+        -o "$zip" "$GH_API/repos/$GH_REPO/actions/artifacts/$aid/zip" ||
+        { echo "下载 darwin-binaries 失败" >&2; exit 1; }
+    extract_zip "$zip" "$CI_WORKDIR/bins" || exit 1
+    echo "下载 macos-dmg（约 $(( ${bins_size:-0} / 1048576 )) MB）…"
+    zip="$CI_WORKDIR/dmg.zip"
+    curl -fSL --progress-bar --retry 3 --retry-delay 5 --retry-all-errors --max-time 1800 -C - \
+        -H "Authorization: Bearer $GH_TOKEN" \
+        -o "$zip" "$GH_API/repos/$GH_REPO/actions/artifacts/$bins/zip" ||
+        { echo "下载 macos-dmg 失败" >&2; exit 1; }
+    extract_zip "$zip" "$CI_WORKDIR/dmg" || exit 1
+
+    for f in sip-phone-darwin-amd64 sip-phone-darwin-arm64 \
+             sip-phone-no-ui-darwin-amd64 sip-phone-no-ui-darwin-arm64; do
+        [ -f "$CI_WORKDIR/bins/$f" ] || { echo "Actions 产物缺少 $f" >&2; exit 1; }
+        cp -f "$CI_WORKDIR/bins/$f" "$ROOT/dist/$f"
+        chmod 755 "$ROOT/dist/$f"
+    done
+    mkdir -p "$ROOT/dist/macos"
+    cp -f "$CI_WORKDIR/dmg/"*.dmg "$ROOT/dist/macos/"
+    full_dmg="$(ls "$ROOT/dist/macos/"MTI-SIP-Phone-full-*.dmg 2>/dev/null | head -1)"
+    no_dmg="$(ls "$ROOT/dist/macos/"MTI-SIP-Phone-no-ui-*.dmg 2>/dev/null | head -1)"
+    [ -n "$full_dmg" ] || { echo "Actions 产物缺少完整版 DMG" >&2; exit 1; }
+    [ -n "$no_dmg" ] || { echo "Actions 产物缺少无 UI 版 DMG" >&2; exit 1; }
+    cp -f "$full_dmg" "$ROOT/dist/macos-dmg-full.dmg"
+    cp -f "$no_dmg" "$ROOT/dist/macos-dmg-no-ui.dmg"
+    echo "已收进 dist/：darwin 裸二进制 ×4、DMG ×2（已另存 dist/macos-dmg-{full,no-ui}.dmg）"
+}
+
 # ---------- 编译 ----------
 
 case "$(uname -s)" in
@@ -201,6 +447,11 @@ if [ "$HOST" = other ]; then
 fi
 
 BUILD_START="$(date +%s)"
+
+# macOS 的 CI 先触发，和下面的容器编译并行跑（GH_RUN_ID 给定时复用已有运行，不触发）
+if [ "$DARWIN_CI" = 1 ] && [ -z "${GH_RUN_ID:-}" ]; then
+    dispatch_darwin_ci
+fi
 
 if [ "$DO_BUILD" = 1 ]; then
     # 统一走**容器编译**（docker/build.sh）：一次产出全部 10 个产物（完整版 + 无 UI 版
@@ -217,6 +468,10 @@ if [ "$DO_BUILD" = 1 ]; then
     fi
 else
     echo "跳过编译（--no-build）：直接使用 dist/ 里已有的产物"
+fi
+
+if [ "$DARWIN_CI" = 1 ]; then
+    collect_darwin_ci
 fi
 
 # publish_app 发布**一个**应用（完整版或仅托盘无 UI 版）：
@@ -245,6 +500,9 @@ if [ "$VARIANT" = "no-ui" ]; then
         "dist/sip-phone-no-ui-windows-arm64.exe"
         "dist/sip-phone-no-ui-linux-amd64"
         "dist/sip-phone-no-ui-linux-arm64"
+        "dist/sip-phone-no-ui-darwin-amd64"
+        "dist/sip-phone-no-ui-darwin-arm64"
+        "dist/macos-dmg-no-ui.dmg"
     )
     ART_TITLE=(
         "Windows 64 位（免安装，仅托盘）"
@@ -252,6 +510,9 @@ if [ "$VARIANT" = "no-ui" ]; then
         "Windows ARM64（免安装，仅托盘，无视频/Opus/AEC）"
         "Linux 64 位（仅托盘）"
         "Linux ARM64（仅托盘）"
+        "macOS Intel（仅托盘）"
+        "macOS Apple Silicon（仅托盘）"
+        "macOS 安装包（Universal DMG，仅托盘）"
     )
 else
     ART_SRC=(
@@ -260,6 +521,9 @@ else
         "dist/sip-phone-windows-arm64.exe"
         "dist/sip-phone-linux-amd64"
         "dist/sip-phone-linux-arm64"
+        "dist/sip-phone-darwin-amd64"
+        "dist/sip-phone-darwin-arm64"
+        "dist/macos-dmg-full.dmg"
     )
     ART_TITLE=(
         "Windows 64 位（免安装）"
@@ -267,10 +531,17 @@ else
         "Windows ARM64（免安装，无视频/Opus/AEC）"
         "Linux 64 位"
         "Linux ARM64"
+        "macOS Intel"
+        "macOS Apple Silicon"
+        "macOS 安装包（Universal DMG）"
     )
 fi
-ART_OS=(windows windows windows linux linux)
-ART_ARCH=(x64 x86 arm64 x64 arm64)
+# macOS 三项：两个架构的裸二进制（自动更新的下载目标，arch 用 x64/arm64）
+# + universal DMG（首次安装包，arch=universal，kind=installer）。
+# 裸二进制**不做 universal**：自动更新按 GOARCH 下载对应架构，单架构文件更小。
+ART_OS=(windows windows windows linux linux macos macos macos)
+ART_ARCH=(x64 x86 arm64 x64 arm64 x64 arm64 universal)
+ART_KIND=(portable portable portable portable portable portable portable installer)
 
 STAGE="$ROOT/dist/release/$APP_ID/$VERSION"
 rm -rf "$STAGE"
@@ -297,7 +568,10 @@ for i in "${!ART_SRC[@]}"; do
         fi
     fi
     name="${APP_ID}-${ART_OS[$i]}-${ART_ARCH[$i]}"
-    case "$src" in *.exe) name="$name.exe" ;; esac
+    case "$src" in
+        *.exe) name="$name.exe" ;;
+        *.dmg) name="$name.dmg" ;;
+    esac
     cp -f "$src" "$STAGE/$name"
     FILES+=("$name")
     HASHES+=("$(sha256sum "$STAGE/$name" | awk '{print $1}')")
@@ -317,6 +591,7 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
     echo "以下产物未包含（缺失或未重新生成）："
     for m in "${MISSING[@]}"; do echo "  $m"; done
     echo "提示：Windows 只能产出 Windows 产物；Linux 产物需在 Linux 机器上跑 build.sh 后再发布。"
+    echo "      macOS 产物只能在 macOS 上编：加 --darwin-ci，由 GitHub Actions 编好后自动下载回来。"
     if printf '%s\n' "${MISSING[@]}" | grep -q "windows-arm64"; then
         echo "      Windows ARM64 需要 llvm-mingw 工具链（缺了就跳过该目标）："
         echo "        Windows 解压到 %USERPROFILE%\\tools\\llvm-mingw，"
@@ -379,8 +654,8 @@ fi
         if [ "$i" -eq $(( ${#FILES[@]} - 1 )) ]; then
             sep=""
         fi
-        printf '    {"file": "%s", "name": "%s", "kind": "portable", "os": "%s", "arch": "%s", "sha256": "%s", "size": %s}%s\n' \
-            "$(json_escape "${FILES[$i]}")" "$(json_escape "${ART_TITLE[$i]}")" \
+        printf '    {"file": "%s", "name": "%s", "kind": "%s", "os": "%s", "arch": "%s", "sha256": "%s", "size": %s}%s\n' \
+            "$(json_escape "${FILES[$i]}")" "$(json_escape "${ART_TITLE[$i]}")" "${ART_KIND[$i]}" \
             "${ART_OS[$i]}" "${ART_ARCH[$i]}" "${HASHES[$i]}" "${SIZES[$i]}" "$sep"
     done
     printf '  ]\n'
@@ -508,7 +783,7 @@ fi
 
 echo
 echo "发布完成：$APP_NAME $VERSION"
-echo "  Windows 下载页：$UPDATE_SITE/a/$APP_ID/$VERSION"
+echo "  Windows/Linux/macOS 下载页：$UPDATE_SITE/a/$APP_ID/$VERSION"
 echo "  API：          $UPDATE_SITE/api/v1/apps/$APP_ID/releases/$VERSION"
 echo "  最新版查询：    $UPDATE_SITE/api/v1/apps/$APP_ID/check?version=$VERSION_BASE&os=windows&arch=amd64&prerelease=true"
 }
