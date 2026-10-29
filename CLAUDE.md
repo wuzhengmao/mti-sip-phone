@@ -444,8 +444,11 @@ macOS 与 Windows/Linux 的三处结构性差异，改相关代码前必读：
   主线程执行，主线程正等它就互相等死）——位置在每次移动时已记下，直接读。
 - 验证走 GitHub Actions（`.github/workflows/build.yml`，macOS runner）：
   `go vet ./...`（覆盖 darwin 专有文件）→ `./build.sh --target darwin` →
-  关键包单测 → `--version` 冒烟 → universal DMG → 上传 artifact。**Windows
-  开发机上 `go vet`/`go build` 看不见 darwin 专有文件**，改完必须让 CI 跑一遍。
+  关键包单测 → `--version` 冒烟 → universal DMG → **运行期冒烟**（用裸二进制跑一次
+  自安装：断言生成 `MTI软电话-无UI版.app`、进程从包内启动、无 `crash.log`、
+  `lsregister` 收录、LaunchAgent 生成，再 `open "sip://…"` 断言日志出现
+  「收到苹果事件的 sip:// 链接」）→ 上传 artifact（含冒烟截图与日志）。
+  **Windows 开发机上 `go vet`/`go build` 看不见 darwin 专有文件**，改完必须让 CI 跑一遍。
   **触发策略**：只有 push 到 `master` 或 PR，且改动落在 `internal/**`、`cmd/**`、
   `web/**`、`go.mod`、`go.sum`、`build.sh`、`scripts/package-macos.sh`、
   `.github/workflows/build.yml` 时才自动跑（私仓 macOS 分钟 10 倍计费，dev 上

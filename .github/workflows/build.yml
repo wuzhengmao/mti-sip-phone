@@ -99,6 +99,69 @@ jobs:
           plutil -extract CFBundleURLTypes xml1 -o - "dist/macos/MTI软电话-无UI版.app/Contents/Info.plist"
           ls -lh dist/macos/*.dmg
 
+      # 运行期冒烟：macOS runner 有真实图形会话，可以启动 App 验证自安装、LaunchServices
+      # 收录与 sip:// 苹果事件——这三条是 macOS 专用的、单元测试覆盖不到的路径。
+      # 交互观感（拖拽、吸附、菜单栏点击）仍需真机，这里不做。
+      - name: 冒烟测试（自安装 / 启动 / sip:// 苹果事件 / 注册项）
+        run: |
+          set -uo pipefail
+          APP_DIR="$HOME/Library/Application Support/mti-sip-phone"
+          BUNDLE="$APP_DIR/MTI软电话-无UI版.app"
+          EXE="$BUNDLE/Contents/MacOS/mti-sip-phone-no-ui"
+          LOG="$APP_DIR/logs/sip-phone.log"
+          pkill -f "$EXE" 2>/dev/null || true
+          pkill -f 'sip-phone-no-ui-darwin' 2>/dev/null || true
+          sleep 1
+          rm -rf "$APP_DIR"
+
+          echo "== 1) 裸二进制自安装成 .app =="
+          ./dist/sip-phone-no-ui-darwin-arm64 >/tmp/bare.log 2>&1 &
+          for i in $(seq 1 30); do [ -x "$EXE" ] && break; sleep 1; done
+          [ -x "$EXE" ] || { echo "::error::没有生成应用包"; cat /tmp/bare.log; exit 1; }
+          [ -f "$BUNDLE/Contents/Info.plist" ] || { echo "::error::缺 Info.plist"; exit 1; }
+          [ -f "$BUNDLE/Contents/Resources/AppIcon.icns" ] || { echo "::error::缺图标"; exit 1; }
+          plutil -lint "$BUNDLE/Contents/Info.plist"
+          ls -la "$HOME/Desktop" || true
+
+          echo "== 2) 进程从包内可执行文件启动 =="
+          PID=""
+          for i in $(seq 1 30); do PID="$(pgrep -f "$EXE" | head -1 || true)"; [ -n "$PID" ] && break; sleep 1; done
+          [ -n "$PID" ] || { echo "::error::进程没起来"; tail -80 "$LOG" 2>/dev/null; exit 1; }
+          echo "PID=$PID"
+
+          echo "== 3) 启动日志与崩溃记录 =="
+          for i in $(seq 1 20); do grep -q "mti-sip-phone 启动" "$LOG" 2>/dev/null && break; sleep 1; done
+          grep -q "mti-sip-phone 启动" "$LOG" || { echo "::error::没有启动日志"; tail -80 "$LOG" 2>/dev/null; exit 1; }
+          if [ -s "$APP_DIR/logs/crash.log" ]; then echo "::error::出现崩溃记录"; cat "$APP_DIR/logs/crash.log"; exit 1; fi
+
+          echo "== 4) LaunchServices 收录 =="
+          LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+          if "$LSREG" -dump 2>/dev/null | grep -qi "cn.mti.sip-phone-no-ui"; then
+            echo "已收录"
+          else
+            echo "::warning::lsregister 里没看到条目（协议注册可能没生效）"
+          fi
+
+          echo "== 5) 开机自启 LaunchAgent =="
+          [ -f "$HOME/Library/LaunchAgents/cn.mti.sip-phone.plist" ] &&
+            echo "LaunchAgent OK" || echo "::warning::没有 LaunchAgent 文件"
+
+          echo "== 6) sip:// 苹果事件 =="
+          open "sip://1001:pwd@127.0.0.1:5060" || echo "::warning::open sip:// 返回非零"
+          for i in $(seq 1 20); do grep -q "收到苹果事件的 sip:// 链接" "$LOG" 2>/dev/null && break; sleep 1; done
+          grep -q "收到苹果事件的 sip:// 链接" "$LOG" || {
+            echo "::error::没有收到苹果事件（sip:// 拉起失败）"
+            tail -120 "$LOG" 2>/dev/null
+            exit 1
+          }
+
+          echo "== 7) 截图（仅供参考）=="
+          screencapture -x /tmp/macos-smoke.png 2>/dev/null || echo "::warning::screencapture 失败"
+          cp "$LOG" /tmp/sip-phone.log 2>/dev/null || true
+
+          pkill -f "$EXE" 2>/dev/null || true
+          echo "冒烟测试通过"
+
       # 发布用：两个架构的裸二进制（自动更新下载的就是它，不能是 DMG）
       - uses: actions/upload-artifact@v4
         with:
@@ -117,4 +180,16 @@ jobs:
           name: macos-dmg
           path: dist/macos/*.dmg
           if-no-files-found: error
+          retention-days: 14
+
+      # 冒烟测试的截图与运行日志（失败也上传，方便排查）
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-smoke
+          path: |
+            /tmp/macos-smoke.png
+            /tmp/sip-phone.log
+            /tmp/bare.log
+          if-no-files-found: ignore
           retention-days: 14
