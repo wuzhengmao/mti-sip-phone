@@ -70,8 +70,9 @@ build.bat
 ./scripts/package-macos.sh --arch universal
 #   dist/macos/MTI软电话.app（完整版）、MTI软电话-无UI版.app、MTI-SIP-Phone-*-darwin-universal.dmg
 #   universal = lipo 合并两架构后重新 ad-hoc 签名；DMG 拖进「应用程序」即安装
-# 也提供 GitHub Actions（.github/workflows/build.yml）：push 后在 macOS runner 上
-# 编译、跑测试并上传 universal DMG。
+# 也提供 GitHub Actions（.github/workflows/build.yml）：push 到 master 或 PR 且
+# 改动涉及代码/构建脚本时自动跑；dev 上要验证在 Actions 页面手动 Run workflow；
+# 发版时 release.sh --darwin-ci 会自己触发，不依赖 push。
 
 # 手动构建（Windows 需将 MinGW 的 gcc 加入 PATH，或用 CC 指定）
 go build -ldflags "-s -w -H=windowsgui" -o dist/sip-phone.exe ./cmd/sip-phone  # 无控制台

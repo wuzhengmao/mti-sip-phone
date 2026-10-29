@@ -446,6 +446,11 @@ macOS 与 Windows/Linux 的三处结构性差异，改相关代码前必读：
   `go vet ./...`（覆盖 darwin 专有文件）→ `./build.sh --target darwin` →
   关键包单测 → `--version` 冒烟 → universal DMG → 上传 artifact。**Windows
   开发机上 `go vet`/`go build` 看不见 darwin 专有文件**，改完必须让 CI 跑一遍。
+  **触发策略**：只有 push 到 `master` 或 PR，且改动落在 `internal/**`、`cmd/**`、
+  `web/**`、`go.mod`、`go.sum`、`build.sh`、`scripts/package-macos.sh`、
+  `.github/workflows/build.yml` 时才自动跑（私仓 macOS 分钟 10 倍计费，dev 上
+  日常推送到此为止）；dev 上要验证就去 Actions 页面手动 **Run workflow**；
+  发版时 `release.sh --darwin-ci` 会自己 `workflow_dispatch`，**不依赖 push 触发**。
 - **cgo 文件里的注释组与前导块之间必须空一行**：cgo 把 `import "C"` 前面
   **连续不断**的注释组整体当前导块喂给 C 编译器——文件级 `//` 说明（中文）若
   与 `/* #cgo … */` 紧邻，会被当成 C 代码解析（CI 实测报

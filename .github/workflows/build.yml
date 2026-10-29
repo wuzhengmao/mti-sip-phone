@@ -5,12 +5,31 @@ name: 构建
 # 「编译 + 单测 + universal DMG 打包」的验证。Windows/Linux 产物仍走各自的构建机。
 
 on:
+  # 只在收口分支 master 与 PR 上自动跑，并且只看会**影响 macOS 构建**的路径
+  # （私有仓库的 macOS runner 是 10 倍计费）。dev 上日常推送不再自动构建：
+  # 需要验证就在 Actions 页面手动 Run workflow，发版时 scripts/release.sh
+  # --darwin-ci 会自己 workflow_dispatch，不依赖这里的触发器。
   push:
-    branches: [dev, dev-macOs, master]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
+    branches: [master]
+    paths:
+      - 'internal/**'
+      - 'cmd/**'
+      - 'web/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'build.sh'
+      - 'scripts/package-macos.sh'
+      - '.github/workflows/build.yml'
   pull_request:
+    paths:
+      - 'internal/**'
+      - 'cmd/**'
+      - 'web/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'build.sh'
+      - 'scripts/package-macos.sh'
+      - '.github/workflows/build.yml'
   # 发布时由 scripts/release.sh --darwin-ci 触发（release=true → SIP_PHONE_RELEASE=1）
   workflow_dispatch:
     inputs:
