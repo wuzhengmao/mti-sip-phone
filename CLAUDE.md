@@ -81,7 +81,7 @@ build.bat
 #   固定为基础版（无视频：macOS 摄像头采集未实现；无 Opus/AEC 静态库）
 # 打成 .app + DMG（默认仅托盘无 UI；--variant both 同时出完整版）：
 ./scripts/package-macos.sh --arch universal   # universal = lipo 合并两架构 + 重新 ad-hoc 签名
-#   dist/macos/MTI软电话.app、MTI软电话-完整版.app、*.dmg
+#   dist/macos/MTI软电话.app（完整版）、MTI软电话-无UI版.app、*.dmg
 # GitHub Actions（.github/workflows/build.yml）在 macOS runner 上做同样的验证：
 #   go vet ./... → ./build.sh --target darwin → 关键包单测 → --version 冒烟
 #   → package-macos.sh --variant both --arch universal → 上传 DMG artifact
@@ -384,7 +384,8 @@ macOS 与 Windows/Linux 的三处结构性差异，改相关代码前必读：
 1. **程序图标与 URL scheme 只能来自 `.app` 应用包**（`Contents/Info.plist` +
    `Contents/Resources/AppIcon.icns`）。裸二进制没有图标、也注册不了 sip://。
    所以「自安装」在 macOS 上落成**建包**（`internal/macbundle`）：
-   `~/Library/Application Support/mti-sip-phone/MTI软电话[-完整版].app`，
+   `~/Library/Application Support/mti-sip-phone/MTI软电话.app`（完整版）与
+   `MTI软电话-无UI版.app`（无 UI 版），
    包内可执行文件名固定为 `mti-sip-phone[-no-ui]`（必须与 `CFBundleExecutable`
    一致），桌面放指向包的符号链接。已在任一 `.app` 内则不再搬迁；`/Volumes/…`
    （DMG 挂载点）与 `…/AppTranslocation/…`（系统把 DMG 里的应用搬家到随机

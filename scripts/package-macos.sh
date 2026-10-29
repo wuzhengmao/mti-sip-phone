@@ -9,7 +9,7 @@
 #   ./scripts/package-macos.sh --build          # 缺产物时先 ./build.sh --target darwin
 #
 # 产物（dist/macos/）：
-#   MTI软电话.app / MTI软电话-完整版.app
+#   MTI软电话.app（完整版）/ MTI软电话-无UI版.app
 #   MTI-SIP-Phone[-no-ui|-full]-<版本>-darwin-<arch>.dmg
 #
 # universal：build.sh 在 macOS 上会同时编 amd64 与 arm64，这里用 lipo 合并后
@@ -222,7 +222,7 @@ package_one() {
     case "$kind" in
         noui)
             stem="sip-phone-no-ui"
-            app_display="MTI软电话"
+            app_display="MTI软电话-无UI版"
             bundle_id="cn.mti.sip-phone-no-ui"
             agent="true"   # 仅托盘，不占 Dock
             dmg_stem="MTI-SIP-Phone-no-ui"
@@ -230,7 +230,7 @@ package_one() {
             ;;
         full)
             stem="sip-phone"
-            app_display="MTI软电话-完整版"
+            app_display="MTI软电话"
             bundle_id="cn.mti.sip-phone"
             agent="false"
             dmg_stem="MTI-SIP-Phone-full"

@@ -17,8 +17,8 @@ func TestRootOf(t *testing.T) {
 		{"/Applications/MTI软电话.app/Contents/MacOS/mti-sip-phone", "/Applications/MTI软电话.app", true},
 		{"/Applications/MTI软电话.app", "/Applications/MTI软电话.app", true},
 		{"/Volumes/MTI/SIP.app/Contents/MacOS/x", "/Volumes/MTI/SIP.app", true},
-		{"/Users/a/Library/Application Support/mti-sip-phone/MTI软电话.app/Contents/MacOS/mti-sip-phone-no-ui",
-			"/Users/a/Library/Application Support/mti-sip-phone/MTI软电话.app", true},
+		{"/Users/a/Library/Application Support/mti-sip-phone/MTI软电话-无UI版.app/Contents/MacOS/mti-sip-phone-no-ui",
+			"/Users/a/Library/Application Support/mti-sip-phone/MTI软电话-无UI版.app", true},
 		{"/Users/a/Downloads/mti-sip-phone-no-ui-darwin-arm64", "", false},
 		{"/Users/a/foo.app.txt/bar", "", false},
 	}

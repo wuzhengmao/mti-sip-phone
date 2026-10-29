@@ -68,7 +68,7 @@ build.bat
 #   dist/sip-phone-darwin-<arch> / dist/sip-phone-no-ui-darwin-<arch>
 # 打成 .app + DMG（默认仅托盘无 UI；--variant both 同时出完整版）
 ./scripts/package-macos.sh --arch universal
-#   dist/macos/MTI软电话.app、MTI软电话-完整版.app、MTI-SIP-Phone-*-darwin-universal.dmg
+#   dist/macos/MTI软电话.app（完整版）、MTI软电话-无UI版.app、MTI-SIP-Phone-*-darwin-universal.dmg
 #   universal = lipo 合并两架构后重新 ad-hoc 签名；DMG 拖进「应用程序」即安装
 # 也提供 GitHub Actions（.github/workflows/build.yml）：push 后在 macOS runner 上
 # 编译、跑测试并上传 universal DMG。
@@ -165,7 +165,7 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 
 macOS 的平台差异（详见 [CLAUDE.md](CLAUDE.md) 的「macOS（darwin）」一节）：
 
-- **安装形态是 `.app` 应用包**（程序图标与 sip:// 协议只能来自 `Info.plist`）。裸二进制直接运行时会在 `~/Library/Application Support/mti-sip-phone/` 生成应用包（完整版 `MTI软电话-完整版.app` / 无 UI 版 `MTI软电话.app`）、在桌面放指向它的链接，再从包内重启；已在 `.app` 内（如拖进「应用程序」）则不搬迁。
+- **安装形态是 `.app` 应用包**（程序图标与 sip:// 协议只能来自 `Info.plist`）。裸二进制直接运行时会在 `~/Library/Application Support/mti-sip-phone/` 生成应用包（完整版 `MTI软电话.app` / 无 UI 版 `MTI软电话-无UI版.app`）、在桌面放指向它的链接，再从包内重启；已在 `.app` 内（如拖进「应用程序」）则不搬迁。
 - **sip:// / sips:// 通过苹果事件接收**（macOS 点链接时系统不传命令行参数），由 `internal/macurl` 在启动早期注册处理器。
 - **开机自启**写 `~/Library/LaunchAgents/cn.mti.sip-phone.plist`。
 - **通话面板**与 Windows/Linux 一致：无边框、吸附工作区右下角、悬浮在最前、不进 Mission Control/窗口切换器，拖动后记住位置（`internal/ui/topmost_darwin.go`，AppKit）。

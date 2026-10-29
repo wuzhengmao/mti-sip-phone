@@ -6,9 +6,9 @@
 // Linux 的「把二进制复制到固定目录 + 桌面快捷方式」在 macOS 上落成「建一个
 // .app 包」：
 //
-//	<固定目录>/MTI软电话.app/Contents/MacOS/mti-sip-phone-no-ui
-//	<固定目录>/MTI软电话.app/Contents/Info.plist        （含 CFBundleURLTypes）
-//	<固定目录>/MTI软电话.app/Contents/Resources/AppIcon.icns
+//	<固定目录>/MTI软电话-无UI版.app/Contents/MacOS/mti-sip-phone-no-ui
+//	<固定目录>/MTI软电话-无UI版.app/Contents/Info.plist        （含 CFBundleURLTypes）
+//	<固定目录>/MTI软电话-无UI版.app/Contents/Resources/AppIcon.icns
 //
 // 打包脚本 scripts/package-macos.sh 产出的 DMG 里是同一套结构（同样的 bundle
 // 标识、图标文件名与 Info.plist 字段），两条安装路径行为一致。
@@ -33,8 +33,8 @@ const (
 	bundleIDFull = "cn.mti.sip-phone"
 	bundleIDNoUI = "cn.mti.sip-phone-no-ui"
 
-	displayFull = "MTI软电话-完整版"
-	displayNoUI = "MTI软电话"
+	displayFull = "MTI软电话"
+	displayNoUI = "MTI软电话-无UI版"
 
 	exeFull = "mti-sip-phone"
 	exeNoUI = "mti-sip-phone-no-ui"

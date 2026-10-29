@@ -72,12 +72,12 @@ jobs:
       - name: 校验产包
         run: |
           set -e
-          lipo -info "dist/macos/MTI软电话.app/Contents/MacOS/mti-sip-phone-no-ui"
-          lipo -info "dist/macos/MTI软电话-完整版.app/Contents/MacOS/mti-sip-phone"
+          lipo -info "dist/macos/MTI软电话-无UI版.app/Contents/MacOS/mti-sip-phone-no-ui"
+          lipo -info "dist/macos/MTI软电话.app/Contents/MacOS/mti-sip-phone"
+          plutil -lint "dist/macos/MTI软电话-无UI版.app/Contents/Info.plist"
           plutil -lint "dist/macos/MTI软电话.app/Contents/Info.plist"
-          plutil -lint "dist/macos/MTI软电话-完整版.app/Contents/Info.plist"
           # URL scheme 与仅托盘（LSUIElement）必须在 plist 里
-          plutil -extract CFBundleURLTypes xml1 -o - "dist/macos/MTI软电话.app/Contents/Info.plist"
+          plutil -extract CFBundleURLTypes xml1 -o - "dist/macos/MTI软电话-无UI版.app/Contents/Info.plist"
           ls -lh dist/macos/*.dmg
 
       # 发布用：两个架构的裸二进制（自动更新下载的就是它，不能是 DMG）

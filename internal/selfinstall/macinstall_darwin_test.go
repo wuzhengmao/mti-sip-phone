@@ -58,10 +58,10 @@ func TestInInstalledAppBundle(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"/Applications/MTI软电话.app/Contents/MacOS/mti-sip-phone-no-ui", true},
-		{"/Users/a/Library/Application Support/mti-sip-phone/MTI软电话-完整版.app/Contents/MacOS/mti-sip-phone", true},
-		{"/Volumes/MTI软电话/MTI软电话.app/Contents/MacOS/mti-sip-phone-no-ui", false},
-		{"/private/var/folders/x/AppTranslocation/123/d/MTI软电话.app/Contents/MacOS/mti-sip-phone-no-ui", false},
+		{"/Applications/MTI软电话-无UI版.app/Contents/MacOS/mti-sip-phone-no-ui", true},
+		{"/Users/a/Library/Application Support/mti-sip-phone/MTI软电话.app/Contents/MacOS/mti-sip-phone", true},
+		{"/Volumes/MTI软电话/MTI软电话-无UI版.app/Contents/MacOS/mti-sip-phone-no-ui", false},
+		{"/private/var/folders/x/AppTranslocation/123/d/MTI软电话-无UI版.app/Contents/MacOS/mti-sip-phone-no-ui", false},
 		{"/Users/a/Downloads/mti-sip-phone-no-ui-darwin-arm64", false},
 	}
 	for _, c := range cases {
