@@ -6,7 +6,7 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
-## [待发布]
+## [1.0.18] - 2026-10-25
 
 ### 新增
 
@@ -24,10 +24,6 @@
 - **发布接入 macOS（`scripts/release.sh --darwin-ci`）**：一次发布 = 本地容器编 10 个 Windows/Linux 产物 + GitHub Actions 编 macOS（两个架构的裸二进制 + universal DMG，两个并行），下载回来合并上传。发布物新增 `mti-sip-phone-macos-x64` / `-arm64`（裸 Mach-O，自动更新的下载目标）与 `mti-sip-phone-macos-universal.dmg`（`kind=installer`，首次安装包）；`release.json` 的 `kind` 按产物输出。
 - **macOS 自动更新的下载校验**：`checkExecutableMagic` 补 Mach-O 魔数判断（单架构 + universal），此前 darwin 分支等于不校验。
 - **`internal/appicon.ICNS`**：纯 Go 生成 macOS `.icns`（icp4/icp5/icp6/ic07/ic08/ic09 六档 PNG 内嵌），无需 sips/iconutil，可跨平台单测。
-
-## [1.0.18] - 2026-10-25
-
-### 新增
 
 - **CTI 按钮「在途转圈」的状态恢复修复**：耳语→监听这类按钮在指令回执前就收到面板更新时，转圈结束会用点击前的快照覆盖新状态（桌面/网页卡片上「耳语」转一圈又变回「耳语」）。现在：桌面在途期间保留待恢复项，面板重建换图标时同步更新（`setCTIButtonIcon`），回执只恢复**最新**图标；网页在途结束后按**当前面板**重新渲染按钮，不再恢复旧 `innerHTML`。**话务条与通话卡片统一机制**：`runCTI(btn, fn, okText, id)` 带上动作 id，面板重画后 `attachPending(id, btn)` 把转圈贴到新按钮上（话务条每次面板变化都会整条重建），结束时统一恢复并重新渲染。回归：`TestCTISpinRestoresLatestIcon`。
 

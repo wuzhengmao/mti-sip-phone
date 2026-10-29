@@ -6,7 +6,7 @@
 
 mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x64 / arm64，macOS arm64 / amd64——macOS 为基础版，见「macOS（darwin）」一节）。常驻系统托盘，支持 SIP 注册、呼出/呼入、PCMA/PCMU/Opus 通话、保持、DTMF、通信录；提供本地 WebSocket 控制接口（网页拨号/接听/挂断、事件推送）与 JS SDK；支持 sip:// 协议拉起与开机自启。
 
-当前版本 **1.0.15**（2026-10-07 定版并合并 master）：新增**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）**与**网页控制台（五个页面，取代原测试页，REQ-WEB-001~004）**，补齐 26 个 WS 方法（通话记录 / 通信录增删改查 / 配置读写 / 设备枚举 / 网页触发更新，REQ-WS-016~019 + REQ-UPD-020/021），拨号框边打边查通信录；另新增「允许远程连接」开关与沙箱端口 `8765+10×槽位`。当前版本 **1.0.17**（2026-10-14 定版并合并 master）：新增 **Windows exe 文件图标（绿色话机，REQ-UI-042）**、**自安装到固定数据目录与桌面快捷方式「MTI 软电话」（REQ-UPD-024）**、**SDK `sipUri` 连上即登录与 `unregisterOnDisconnect` 断线自动注销（REQ-SDK-007 / REQ-WS-020）**；另修复 Linux 应用菜单里 sip:// 协议处理器的重复条目（补 NoDisplay）。当前版本 **1.0.18**（2026-10-25 定版并合并 master）：**CTI 话务面板改由服务端整份下发**（`MSP_CALL_PANEL_UPDATED` / `MSP_CONFERENCE_PANEL_UPDATED`，原细粒度 `MSP_EVENT_CALL_*` / `CONSULT_*` / `MONITOR_*` / `THREE_WAY_*` / `CONFERENCE_*` 不再下发），`call.panel` 增加 `owner` 角色判定（咨询方/三方发起方/监听班长）与协议属性保真（`callStatus`/`callerNo`/`calledNo` 等原样透传、`peer`/`member` 合并为对象），补齐技能组标签、`CALL_INCOMING` 取消、`CONFERENCE_MEMBER_REMOVED` 退出会议、`stopWhisper`（耳语→监听切换）；另有咨询转移后桌面入口修复、网页通话卡片/话务条改由面板驱动、网关占位显示名过滤；另含对端 BYE/CANCEL 的 Call-ID 失配降级（`matchForTeardown`）、`docker/build.bat` Windows 容器构建入口与 release.sh/build.sh 的 CRLF 版本解析修复。
+当前版本 **1.0.15**（2026-10-07 定版并合并 master）：新增**仅托盘无 UI 版（`-tags noui`，产物 `mti-sip-phone-no-ui`，REQ-UI-041）**与**网页控制台（五个页面，取代原测试页，REQ-WEB-001~004）**，补齐 26 个 WS 方法（通话记录 / 通信录增删改查 / 配置读写 / 设备枚举 / 网页触发更新，REQ-WS-016~019 + REQ-UPD-020/021），拨号框边打边查通信录；另新增「允许远程连接」开关与沙箱端口 `8765+10×槽位`。当前版本 **1.0.17**（2026-10-14 定版并合并 master）：新增 **Windows exe 文件图标（绿色话机，REQ-UI-042）**、**自安装到固定数据目录与桌面快捷方式「MTI 软电话」（REQ-UPD-024）**、**SDK `sipUri` 连上即登录与 `unregisterOnDisconnect` 断线自动注销（REQ-SDK-007 / REQ-WS-020）**；另修复 Linux 应用菜单里 sip:// 协议处理器的重复条目（补 NoDisplay）。当前版本 **1.0.18**（2026-10-25 定版并合并 master）：**CTI 话务面板改由服务端整份下发**（`MSP_CALL_PANEL_UPDATED` / `MSP_CONFERENCE_PANEL_UPDATED`，原细粒度 `MSP_EVENT_CALL_*` / `CONSULT_*` / `MONITOR_*` / `THREE_WAY_*` / `CONFERENCE_*` 不再下发），`call.panel` 增加 `owner` 角色判定（咨询方/三方发起方/监听班长）与协议属性保真（`callStatus`/`callerNo`/`calledNo` 等原样透传、`peer`/`member` 合并为对象），补齐技能组标签、`CALL_INCOMING` 取消、`CONFERENCE_MEMBER_REMOVED` 退出会议、`stopWhisper`（耳语→监听切换）；另有咨询转移后桌面入口修复、网页通话卡片/话务条改由面板驱动、网关占位显示名过滤；另含对端 BYE/CANCEL 的 Call-ID 失配降级（`matchForTeardown`）、`docker/build.bat` Windows 容器构建入口与 release.sh/build.sh 的 CRLF 版本解析修复；同版另含 **macOS（darwin）平台支持**：本机构建 amd64 + arm64、`.app` / universal DMG 打包、裸二进制自安装成应用包、sip:// 走苹果事件、LaunchAgent 开机自启与 GitHub Actions 验证（细节见「macOS（darwin）」一节）。
 
 <details>
 <summary>1.0.14 已完成内容（点击展开）</summary>
@@ -16,10 +16,6 @@ mti-sip-phone：Go 跨平台 SIP 软电话（Windows x64 / x86 / ARM64，Linux x
 </details>
 版本号从 1.0.0 起，**不自动升版**——升版须经用户明确确认。开发构建的版本号带 `-rc`（见下），
 正式版由发布脚本以 `SIP_PHONE_RELEASE=1` 构建。
-
-**当前开发版（待发布，版本号不变）**：新增 **macOS（darwin）平台支持**——本机构建
-（amd64 + arm64）+ `.app` / universal DMG 打包、裸二进制自安装成应用包、sip:// 走苹果事件、
-LaunchAgent 开机自启，以及 GitHub Actions 的 macOS 构建验证。细节见「macOS（darwin）」一节。
 
 真实环境：OpenSIPS 2.4.11（10.168.4.40，明文 15060 / **TLS 15061**——自签证书 CN=sip.mti-sh.cn，账号 2999 的传输在配置页切 udp/tls），对端 FreeSWITCH（10.168.4.118，桥接话机 2901）。话机在 NAT 后面（本机是 192.168.3.15，服务端看到的源地址是 **10.168.5.10**）——入向请求只能靠服务端复用本端开出去的连接送回来。OpenSIPS 配了 rtpengine 但服务未运行（"no available proxies"属正常现象，不用处理）；LAN 环境建议关闭 STUN。
 
