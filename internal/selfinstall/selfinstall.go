@@ -62,9 +62,16 @@ func Relocate(exePath string, args []string) (relocated bool, dst string, err er
 	}
 
 	// 3. go run / go test 的临时 exe 位于系统临时目录下，不复制
-	// （否则会把开发产物塞进固定目录、盖掉正式文件）
-	if temp := tempDir(); temp != "" && underDir(real, temp) {
-		return false, "", nil
+	// （否则会把开发产物塞进固定目录、盖掉正式文件）。
+	// temp 也要 EvalSymlinks：macOS 上临时目录常是 /var/folders/...，而 exe
+	// 解析后是 /private/var/folders/...，不统一会漏判（容器/CI 实测）。
+	if temp := tempDir(); temp != "" {
+		if tReal, err := filepath.EvalSymlinks(temp); err == nil {
+			temp = tReal
+		}
+		if underDir(real, temp) {
+			return false, "", nil
+		}
 	}
 
 	// 3b. macOS：已在稳定的 .app 应用包内 → 视为正式安装形态，不再复制
@@ -78,6 +85,11 @@ func Relocate(exePath string, args []string) (relocated bool, dst string, err er
 	target, err := TargetDir()
 	if err != nil {
 		return false, "", fmt.Errorf("获取固定数据目录失败: %w", err)
+	}
+	// 同上：exe 已解析符号链接，固定目录也要解析后再比（macOS 的 /var →
+	// /private/var 会让路径前缀不同，导致"已在固定目录"漏判、重复搬迁）。
+	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+		target = resolved
 	}
 	if sameDir(filepath.Dir(real), target) {
 		return false, "", nil

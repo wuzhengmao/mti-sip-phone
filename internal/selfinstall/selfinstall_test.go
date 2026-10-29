@@ -28,12 +28,16 @@ func setTargetBase(t *testing.T) string {
 }
 
 // targetDirOfTest 测试环境下 TargetDir 的实际值（macOS 比基目录多一层
-// Library/Application Support，不要自己拼）。
+// Library/Application Support，不要自己拼）。与 Relocate 同样解析符号链接：
+// macOS 的 /var → /private/var 会让未解析路径与 exe 路径前缀对不上。
 func targetDirOfTest(t *testing.T) string {
 	t.Helper()
 	dir, err := TargetDir()
 	if err != nil {
 		t.Fatalf("TargetDir 失败: %v", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return resolved
 	}
 	return dir
 }

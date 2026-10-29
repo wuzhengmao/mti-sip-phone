@@ -53,6 +53,18 @@ func start() {
 	logx.Logger().Debug("已注册 macOS 苹果事件处理器（sip:// / sips://）")
 }
 
+// Pending 取出 Start 之后、SetHandler 之前收到的 URL（并从缓存里移除）。
+//
+// 用途：自安装要把进程搬迁到 .app 应用包并重启，苹果事件不会跟着新进程走——
+// main 在搬迁前取出来并进重启参数，否则"点链接冷启动 → 首次安装"会丢掉这个链接。
+func Pending() []string {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	out := state.pending
+	state.pending = nil
+	return out
+}
+
 // SetHandler 接上 URL 回调；Start 之后先到的事件按序补发（在调用方 goroutine
 // 里同步回调，回调里要自己做异步）。
 func SetHandler(fn func(string)) {

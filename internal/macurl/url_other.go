@@ -5,5 +5,8 @@ package macurl
 // start 非 macOS 平台没有苹果事件（URL 走命令行参数，见 protocol.FindURL）。
 func start() {}
 
+// Pending 非 macOS 平台没有苹果事件缓存。
+func Pending() []string { return nil }
+
 // SetHandler 非 macOS 平台为空操作。
 func SetHandler(func(string)) {}

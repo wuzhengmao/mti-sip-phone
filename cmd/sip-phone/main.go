@@ -126,10 +126,16 @@ func main() {
 	// 固定自更新的替换目标与自启/协议注册目标，避免下载产物被清理后程序
 	// "消失"。必须在单实例锁之前：本进程不碰锁直接退出，新进程正常拿锁，
 	// 没有转发竞态；复制/启动失败回退原地运行（不阻断启动）。
+	// macOS：点链接冷启动时 URL 是苹果事件（已缓存在 macurl），而自安装会把
+	// 进程搬迁到 .app 并重启——事件不会跟着新进程走。先取出来：要搬迁就并入
+	// 重启参数，不搬迁则在下方 SetHandler 之后补处理（否则首个 sip:// 链接会丢）。
+	pendingURLs := macurl.Pending()
+
 	exePath, exeErr := os.Executable()
 	if exeErr != nil {
 		logx.Logger().Warn("无法获取可执行文件路径，跳过自安装检查", "err", exeErr)
-	} else if relocated, dst, err := selfinstall.Relocate(exePath, os.Args[1:]); err != nil {
+	} else if relocated, dst, err := selfinstall.Relocate(exePath,
+		append(append([]string{}, os.Args[1:]...), pendingURLs...)); err != nil {
 		logx.Logger().Warn("自安装失败，继续从当前位置运行", "err", err)
 	} else if relocated {
 		logx.Logger().Info("已复制到固定数据目录并重启", "src", exePath, "dst", dst)
@@ -378,6 +384,10 @@ func main() {
 		logx.Logger().Info("收到苹果事件的 sip:// 链接", "url", u)
 		go handleLaunchArgs(app, cfg, []string{u}, nil)
 	})
+	// 搬迁前取出、又没搬迁（仍在原位置运行）的链接在这里补处理
+	for _, u := range pendingURLs {
+		go handleLaunchArgs(app, cfg, []string{u}, nil)
+	}
 
 	// 启动信息：GUI 子系统构建下无控制台（REQ-UI-013），统一写入日志；
 	// 仅在 headless 模式（控制台子系统）下打印到标准输出。
