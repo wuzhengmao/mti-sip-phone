@@ -36,10 +36,9 @@ func targetDirOfTest(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("TargetDir 失败: %v", err)
 	}
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		return resolved
-	}
-	return dir
+	// 与 Relocate 同一口径：按符号链接解析后的形式比较（macOS 的 /var →
+	// /private/var），目录可能还不存在，交给 resolvePath 逐级解析。
+	return resolvePath(dir)
 }
 
 // writeFakeExe 写一个假的"可执行文件"（内容唯一，用于比对复制结果）。

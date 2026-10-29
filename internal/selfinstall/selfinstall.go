@@ -63,13 +63,10 @@ func Relocate(exePath string, args []string) (relocated bool, dst string, err er
 
 	// 3. go run / go test 的临时 exe 位于系统临时目录下，不复制
 	// （否则会把开发产物塞进固定目录、盖掉正式文件）。
-	// temp 也要 EvalSymlinks：macOS 上临时目录常是 /var/folders/...，而 exe
-	// 解析后是 /private/var/folders/...，不统一会漏判（容器/CI 实测）。
+	// 路径要按"已解析符号链接"的形式比较：macOS 上临时目录常是 /var/folders/...，
+	// 而 exe 解析后是 /private/var/folders/...，不统一会漏判（CI 实测）。
 	if temp := tempDir(); temp != "" {
-		if tReal, err := filepath.EvalSymlinks(temp); err == nil {
-			temp = tReal
-		}
-		if underDir(real, temp) {
+		if underDir(real, resolvePath(temp)) {
 			return false, "", nil
 		}
 	}
@@ -86,11 +83,10 @@ func Relocate(exePath string, args []string) (relocated bool, dst string, err er
 	if err != nil {
 		return false, "", fmt.Errorf("获取固定数据目录失败: %w", err)
 	}
-	// 同上：exe 已解析符号链接，固定目录也要解析后再比（macOS 的 /var →
-	// /private/var 会让路径前缀不同，导致"已在固定目录"漏判、重复搬迁）。
-	if resolved, err := filepath.EvalSymlinks(target); err == nil {
-		target = resolved
-	}
+	// 同上：exe 已解析符号链接，固定目录也要按解析后的形式比较（macOS 的
+	// /var → /private/var 会让路径前缀不同，导致"已在固定目录"漏判、重复搬迁）。
+	// 首次安装时该目录还不存在，靠 resolvePath 逐级解析到最近的存在目录。
+	target = resolvePath(target)
 	if sameDir(filepath.Dir(real), target) {
 		return false, "", nil
 	}
@@ -175,4 +171,19 @@ func underDir(path, dir string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// resolvePath 解析路径里的符号链接；路径（或它的某一级父目录）还不存在时，
+// 解析到最近的存在目录后再把剩余部分拼回去。
+// 用途：比较"临时目录 / 固定数据目录"时，必须和已 EvalSymlinks 的 exe 路径
+// 同一形态——macOS 的 /var → /private/var 是这类比较最常见的坑。
+func resolvePath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	parent := filepath.Dir(p)
+	if parent == p {
+		return p
+	}
+	return filepath.Join(resolvePath(parent), filepath.Base(p))
 }
