@@ -44,8 +44,20 @@ window.SipApp = window.SipApp || {};
   }
 
   /**
-   * 顶栏坐席徽章（REQ-ACC-028 / REQ-ACC-034）：坐席模式下显示模式 + 空闲/置忙，
-   * 点击切换 setBusy/setIdle（与桌面顶栏的座席按钮一致）；非坐席模式隐藏。
+   * 坐席状态（用户口径）：离席优先级最高，其次整理中（isBusy && acw），再置忙，
+   * 否则空闲。返回 {text, action, cls}：action 为点击徽章时发送的 CTI 动作
+   *（空闲→setBusy，离席→resume，置忙/整理→setIdle）。
+   */
+  function agentStatusOf(ag) {
+    if (ag.leave) return { text: '离席', action: 'resume', cls: 'warn' };
+    if (ag.busy && ag.acw) return { text: '整理中', action: 'setIdle', cls: 'info' };
+    if (ag.busy) return { text: '置忙', action: 'setIdle', cls: 'warn' };
+    return { text: '空闲', action: 'setBusy', cls: 'ok' };
+  }
+
+  /**
+   * 顶栏坐席徽章（REQ-ACC-028 / REQ-ACC-034）：坐席模式下显示模式 + 空闲/置忙/
+   * 整理中/离席，点击切换（与桌面顶栏的座席按钮一致）；非坐席模式隐藏。
    * 在线座席列表只在拨号对话框的「在线座席」页签里（导航栏不再单独入口）。
    */
   function refreshAgent() {
@@ -58,11 +70,12 @@ window.SipApp = window.SipApp || {};
       return;
     }
     const modeText = { normal: '普通', dial_out: '外呼', monitor: '班长' }[ag.mode] || '';
-    const stateText = ag.busy ? '置忙' : '空闲';
-    badge.textContent = '坐席' + (modeText ? '·' + modeText : '') + '·' + stateText;
-    badge.className = 'badge ' + (ag.busy ? 'warn' : 'ok');
+    const st = agentStatusOf(ag);
+    badge.textContent = '坐席' + (modeText ? '·' + modeText : '') + '·' + st.text;
+    badge.className = 'badge ' + st.cls;
+    const actText = st.action === 'resume' ? '复席' : (st.action === 'setIdle' ? '置闲' : '置忙');
     badge.title = '坐席' + (ag.displayName ? '：' + ag.displayName : '') +
-      '（' + stateText + '，点击' + (ag.busy ? '置闲' : '置忙') + '）';
+      '（' + st.text + '，点击' + actText + '）';
     badge.hidden = false;
   }
 
@@ -189,9 +202,10 @@ window.SipApp = window.SipApp || {};
       if (!store.isConnected()) return;
       const ag = store.state.agent || {};
       if (!ag.online) return;
-      const busy = !ag.busy;
-      store.sdk.setAgentBusy(busy).then(function () {
-        App.ui.toast(busy ? '已置忙' : '已置闲', 'ok');
+      const st = agentStatusOf(ag);
+      store.sdk.ctiAction(st.action).then(function () {
+        App.ui.toast(st.action === 'setBusy' ? '已置忙'
+          : st.action === 'resume' ? '已复席' : '已置闲', 'ok');
         refreshAgent();
       }).catch(function (e) {
         if (!App.util.isOfflineErr(e)) { App.ui.toast(App.util.errText(e), 'err'); }

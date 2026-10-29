@@ -133,7 +133,7 @@ func TestSendHeartbeatRespectsSIPStatus(t *testing.T) {
 	p.mu.Lock()
 	p.acc = testAccount(host, port)
 	p.mu.Unlock()
-	if err := p.SendHeartbeat("normal", false, "", "free", 50*time.Second); err != nil {
+	if err := p.SendHeartbeat("normal", false, "", "free", false, false, 50*time.Second); err != nil {
 		t.Fatalf("200 响应时心跳应成功，实际 %v", err)
 	}
 
@@ -142,7 +142,7 @@ func TestSendHeartbeatRespectsSIPStatus(t *testing.T) {
 	p2.mu.Lock()
 	p2.acc = testAccount(host2, port2)
 	p2.mu.Unlock()
-	if err := p2.SendHeartbeat("normal", false, "", "free", 50*time.Second); !errors.Is(err, core.ErrCTINotifyUnsupported) {
+	if err := p2.SendHeartbeat("normal", false, "", "free", false, false, 50*time.Second); !errors.Is(err, core.ErrCTINotifyUnsupported) {
 		t.Fatalf("503 响应应返回 ErrCTINotifyUnsupported，实际 %v", err)
 	}
 }

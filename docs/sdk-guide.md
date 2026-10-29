@@ -86,6 +86,7 @@ const sdk = new SipPhoneSDK({
   reconnectDelay: 3000,
   sipUri: 'sip://1001:密码@10.0.0.10',  // 可选：连不上就拉起 + 连上就登录，见下
   unregisterOnDisconnect: false,   // 可选：WS 断开自动取消注册，见下
+  autoAnswer: true,                // 可选：连上后开启自动接听（不传 = 不改软电话配置）
 });
 await sdk.connect();
 ```
@@ -104,11 +105,14 @@ await sdk.connect();
   延迟确认（3 秒）」执行——页面刷新/瞬时断网不触发；**呼叫/振铃/通话中自动排队**，等
   话务结束才注销；等待期间重连则**取消**排队任务。默认 `false`；开关是应用级的（多个
   页面同时连时最后一次设置生效）。
+- **`autoAnswer`**：为 `true` 时，连上软电话后开启自动接听（`false` = 关闭）。**不传 =
+  不改软电话的自动接听配置**——只在构造参数里显式给了 `true`/`false` 才下发；断线重连后
+  会重新下发（与 `unregisterOnDisconnect` 同口径，应用级、不持久化）。
 - **断线行为**：连接断开时所有未完成的请求会 reject（`连接已断开`）；订阅过的事件在重连后
   依然有效；**视频订阅会被 SDK 自动恢复**（记住最近一次的订阅参数）。
 - **`close()`**：主动断开且不再重连（页面卸载时可调）。
-- **心跳**：SDK 每 25 秒自动发一条空消息，避免被软电话 60 秒读超时断开。自己实现 WS
-  客户端时也必须做这件事。
+- **心跳**：SDK 每 25 秒自动发一条空消息，避免被软电话读超时断开（读超时 180s，已给
+  Chrome 后台节流留足余量）。自己实现 WS 客户端时也必须做这件事。
 
 ## 4. 核心概念
 
@@ -182,7 +186,8 @@ await sdk.connect();
 
 | 方法 | 说明 |
 | --- | --- |
-| `getState()` | 状态快照：版本/平台、注册状态、通话列表（含音频/视频/通信录字段）、更新状态、自动接听开关、`noUI`（是否仅托盘无 UI 版）、`instance`（实例槽位） |
+| `getState()` | 状态快照：版本/平台、注册状态、通话列表（含音频/视频/通信录字段）、更新状态、自动接听开关、`noUI`（是否仅托盘无 UI 版）、`instance`（实例槽位）、`agentMode`（坐席模式，none=不在线） |
+| `getCallPanel()` | 查询当前通话面板快照（`call.panel` 负载 `SipCallPanelState`），两个 panel 为 null 表示无通话 |
 | `setAutoAnswer(enabled)` | 自动接听开关（与软电话界面按钮**共用一份状态**，变更广播 `system.autoAnswer`） |
 | `register()` | **登录账号**（REQ-ACC-024）：启用账户并立即注册；结果经 `register.state` 事件回显。与托盘菜单「登录账号」一致 |
 | `unregister()` | **退出账号**（REQ-ACC-024）：发 expires=0、停注册周期并禁用账户（之后启动/重连不再自动注册，直到 `register()` 或 sip:// 拉起） |
@@ -253,6 +258,8 @@ await sdk.checkUpdateNow();   // 立即检查站点（不用等下一个周期�
 ```js
 const { agents } = await sdk.listAgents();   // 在线座席
 await sdk.setAgentBusy(true);                // 置忙（false = 置闲；同 setIdle()/setBusy()）
+await sdk.leave();                           // 离席（isLeave=true）
+await sdk.resume();                          // 复席（isLeave=false，重新进入分配队列）
 await sdk.takeover('2002');                  // 代接 2002 的振铃来电
 await sdk.monitor('2002');                   // 班长监听
 await sdk.consult('2002');                   // 咨询（转移/三方见下表）
@@ -262,6 +269,7 @@ await sdk.consult('2002');                   // 咨询（转移/三方见下表�
 | --- | --- |
 | `listAgents()` | 在线座席：`{agents:[{agent,displayName,acd,agentMode,agentStatus}], count}`（按座席号排序） |
 | `setAgentBusy(busy)` / `setBusy()` / `setIdle()` | 坐席置忙/置闲；生效状态经 `cti.agent` 事件回显 |
+| `leave()` / `resume()` | 坐席离席 / 复席（`isLeave` 置 `true`/`false`）；生效状态经 `cti.agent` 事件回显 |
 | `setConferenceMemberMuted(member, muted)` / `setConferenceMemberDeafened(member, deafened)` / `setConferenceMemberVideoMuted(member, muted)` | 会议成员会控（owner，参数 `member` 为成员号码） |
 | `ctiAction(action, arg?)` | 通用入口：`arg` 为字符串 = `target`、数组 = `members`、对象 = 直接并入参数（如 `{member: "2002"}`） |
 | `consult(target)` / `consultThreeWay(target)` | 咨询 / 咨询转三方 |
@@ -275,8 +283,11 @@ await sdk.consult('2002');                   // 咨询（转移/三方见下表�
 失败错误码：`cti_failed`（平台拒绝，`message` 里带平台错误码）、`cti_busy`（已有指令在途，
 同一时间只允许一条）、`cti_timeout`、`cti_not_agent`。
 
-坐席状态见 `system.state` 与 `cti.agent` 事件：`agentOnline` / `agentDisplayName` /
-`agentMode`（`none`/`normal`/`dial_out`/`monitor`）/ `agentBusy`。座席状态颜色约定与桌面一致：
+坐席状态统一走 **`cti.agent` 事件**（负载 `{displayName, agentMode, isBusy, acw, isLeave}`，
+**`agentMode=none` 表示不在坐席模式**）；`getState()` 里只留 `agentMode`（none = 不在线）。
+**状态归纳**（离席优先级最高）：`isLeave=true` → 离席，
+`isBusy=true && acw=true` → 整理中，`isBusy=true` → 置忙，否则空闲。座席状态颜色约定与桌面一致：
+空闲绿、置忙黄、整理中蓝、离席黄。在线座席列表（`listAgents`）的 `agentStatus` 颜色口径另见其字段说明：
 `free` 绿、`dialing`/`ringing`/`talking` 黄、其余（`busy`/`leave`/`not_ready`/`miss_phone`/`offline`…）红。
 
 ## 6. 视频订阅（重点）
@@ -335,7 +346,7 @@ sub.transforms();
 | `calllog.changed` | 通话记录被删除/清空 | `{action, deleted}`（新增记录仍由 `call.terminated`/`call.failed` 驱动） |
 | `system.config` | 配置被改写 | `{section, values}`，`section`: `account`/`audio`/`video`/`log`/`ws`/`autoStart` |
 | `audio.ready` | 音频后端后台初始化完成 | `{ready}`；据此刷新设备下拉（无 UI 版没有桌面界面，这是唯一信号） |
-| `cti.agent` | 坐席模式/置忙变化 | `{online, displayName, agentMode, isBusy}`；`agentMode=none` 时 `online=false` |
+| `cti.agent` | 坐席状态变化 | `{displayName, agentMode, isBusy, acw, isLeave}`；`agentMode=none` 表示不在线（连接建立时在 `system.state` 之后、`call.panel` 之前补推一份） |
 | `cti.state` | 通话的话务状态变化（双方通话生命周期 CALL_*，以及咨询/三方/监听/会议） | `{callId, call}`；`call.cti` 是完整 `CTIState`（`talkState` 等；双方通话另有 `mspCallId`（CTI 侧话务 ID）、`callPhase`（`dialing`/`ringing`/`talking`）、主被叫与接听坐席的名称字段）。`callPhase=ringing` 时把状态显示为「振铃中」；`CALL_FINISHED`/`CALL_FAILED` 由软电话挂断，页面收到 `call.terminated` 关掉通话卡片即可 |
 | `cti.failed` | CTI 话务失败（CALL_FAILED / CONSULT_FAILED） | `{callId, kind, reason, message}`；`kind=call`（refuse 呼叫未接通 / cancel 呼叫已取消 / takeover 呼叫被代接）、`kind=consult`（refuse 咨询未接通 / cancel 咨询已取消），`message` 已翻成中文，直接 toast 即可 |
 | `call.panel` | **通话面板快照**（REQ-WS-023 / REQ-SDK-010，由 CTI 的 `MSP_CALL_PANEL_UPDATED`/`MSP_CONFERENCE_PANEL_UPDATED` 整份面板驱动） | `{agentMode, isBusy, callPanel, conferencePanel}`。应用可直接用它渲染自己的通话面板。**字段保留协议名、不丢弃话机未用到的属性**（`callStatus`/`callerNo`/`calledNo`/`intercom`/`ringingTime`/`offhookTime` 等原样交给应用），唯一的改写是 `peer`/`member` 合并成 `{number,name,note}` 对象：`callPanel` = `{callId, agent?, callType?, callMode?, owner?, state, startTime, title, failCause?, callList}`。`callPanel.owner` 是**当前操作的发起方**（咨询=咨询方、三方=发起方、监听=班长；`callMode=normal` 时没有）：`normal` 才显示咨询/转移/会议入口；`consult` 时只有 owner 显示三方/咨询转移/结束咨询（被咨询方按普通通话显示）；`three-way` 时只有 owner 显示移除/强制挂断。`callPanel.title` 是状态文案、`callPanel.state` 决定显示哪些按钮（`dialing`/`ringing`/`incoming`/`talking`/`consult-dialing`/`consult-ringing`/`consult-talking`/`three-way`/`monitoring`/`whispering`）、`callList` 每项 = `{callerNo?, calledNo?, peer:{number,name,note}, intercom?, skillGroup?, callType?, callStatus, startTime, ringingTime?, offhookTime?, target?（监听时的被叫）}`。会议时 `conferencePanel` = `{confId, owner（主持人号码）, memberList:[{member:{number,name,note}, intercom, owner, state, timestamp}]}`（`member` 与 `peer` 同为对象；主持人第一行；`state` 透传 dialing/ringing/talking/holding 与会控 muted/deafened/vmuted）。**`peer`/`member` 的 `note` 只在协议没有给名称、回退到通信录时才有**（此时 `name` 也来自通信录）；协议已经给了名称时只有 `name`、不带备注。**两个 panel 互斥**：会议接通后只有 `conferencePanel`；被叫在会议邀请振铃阶段只有 `callPanel`（来电），接通后才切换。**两个 panel 都为 `null` 表示没有进行中的通话**（关闭面板） |

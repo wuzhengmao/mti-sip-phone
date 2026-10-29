@@ -106,15 +106,10 @@ type State struct {
 	// Instance 本进程的实例槽位（0 = 主实例，≥1 = 沙箱实例，REQ-NFR-007）：
 	// 网页控制台在诊断页拼 sip:// 拉起链接时要带上它，否则拉起来的是主实例。
 	Instance int `json:"instance"`
-	// AgentOnline 是否处于坐席模式（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）：
-	// 只有坐席模式才在通话面板显示高级话务按钮（咨询/转移/会议）。
-	AgentOnline bool `json:"agentOnline"`
-	// AgentDisplayName 坐席显示名（AGENT_ONLINE 的 displayName；离线或为空时省略）。
-	AgentDisplayName string `json:"agentDisplayName,omitempty"`
 	// AgentMode 坐席模式（none/normal/dial_out/monitor，协议 §16.1）。
+	// **none 表示不在坐席模式（座席不在线）**。详细的坐席状态（displayName/
+	// isBusy/acw/isLeave）统一走 `cti.agent` 事件，这里不再重复（用户要求去重）。
 	AgentMode string `json:"agentMode,omitempty"`
-	// AgentBusy 坐席是否置忙（isBusy）。
-	AgentBusy bool `json:"agentBusy,omitempty"`
 }
 
 // 常见错误，供接口层映射为错误码。
@@ -175,6 +170,8 @@ type App struct {
 	srvCallPanel  *CallPanel
 	srvConfPanel  *ConferencePanel
 	lastPanelFail string // 已经提示过的 failCause（callId|failCause，去重）
+	// lastPanelJSON 上一次 call.panel 快照的 JSON 串：相同快照只推一次（去重）。
+	lastPanelJSON string
 	// heartbeat CTI 心跳循环（协议 §10）：注册成功启动、注销停止，
 	// 报文里如实上报坐席模式与显示名（见 cti.go）。
 	heartbeat heartbeatState
@@ -264,7 +261,7 @@ func (a *App) UpdateAccount(acc config.Account) error {
 		// 登出账号（REQ-ACC-028 补充）：坐席模式一并退出——坐席会话绑定在
 		// 登录态上，退出账号后不应再显示"座席已登录"（托盘菜单/网页徽章/
 		// SDK unregister/服务端 MSP_UNREGISTER/断线自动注销都走这里）。
-		a.setAgentOnline(false, "", AgentModeNone, false)
+		a.setAgentOnline(false, "", AgentModeNone, false, false, false)
 		a.setRegister(RegUnregistered, "")
 		a.bus.Publish("register.state", map[string]any{
 			"state":   string(RegUnregistered),
@@ -338,10 +335,7 @@ func (a *App) State() State {
 		Instance:   a.instance,
 		// 官方更新站点（网页「使用主站点」按钮用，REQ-UPD-023）
 		UpdatePrimarySite: config.PrimaryUpdateSite,
-		AgentOnline:       a.AgentOnline(),
-		AgentDisplayName:  a.AgentDisplayName(),
-		AgentMode:         a.AgentMode(),
-		AgentBusy:         a.AgentBusy(),
+		AgentMode: a.AgentMode(),
 	}
 	for _, id := range a.callOrder {
 		c := *a.calls[id]

@@ -77,11 +77,11 @@ func (p *Phone) SendCTICommand(action string, params map[string]any) (string, er
 }
 
 // SendHeartbeat 发送一次 MSP_HEARTBEAT（协议 §10）：上报坐席模式（字符串
-// none/normal/dial_out/monitor）、置忙状态、显示名与话务状态，expires 告诉
-// CTI「这么久没收到新心跳就当作不可用」。心跳没有业务回执；**SIP 响应不是
-// 200 时返回 core.ErrCTINotifyUnsupported**（服务端不支持 NOTIFY，核心层据此
-// 停止心跳并退出坐席模式）。
-func (p *Phone) SendHeartbeat(agentMode string, isBusy bool, displayName, status string, expires time.Duration) error {
+// none/normal/dial_out/monitor）、置忙状态、话后整理态（acw）、离席（isLeave）、
+// 显示名与话务状态，expires 告诉 CTI「这么久没收到新心跳就当作不可用」。
+// 心跳没有业务回执；**SIP 响应不是 200 时返回 core.ErrCTINotifyUnsupported**
+//（服务端不支持 NOTIFY，核心层据此停止心跳并退出坐席模式）。
+func (p *Phone) SendHeartbeat(agentMode string, isBusy bool, displayName, status string, acw, leave bool, expires time.Duration) error {
 	p.ctiMu.Lock()
 	p.ctiHeartbeatSeq++
 	seq := strconv.Itoa(p.ctiHeartbeatSeq)
@@ -96,6 +96,8 @@ func (p *Phone) SendHeartbeat(agentMode string, isBusy bool, displayName, status
 		"expires":   int(expires.Seconds()),
 		"agentMode": agentMode,
 		"isBusy":    isBusy,
+		"acw":       acw,
+		"isLeave":   leave,
 	}
 	if displayName != "" {
 		body["displayName"] = displayName

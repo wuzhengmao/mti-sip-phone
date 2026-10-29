@@ -65,7 +65,7 @@ func (f *fakeTel) Dial(context.Context, string) (string, error) {
 	return f.id, nil
 }
 
-func (f *fakeTel) SendHeartbeat(string, bool, string, string, time.Duration) error { return nil }
+func (f *fakeTel) SendHeartbeat(string, bool, string, string, bool, bool, time.Duration) error { return nil }
 
 func (f *fakeTel) DialVideo(context.Context, string) (string, error) {
 	if f.videoErr != nil {

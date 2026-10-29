@@ -122,6 +122,8 @@ var (
 	IconPhoneGreen = fyne.NewStaticResource("phone-green.png", appicon.PhoneGreenPNG())
 	// IconPhoneYellow 已注册且坐席置忙（黄色话机，由绿图按 alpha 现着色）。
 	IconPhoneYellow = fyne.NewStaticResource("phone-yellow.png", appicon.PhoneYellowPNG())
+	// IconPhoneBlue 已注册且坐席处于话后整理态（蓝色话机，由绿图按 alpha 现着色）。
+	IconPhoneBlue = fyne.NewStaticResource("phone-blue.png", appicon.PhoneBluePNG())
 	// IconPhoneBlack 黑色话机（接听按钮图标，前景色黑色）。
 	IconPhoneBlack = fyne.NewStaticResource("phone-black.svg", []byte(appicon.PhoneSVG("#1a1a1a")))
 	// IconPhoneWhite 振铃「接听」按钮（电话呼入，白色）。

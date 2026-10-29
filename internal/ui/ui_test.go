@@ -1059,7 +1059,7 @@ func TestHoverIconTap(t *testing.T) {
 }
 
 // TestTrayIconBusy 图标颜色状态机（REQ-UI-011 修订）：未注册/注册中红、
-// 已注册且坐席置忙黄、已注册且空闲绿。
+// 已注册且坐席置忙/离席黄、已注册且整理中蓝、已注册且空闲绿。
 func TestTrayIconBusy(t *testing.T) {
 	a := &App{}
 	if got := a.trayIcon(); got != IconPhoneRed {
@@ -1073,9 +1073,21 @@ func TestTrayIconBusy(t *testing.T) {
 	if got := a.trayIcon(); got != IconPhoneGreen {
 		t.Fatalf("已注册且空闲应为绿色，实际 %v", got.Name())
 	}
+	a.agentOnline = true
+	a.agentMode = core.AgentModeNormal
 	a.agentBusy = true
 	if got := a.trayIcon(); got != IconPhoneYellow {
 		t.Fatalf("已注册且置忙应为黄色，实际 %v", got.Name())
+	}
+	a.agentACW = true
+	if got := a.trayIcon(); got != IconPhoneBlue {
+		t.Fatalf("已注册且整理中应为蓝色，实际 %v", got.Name())
+	}
+	a.agentACW = false
+	a.agentBusy = false
+	a.agentLeave = true
+	if got := a.trayIcon(); got != IconPhoneYellow {
+		t.Fatalf("已注册且离席应为黄色，实际 %v", got.Name())
 	}
 	a.setRegState("failed")
 	if got := a.trayIcon(); got != IconPhoneRed {

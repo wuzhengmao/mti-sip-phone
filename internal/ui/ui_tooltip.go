@@ -408,7 +408,23 @@ func (h *hoverIcon) CreateRenderer() fyne.WidgetRenderer {
 func (h *hoverIcon) MinSize() fyne.Size { return fyne.NewSize(h.hit, h.hit) }
 
 // SetNote 更新悬停提示文案（坐席 displayName，可能为空 = 不弹提示）。
-func (h *hoverIcon) SetNote(note string) { h.note = note }
+// 提示正在显示时**就地刷新**：坐席状态切换（空闲→置忙等）时指针仍停在按钮上，
+// 不刷新的话要移出去再进来才更新（用户实测）。
+func (h *hoverIcon) SetNote(note string) {
+	old := h.note
+	h.note = note
+	if h.tip == nil {
+		return
+	}
+	if note == "" {
+		h.tip.hide()
+		return
+	}
+	// 只有"当前显示的就是本图标的旧提示"时才刷新，避免抢走别的图标正在显示的提示。
+	if h.tip.shown && h.tip.shownText == old {
+		h.tip.show(note, h.tip.absPos)
+	}
+}
 
 // SetOnTap 设置点击回调（设置后图标可点击）。
 func (h *hoverIcon) SetOnTap(fn func()) { h.onTap = fn }
@@ -578,10 +594,16 @@ func (h *hoverIcon) MouseOut() {
 
 // setTip 给紧凑按钮挂上悬停提示（空文本 = 不提示，并立即收起已弹出的提示）。
 func (b *compactButton) setTip(tip *tooltipLayer, text string) {
+	old := b.tipText
 	b.tip = tip
 	b.tipText = text
 	if text == "" {
 		b.stopTip()
+		return
+	}
+	// 提示正在显示且文案变了（保持/恢复、耳语/监听等）就就地刷新。
+	if tip != nil && tip.shown && tip.shownText == old {
+		tip.show(text, tip.absPos)
 	}
 }
 

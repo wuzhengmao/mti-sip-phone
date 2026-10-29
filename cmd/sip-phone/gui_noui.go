@@ -35,12 +35,16 @@ func runGUI(app *core.App, _ *audio.Manager, cfg *config.Config, _ string, ctx c
 	snapshot := app.State()
 	curReg := string(snapshot.Register.State)
 	agentName := app.AgentDisplayName()
-	// 已注册且坐席置忙时托盘图标变黄（REQ-UI-011 修订）
-	tray.SetAgentBusy(app.AgentBusy())
+	// 坐席状态驱动托盘图标颜色（已注册且置忙/离席=黄、整理中=蓝，REQ-UI-011 修订）
+	tray.SetAgentStatus(app.AgentStatus())
 	detail := func() string {
 		d := accountDetail(cfg)
 		if agentName != "" {
 			d += " " + agentName
+		}
+		// 座席状态跟在名字后面（用户口径，空格隔开）
+		if st := app.AgentStatusText(); st != "" {
+			d += " " + st
 		}
 		return d
 	}
@@ -65,16 +69,17 @@ func runGUI(app *core.App, _ *audio.Manager, cfg *config.Config, _ string, ctx c
 				}
 			case "cti.agent":
 				// 坐席模式（REQ-ACC-028/029）：在线时把 displayName 追加到托盘
-				// 提示；已注册且置忙时托盘图标变黄。
+				// 提示；坐席状态（空闲/置忙/整理中/离席）跟在其后，并驱动图标
+				// 颜色（置忙/离席黄、整理中蓝）。
 				if data, ok := ev.Data.(map[string]any); ok {
-					on, _ := data["online"].(bool)
+					mode, _ := data["agentMode"].(string)
+					on := mode != core.AgentModeNone
 					if on {
 						agentName, _ = data["displayName"].(string)
 					} else {
 						agentName = ""
 					}
-					busy, _ := data["isBusy"].(bool)
-					tray.SetAgentBusy(busy && on)
+					tray.SetAgentStatus(app.AgentStatus())
 					tray.SetState(curReg, detail())
 				}
 			}

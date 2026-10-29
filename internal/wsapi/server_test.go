@@ -69,7 +69,7 @@ func (s *stubTel) lastCTI() (string, map[string]any) {
 	return s.ctiAction, s.ctiParams
 }
 
-func (s *stubTel) SendHeartbeat(string, bool, string, string, time.Duration) error { return nil }
+func (s *stubTel) SendHeartbeat(string, bool, string, string, bool, bool, time.Duration) error { return nil }
 func (s *stubTel) Register(ctx context.Context, acc config.Account) error          { return nil }
 func (s *stubTel) Unregister(ctx context.Context) error                            { return nil }
 func (s *stubTel) Dial(ctx context.Context, target string) (string, error) {

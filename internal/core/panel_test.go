@@ -195,14 +195,58 @@ func TestPanelConferenceInvitee(t *testing.T) {
 	}
 }
 
-// TestPanelAgentMode call.panel 负载带坐席模式与置忙状态。
+// TestPanelAgentMode agent_online 更新坐席状态（isBusy/acw/isLeave 归纳为
+// AgentStatus/AgentStatusText；call.panel 不再携带坐席字段）。
 func TestPanelAgentMode(t *testing.T) {
 	app := newPanelApp()
 	app.OnMSPEvent("agent_online", map[string]any{
 		"displayName": "张三", "agentMode": "monitor", "isBusy": true})
-	st := app.PanelState()
-	if st.AgentMode != AgentModeMonitor || !st.IsBusy {
-		t.Fatalf("坐席模式/置忙不符：%+v", st)
+	if app.AgentMode() != AgentModeMonitor || !app.AgentBusy() {
+		t.Fatalf("坐席模式/置忙不符：mode=%q busy=%v", app.AgentMode(), app.AgentBusy())
+	}
+	if app.AgentStatus() != "busy" || app.AgentStatusText() != "置忙" {
+		t.Fatalf("置忙状态不符：status=%q text=%q", app.AgentStatus(), app.AgentStatusText())
+	}
+	app.OnMSPEvent("agent_online", map[string]any{
+		"agentMode": "normal", "isBusy": true, "acw": true, "isLeave": false})
+	if app.AgentStatus() != "acw" || app.AgentStatusText() != "整理中" {
+		t.Fatalf("整理中状态不符：status=%q text=%q", app.AgentStatus(), app.AgentStatusText())
+	}
+	app.OnMSPEvent("agent_online", map[string]any{
+		"agentMode": "normal", "isBusy": false, "acw": false, "isLeave": true})
+	if app.AgentStatus() != "leave" || app.AgentStatusText() != "离席" {
+		t.Fatalf("离席状态不符：status=%q text=%q", app.AgentStatus(), app.AgentStatusText())
+	}
+}
+
+// TestPanelDedup 相同快照只推一次：挂断时「坐席进入整理态」与「通话结束」两条
+// 路径先后触发 publishCallPanel，快照相同则跳过第二次（用户要求）。
+func TestPanelDedup(t *testing.T) {
+	app := newPanelApp()
+	sub := app.bus.Subscribe()
+	defer app.bus.Unsubscribe(sub)
+
+	// 第一次：坐席状态变化 → 推一份 call.panel（agentMode=normal, isBusy=true, acw=true）
+	app.OnMSPEvent("agent_online", map[string]any{
+		"agentMode": "normal", "isBusy": true, "acw": true})
+	// 之后两次（挂断的其它路径）状态没变 → 都应被去重跳过
+	app.publishCallPanel()
+	app.publishCallPanel()
+
+	count := 0
+	for {
+		select {
+		case ev := <-sub:
+			if ev.Name == "call.panel" {
+				count++
+			}
+		default:
+			goto done
+		}
+	}
+done:
+	if count != 1 {
+		t.Fatalf("相同快照应只推一次，实际 %d 次", count)
 	}
 }
 

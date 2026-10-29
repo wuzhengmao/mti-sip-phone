@@ -24,8 +24,8 @@ window.SipApp = window.SipApp || {};
   function selfNumber() { return norm(store.state.register && store.state.register.account); }
 
   function isAgent() {
-    const ag = store.state.agent || {};
-    return !!ag.online && ag.mode !== 'none';
+    // online 由 store 从 agentMode 派生（agentMode !== 'none'），无需再判 mode
+    return !!store.state.agent.online;
   }
 
   function isMonitor() { return (store.state.agent || {}).mode === 'monitor'; }
@@ -403,8 +403,8 @@ window.SipApp = window.SipApp || {};
 
   // ---------------- 通话面板事件（call.panel，REQ-WS-023） ----------------
   //
-  // 软电话把面板状态整理成 CallPanelState 推送：{agentMode, isBusy, callPanel,
-  // conferencePanel}。页面直接用这份快照渲染，不再自己解析 call.cti 的明细。
+  // 软电话把面板状态整理成 CallPanelState 推送：{callPanel, conferencePanel}。
+  // 页面直接用这份快照渲染，不再自己解析 call.cti 的明细。
 
   /** 本机是否是咨询发起方。协议 §16.2 用面板的 `owner` 指定发起方（咨询方）；
    *  老服务端没有 owner 时才回退旧口径（callMode=consult 且 callList 里有

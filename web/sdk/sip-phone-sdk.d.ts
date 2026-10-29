@@ -24,6 +24,8 @@ declare class SipPhoneSDK {
     autoReconnect?: boolean;
     /** 重连间隔毫秒，默认 3000 */
     reconnectDelay?: number;
+   /** 连上软电话后设置自动接听开关（true=自动接听；不传 = 不改软电话配置） */
+    autoAnswer?: boolean;
     /**
      * 更新站点根地址（如 http://update.example.com）。**提供即写入软电话的
      * 自动更新配置**（REQ-UPD-018）：软电话据此自己定时查询站点、有更新弹提示；
@@ -36,7 +38,7 @@ declare class SipPhoneSDK {
     updateIntervalMinutes?: number;
     /** 是否接受预览版（写入软电话配置），默认 false */
     updatePrerelease?: boolean;
-  });
+   });
 
   /** 是否已连接 */
   readonly connected: boolean;
@@ -53,12 +55,15 @@ declare class SipPhoneSDK {
    */
   on(event: 'call.panel', fn: (data: SipCallPanelState) => void): this;
 
+  /** 订阅坐席状态变化（REQ-ACC-028）：负载 `SipAgentState`。 */
+  on(event: 'cti.agent', fn: (data: SipAgentState) => void): this;
+
   /**
    * 订阅事件；'*' 订阅全部。
    * 事件名：call.incoming / call.ringing / call.dialing / call.established /
    *         call.terminated / call.failed / call.muted / call.audio（麦克风/扬声器开关）/
    *         call.video / call.panel（通话面板快照，见 SipCallPanelState）/
-   *         cti.agent（坐席模式/置忙变化）/
+   *         cti.agent（坐席状态变化：{displayName, agentMode, isBusy, acw, isLeave}，agentMode=none 表示不在线）/
    *         cti.state（通话话务状态变化：{callId, call}）/
    *         cti.failed（CTI 话务失败：{callId, kind, reason, message}）/
    *         cti.result（CTI 指令结果：{seq, success, code, message, action, data?}）/
@@ -149,6 +154,12 @@ declare class SipPhoneSDK {
   /** 坐席置忙 */
   setBusy(): Promise<SipCTIActionResult>;
 
+  /** 坐席离席（leave，isLeave=true） */
+  leave(): Promise<SipCTIActionResult>;
+
+  /** 坐席复席（resume，isLeave=false，重新进入分配队列） */
+  resume(): Promise<SipCTIActionResult>;
+
   /**
    * 发起一条 CTI 反向控制指令（与桌面通话面板的按钮一致）。
    * 指令等待 MSP_RESULT 后 resolve；失败 code 为 cti_failed / cti_busy /
@@ -236,6 +247,12 @@ declare class SipPhoneSDK {
   /** 按 File/Blob 导入通信录（HTTP 直传，不弹文件选择框） */
   importContactsFile(file: File | Blob): Promise<SipContactImportResult>;
 
+  /** 查询当前通话面板快照（`call.panel` 的负载，见 SipCallPanelState） */
+  getCallPanel(): Promise<SipCallPanelState>;
+
+  /** 查询当前坐席状态（`cti.agent` 的负载，见 SipAgentState） */
+  getAgentState(): Promise<SipAgentState>;
+
   /** 查询状态（注册状态、通话列表、版本与平台、更新状态、自动接听开关） */
   getState(): Promise<{
     version: string;
@@ -246,14 +263,9 @@ declare class SipPhoneSDK {
     noUI?: boolean;
     /** 实例槽位（0 = 主实例，≥1 = 沙箱实例） */
     instance?: number;
-    /** 坐席模式（REQ-ACC-028）：是否在线（非坐席模式为 false） */
-    agentOnline?: boolean;
-    /** 坐席显示名（AGENT_ONLINE 的 displayName） */
-    agentDisplayName?: string;
-    /** 坐席模式：none / normal / dial_out / monitor */
+    /** 坐席模式：none / normal / dial_out / monitor（**none 表示不在坐席模式**；
+     *  详细的坐席状态走 `cti.agent` 事件） */
     agentMode?: string;
-    /** 坐席是否置忙 */
-    agentBusy?: boolean;
     register: { state: string; account: string; reason: string };
     calls: Array<{
       id: string;
@@ -553,15 +565,30 @@ interface SipCTIState {
   }>;
 }
 
+/** 坐席状态（事件 `cti.agent`，REQ-ACC-028）：`agentMode=none` 表示不在坐席模式。 */
+interface SipAgentState {
+  /** 坐席显示名（AGENT_ONLINE 的 displayName，可为空） */
+  displayName: string;
+  /** 坐席模式：none / normal / dial_out / monitor */
+  agentMode: string;
+  /** 是否置忙 */
+  isBusy: boolean;
+  /** 是否处于话后整理态（isBusy=true 且 acw=true → 整理中） */
+  acw: boolean;
+  /** 是否离席（优先级最高的"不可用"状态） */
+  isLeave: boolean;
+  /** 话务状态（MSP_HEARTBEAT 上报的 status）：free / dialing / ringing / talking / holding */
+  phoneStatus: string;
+  /** 坐席状态（由 phoneStatus + isBusy/acw/isLeave 推算，取值同 SipAgent.agentStatus）：
+   *  leave / busy / acw / free / dialing / ringing / talking / unknown */
+  agentStatus: string;
+}
+
 /** 通话面板快照（事件 `call.panel`，REQ-WS-023 / REQ-SDK-010）。
  *
  * 应用直接基于它构建自己的通话面板，不必解析 `call.*` / `cti.*` 明细：
  * `sdk.on('call.panel', (p) => { ... })`。两个 panel 都为 null 表示没有通话。 */
 interface SipCallPanelState {
-  /** 坐席模式：normal / dial_out / monitor（非坐席模式为 none） */
-  agentMode: string;
-  /** 坐席是否置忙 */
-  isBusy: boolean;
   /** 通话面板；没有进行中的通话时为 null */
   callPanel: SipCallPanel | null;
   /** 会议面板（会议进行中才有），否则 null */
