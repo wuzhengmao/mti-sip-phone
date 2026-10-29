@@ -23,6 +23,8 @@ fi
 #       （HTTP 端口会 301 跳转，而 POST 跟随 301 会退化成 GET）。
 #       --darwin-ci 另需 GH_TOKEN（GitHub PAT，能触发/读取 Actions）与可选
 #       GH_REPO（默认 wuzhengmao/mti-sip-phone）、GH_REF（默认当前分支）。
+#       **脚本不会提交或推送代码**：CI 编的是远端分支的最新提交，本地 HEAD 必须
+#       已经推上去（不一致时脚本会直接报错，不会干等）。
 #
 # 产物打包内容（站点规范）：
 #   mti-sip-phone-<平台>-<架构>[.exe]          发布产物（**不含版本号**：下载地址跨版本不变）
@@ -241,7 +243,7 @@ gh_api() {
 
 # dispatch_darwin_ci 触发 workflow_dispatch：正式版传 release=true（构建不带 -rc）。
 dispatch_darwin_ci() {
-    local ref="$GH_REF" release_input
+    local ref="$GH_REF" release_input remote_sha
     if [ -z "$ref" ]; then
         ref="$(git rev-parse --abbrev-ref HEAD)"
     fi
@@ -250,6 +252,19 @@ dispatch_darwin_ci() {
     if [ "$PRERELEASE" = true ]; then release_input=false; else release_input=true; fi
     if ! git diff --quiet || ! git diff --cached --quiet; then
         echo "提示：工作区有未提交改动——GitHub Actions 编的是已提交的 HEAD（$CI_SHA）。" >&2
+    fi
+    # 本脚本**不提交也不推送**：CI 编的是远端分支的最新提交。本地 HEAD 还没推上去
+    # 的话，远程根本不会有这个提交对应的运行（后面要干等二十分钟再报错），这里先拦。
+    gh_api GET "/repos/$GH_REPO/commits/$ref"
+    if [ "$GH_CODE" = 200 ]; then
+        remote_sha="$(sed -n 's/^ *"sha": "\([0-9a-f]\{40\}\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+        if [ -n "$remote_sha" ] && [ "$remote_sha" != "$CI_SHA" ]; then
+            echo "本地 HEAD（$CI_SHA）与远端 $ref（$remote_sha）不一致。" >&2
+            echo "本脚本不会提交/推送代码；请先把要发布的提交推到 $GH_REPO 的 $ref，再重跑。" >&2
+            exit 1
+        fi
+    else
+        echo "提示：读不到远端 $ref 的最新提交（HTTP $GH_CODE），继续尝试触发。" >&2
     fi
     echo "触发 GitHub Actions：$GH_REPO / $GH_WORKFLOW @ $ref（正式版=$release_input）…"
     gh_api POST "/repos/$GH_REPO/actions/workflows/$GH_WORKFLOW/dispatches" \
@@ -338,12 +353,16 @@ collect_darwin_ci() {
         exit 1
     fi
     zip="$CI_WORKDIR/bins.zip"
-    curl -sSL --max-time 300 -H "Authorization: Bearer $GH_TOKEN" \
+    # artifact 走 blob 存储，国内网络可能只有 ~100KB/s，40MB 要几分钟——超时给足，
+    # 并允许断点续传/重试（-C - 配合 --retry 在中断后接着下）。
+    curl -sSfL --retry 3 --retry-delay 5 --retry-all-errors --max-time 1800 -C - \
+        -H "Authorization: Bearer $GH_TOKEN" \
         -o "$zip" "$GH_API/repos/$GH_REPO/actions/artifacts/$aid/zip" ||
         { echo "下载 darwin-binaries 失败" >&2; exit 1; }
     extract_zip "$zip" "$CI_WORKDIR/bins" || exit 1
     zip="$CI_WORKDIR/dmg.zip"
-    curl -sSL --max-time 300 -H "Authorization: Bearer $GH_TOKEN" \
+    curl -sSfL --retry 3 --retry-delay 5 --retry-all-errors --max-time 1800 -C - \
+        -H "Authorization: Bearer $GH_TOKEN" \
         -o "$zip" "$GH_API/repos/$GH_REPO/actions/artifacts/$bins/zip" ||
         { echo "下载 macos-dmg 失败" >&2; exit 1; }
     extract_zip "$zip" "$CI_WORKDIR/dmg" || exit 1
