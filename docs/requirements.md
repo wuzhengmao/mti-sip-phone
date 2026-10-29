@@ -299,7 +299,7 @@
 | REQ-NFR-005 | WS 服务绑定 127.0.0.1，不对外网暴露 | P0 | 已完成 |
 | REQ-NFR-006 | 单实例运行：重复启动时激活已有进程而非新开进程 | P1 | 已完成|
 | REQ-NFR-007 | **多实例（沙箱槽位）**：用 `-instance N`（N=1–99）或 `sip://账号:密码@服务器:端口?instance=N` 再启动实例：**槽位 0 = 主实例**（原目录与行为完全不变）；**槽位 ≥1 使用独立数据目录** `<配置目录>/instances/N/`（配置、通话记录、通信录、日志、单实例锁各自一份，互不影响），首次启动生成**空白默认配置**并把 WS 端口起点设为 **8765 + 10×N**（槽位 1 → 8775、槽位 2 → 8785…，被占用仍自动 +1 并存入该实例自己的配置；之后以该实例配置里保存的端口为准，可在控制台配置页修改）。沙箱实例**不做系统级注册**（sip:// 协议与开机自启只由主实例负责，避免互相覆盖）；**没有配置开关**——槽位只能显式指定（不带参就是主实例，日常启动行为一字不变）；sip:// 拉起仍转发给**主实例**。用途：多端点联调/对比（如两个账号互相打视频） | P1 | 已完成 |
-| REQ-NFR-008 | **macOS 平台产物**：darwin/arm64 与 darwin/amd64（Apple Silicon / Intel），完整版与仅托盘无 UI 版各一份；支持 `lipo` 合成 universal。**在 macOS 宿主上用 Apple clang 构建**（Fyne OpenGL 与 miniaudio CoreAudio 都要 CGO；Apple clang 可 `-arch` 跨编对侧架构，不需要第二台机器）。**固定为基础版**：G.711/G.722 + 音频设备 + 界面/托盘 + 信令 + WS，无视频（`internal/video/camera_other.go`：macOS 摄像头采集未实现）、无 Opus/AEC 静态库。运行要求 macOS 12+（`LSMinimumSystemVersion`）；未做 Apple 开发者签名/公证，首次打开需右键「打开」或 `xattr -cr` 去隔离属性 | P1 | 已完成 |
+| REQ-NFR-008 | **macOS 平台产物**：darwin/arm64 与 darwin/amd64（Apple Silicon / Intel），完整版与仅托盘无 UI 版各一份；支持 `lipo` 合成 universal。**在 macOS 宿主上用 Apple clang 构建**（Fyne OpenGL 与 miniaudio CoreAudio 都要 CGO；Apple clang 可 `-arch` 跨编对侧架构，不需要第二台机器）。**固定为基础版**：G.711/G.722 + 音频设备 + 界面/托盘 + 信令 + WS，无视频（`internal/video/camera_other.go`：macOS 摄像头采集未实现）、无 Opus/AEC 静态库。运行要求 macOS 12+（`LSMinimumSystemVersion`）；未做 Apple 开发者签名/公证，首次打开需右键「打开」或 `xattr -cr` 去隔离属性。**窗口行为与 Windows/Linux 对齐**：通话面板吸附工作区右下角、悬浮置顶、不进 Mission Control/窗口切换器、拖动记忆位置（`internal/ui/topmost_darwin.go`，AppKit；坐标口径同为「主屏左上原点物理像素」） | P1 | 已完成 |
 
 ### 4.12 视频（VIDEO）
 

@@ -135,6 +135,18 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 `release/release-no-ui.conf` + `release/app-no-ui.json`（APP_ID `mti-sip-phone-no-ui`，独立令牌）。
 一个应用失败不影响另一个，最后统一报错退出；`--only full|no-ui`（或旧的 `--no-ui`）只发一个。
 
+**macOS 产物走 GitHub Actions（`--darwin-ci`）**：macOS 只能在 macOS 上编，所以
+`scripts/release.sh --darwin-ci` 会先 `workflow_dispatch` 触发 `.github/workflows/build.yml`
+（`release=true` → `SIP_PHONE_RELEASE=1`），**与本地容器编译并行**，跑完用 REST API
+下载 `darwin-binaries`（两个架构的裸二进制）与 `macos-dmg`（universal DMG），裸二进制
+放进 `dist/`、DMG 另存为 `dist/macos-dmg-{full,no-ui}.dmg`（发布文件名不含版本号）。
+需要 `GH_TOKEN`（能触发/读取 Actions 的 PAT），可选 `GH_REPO` / `GH_REF`（默认
+`wuzhengmao/mti-sip-phone` 与当前分支）。**CI 编的是已提交的 HEAD**，工作区有未提交
+改动时脚本会提示。发布物里 macOS 的三项：`mti-sip-phone-macos-x64` / `-arm64`
+（裸 Mach-O、`kind=portable`，自动更新下载的就是它——**不做 universal**，按 GOARCH
+分架构更小）与 `mti-sip-phone-macos-universal.dmg`（`kind=installer`，首次安装用）；
+`release.json` 的 `kind` 按产物逐条输出（其余平台仍是 portable）。
+
 - 配置在 `release/release.conf`：`UPDATE_SITE`（当前 `https://update.wuzm219.cn`）/ `APP_ID`
   （mti-sip-phone）/ `UPLOAD_TOKEN`（由站点 `UPLOAD_SECRET` 按应用 ID 推导）/ 可选的
   `CA_CERT`（内部自签名站点用，curl `--cacert`）、`INSECURE_TLS`；同名环境变量可覆盖，
@@ -258,7 +270,9 @@ internal/
               通话面板与更新提示窗的去装饰/右下角吸附/不进任务栏按平台
               拆分：topmost_windows.go（Win32）、topmost_linux.go（X11：
               _MOTIF_WM_HINTS 去装饰 + _NET_WM_STATE SKIP_TASKBAR +
-              _NET_WORKAREA 定位）、topmost_other.go（其余平台空实现）
+              _NET_WORKAREA 定位）、topmost_darwin.go（AppKit：悬浮层级 +
+              collectionBehavior 不进 Mission Control + 右下角定位 + 拖动
+              记忆，坐标换算在 topmost_darwin.m）、topmost_other.go（其余平台空实现）
   ui/ui_update.go  更新提示窗 + 主窗体提示行（REQ-UPD-003）
   ui/folderdlg_windows.go  系统文件夹选择对话框（IFileOpenDialog，Windows）
   ui/folderdlg_other.go    其他平台回退（用 Fyne 内置对话框）
@@ -415,6 +429,16 @@ macOS 与 Windows/Linux 的三处结构性差异，改相关代码前必读：
   会在程序运行时再拉起一份（撞单实例锁），对下次登录也没有额外作用。
 - 运行要求 macOS 12+（`LSMinimumSystemVersion`）；没有 Apple 开发者证书，
   未签名/未公证，首次打开要右键「打开」或 `xattr -cr <应用>`。
+- **通话面板/更新提示窗的窗口行为**在 `internal/ui/topmost_darwin.go`（AppKit，
+  坐标换算在同名 `.m`）：面板本来就是 Fyne splash 窗口（GLFW 创建即无边框），
+  这里只调 `setLevel`（悬浮）+ `setCollectionBehavior`（`CanJoinAllSpaces |
+  Transient | IgnoresCycle` → 不进 Mission Control / Cmd+\` 切换）+ 右下角
+  定位 + 拖动会话（60Hz 跟随光标，位置记忆与 Windows/Linux 共用口径：
+  主屏左上原点的物理像素）。**AppKit 只能在主线程调用**：所有 C 调用都包在
+  `fyne.DoAndWait` 里，并且一律由后台 goroutine 发起（`DoAndWait` 在主线程
+  会 panic）；`screenBounds`/`screenWorkArea` 是同步接口、由主线程调用，
+  直接调 C。`endCallPanelDrag` **不能等拖动会话退出**（会话最后一次移动要
+  主线程执行，主线程正等它就互相等死）——位置在每次移动时已记下，直接读。
 - 验证走 GitHub Actions（`.github/workflows/build.yml`，macOS runner）：
   `go vet ./...`（覆盖 darwin 专有文件）→ `./build.sh --target darwin` →
   关键包单测 → `--version` 冒烟 → universal DMG → 上传 artifact。**Windows

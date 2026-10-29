@@ -100,7 +100,14 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 ./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.13-rc），不上传
 ./scripts/release.sh --pre             # 预发布：上传 1.0.13-rc（站点标记为预发布）
 ./scripts/release.sh                   # 正式版：以 1.0.13 编译并上传
+./scripts/release.sh --darwin-ci       # 同时经 GitHub Actions 编 macOS 产物并一起发布
 ```
+
+- **macOS 产物**（`--darwin-ci`）：需要在环境里设 `GH_TOKEN`（能触发 Actions 的 PAT）。
+  脚本先触发 `.github/workflows/build.yml`（正式版带 `SIP_PHONE_RELEASE=1`），和本地容器
+  编译**并行**，跑完自动下载两个架构的裸二进制与 universal DMG，一起打包上传。发布物新增
+  `mti-sip-phone-macos-x64` / `-arm64`（裸 Mach-O，自动更新用）与
+  `mti-sip-phone-macos-universal.dmg`（首次安装包）。
 
 - 站点地址 / 应用 ID / 上传令牌（可选站点证书）在 `release/release.conf`，环境变量可覆盖。
   站点启用 TLS 时地址要直接写 `https://主机:端口`（HTTP 端口只会 301 跳转，POST 跟随跳转
@@ -161,6 +168,7 @@ macOS 的平台差异（详见 [CLAUDE.md](CLAUDE.md) 的「macOS（darwin）」
 - **安装形态是 `.app` 应用包**（程序图标与 sip:// 协议只能来自 `Info.plist`）。裸二进制直接运行时会在 `~/Library/Application Support/mti-sip-phone/` 生成应用包（完整版 `MTI软电话-完整版.app` / 无 UI 版 `MTI软电话.app`）、在桌面放指向它的链接，再从包内重启；已在 `.app` 内（如拖进「应用程序」）则不搬迁。
 - **sip:// / sips:// 通过苹果事件接收**（macOS 点链接时系统不传命令行参数），由 `internal/macurl` 在启动早期注册处理器。
 - **开机自启**写 `~/Library/LaunchAgents/cn.mti.sip-phone.plist`。
+- **通话面板**与 Windows/Linux 一致：无边框、吸附工作区右下角、悬浮在最前、不进 Mission Control/窗口切换器，拖动后记住位置（`internal/ui/topmost_darwin.go`，AppKit）。
 - macOS 产物为**基础版**（G.711/G.722 + 音频 + 界面/托盘 + 信令 + WS）：摄像头采集尚未实现，视频/Opus/AEC 静态库暂无 darwin 版本。
 
 ## 网页接入示例
