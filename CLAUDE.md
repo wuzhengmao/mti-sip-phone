@@ -131,8 +131,8 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 `release/release-no-ui.conf` + `release/app-no-ui.json`（APP_ID `mti-sip-phone-no-ui`，独立令牌）。
 一个应用失败不影响另一个，最后统一报错退出；`--only full|no-ui`（或旧的 `--no-ui`）只发一个。
 
-**macOS 产物走 GitHub Actions（`--darwin-ci`）**：macOS 只能在 macOS 上编，所以
-`scripts/release.sh --darwin-ci` 会先 `workflow_dispatch` 触发 `.github/workflows/build.yml`
+**macOS 产物走 GitHub Actions（默认开启，`--no-darwin` 关闭）**：macOS 只能在 macOS 上编，所以
+`scripts/release.sh`（默认）会先 `workflow_dispatch` 触发 `.github/workflows/build.yml`
 （`release=true` → `SIP_PHONE_RELEASE=1`），**与本地容器编译并行**，跑完用 REST API
 下载 `darwin-binaries`（两个架构的裸二进制）与 `macos-dmg`（universal DMG），裸二进制
 放进 `dist/`、DMG 另存为 `dist/macos-dmg-{full,no-ui}.dmg`（发布文件名不含版本号）。

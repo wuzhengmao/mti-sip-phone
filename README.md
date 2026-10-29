@@ -72,7 +72,7 @@ build.bat
 #   universal = lipo 合并两架构后重新 ad-hoc 签名；DMG 拖进「应用程序」即安装
 # 也提供 GitHub Actions（.github/workflows/build.yml）：push 到 master 或 PR 且
 # 改动涉及代码/构建脚本时自动跑；dev 上要验证在 Actions 页面手动 Run workflow；
-# 发版时 release.sh --darwin-ci 会自己触发，不依赖 push。
+# 发版时 release.sh 会自己触发（默认），不依赖 push。
 
 # 手动构建（Windows 需将 MinGW 的 gcc 加入 PATH，或用 CC 指定）
 go build -ldflags "-s -w -H=windowsgui" -o dist/sip-phone.exe ./cmd/sip-phone  # 无控制台
@@ -101,10 +101,10 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 ./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.13-rc），不上传
 ./scripts/release.sh --pre             # 预发布：上传 1.0.13-rc（站点标记为预发布）
 ./scripts/release.sh                   # 正式版：以 1.0.13 编译并上传
-./scripts/release.sh --darwin-ci       # 同时经 GitHub Actions 编 macOS 产物并一起发布
+./scripts/release.sh --no-darwin       # 只发 Windows/Linux（默认会同时经 Actions 编 macOS）
 ```
 
-- **macOS 产物**（`--darwin-ci`）：默认使用 git 凭据助手里 github.com 的令牌（能 `git push`
+- **macOS 产物**（默认开启，`--no-darwin` 关闭）：默认使用 git 凭据助手里 github.com 的令牌（能 `git push`
   到该仓库就有），也可用环境变量 `GH_TOKEN` 显式指定。脚本先触发
   `.github/workflows/build.yml`（正式版带 `SIP_PHONE_RELEASE=1`），和本地容器
   编译**并行**，跑完自动下载两个架构的裸二进制与 universal DMG，一起打包上传。发布物新增

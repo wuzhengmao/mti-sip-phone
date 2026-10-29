@@ -21,7 +21,7 @@
   - **新增 `-version` 命令行开关**：打印版本与目标平台后退出（不需要图形会话，供 CI 冒烟）。
 - **`internal/macbundle`**：macOS 应用包的目录结构、`Info.plist`、`AppIcon.icns` 与 LaunchServices 注册的统一实现（自安装、协议注册、打包脚本三处同一套字段与名字）。
 - **macOS 窗口行为（`internal/ui/topmost_darwin.go` + `.m`，AppKit）**：通话面板吸附工作区右下角、悬浮层级（`NSFloatingWindowLevel`）、`collectionBehavior` 不进 Mission Control 与 Cmd+` 切换、拖动跟随并记住位置（REQ-UI-040 沿用同一份配置）；更新提示窗同样悬浮。坐标统一为「主屏左上原点的物理像素」（与 Windows/Linux 保存的位置同口径），Cocoa 的左下原点/point 换算集中在 `.m` 里。注意 AppKit 只能在主线程调用，全部走 `fyne.DoAndWait` 且由后台 goroutine 发起；`endCallPanelDrag` 不等待拖动会话退出（否则与主线程互等）。
-- **发布接入 macOS（`scripts/release.sh --darwin-ci`）**：一次发布 = 本地容器编 10 个 Windows/Linux 产物 + GitHub Actions 编 macOS（两个架构的裸二进制 + universal DMG，两个并行），下载回来合并上传。发布物新增 `mti-sip-phone-macos-x64` / `-arm64`（裸 Mach-O，自动更新的下载目标）与 `mti-sip-phone-macos-universal.dmg`（`kind=installer`，首次安装包）；`release.json` 的 `kind` 按产物输出。
+- **发布接入 macOS（`scripts/release.sh` 默认就带，`--no-darwin` 关闭）**：一次发布 = 本地容器编 10 个 Windows/Linux 产物 + GitHub Actions 编 macOS（两个架构的裸二进制 + universal DMG，两个并行），下载回来合并上传。发布物新增 `mti-sip-phone-macos-x64` / `-arm64`（裸 Mach-O，自动更新的下载目标）与 `mti-sip-phone-macos-universal.dmg`（`kind=installer`，首次安装包）；`release.json` 的 `kind` 按产物输出。
 - **macOS 自动更新的下载校验**：`checkExecutableMagic` 补 Mach-O 魔数判断（单架构 + universal），此前 darwin 分支等于不校验。
 - **`internal/appicon.ICNS`**：纯 Go 生成 macOS `.icns`（icp4/icp5/icp6/ic07/ic08/ic09 六档 PNG 内嵌），无需 sips/iconutil，可跨平台单测。
 

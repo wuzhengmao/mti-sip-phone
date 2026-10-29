@@ -14,8 +14,8 @@ fi
 #   ./scripts/release.sh --no-build       # 用 dist/ 里已有的产物打包（跳过新鲜度校验）
 #   ./scripts/release.sh --only no-ui     # 只发「仅托盘无 UI 版」（默认两个应用都发）
 #   ./scripts/release.sh --title "体验优化版" --mandatory
-#   ./scripts/release.sh --darwin-ci      # 同时出 macOS 产物：触发 GitHub Actions 编 darwin，
-#                                         # 与本地容器编译并行，跑完自动下载回来一起发布
+#   ./scripts/release.sh --no-darwin      # 只发 Windows/Linux（默认会同时经 GitHub Actions
+#                                         # 编 macOS：与本地容器编译并行，跑完自动下载回来）
 #
 # 配置：release/release.conf（站点地址 / 应用 ID / 上传令牌 / 可选站点证书），
 #       同名环境变量可覆盖（UPDATE_SITE / APP_ID / UPLOAD_TOKEN / CA_CERT /
@@ -58,9 +58,10 @@ usage() {
   ./scripts/release.sh --no-build       # 用 dist/ 里已有的产物打包（跳过新鲜度校验）
   ./scripts/release.sh --only no-ui     # 只发「仅托盘无 UI 版」（默认：完整版 + 无 UI 版一起发）
   ./scripts/release.sh --title "体验优化版" --mandatory
-  ./scripts/release.sh --darwin-ci      # 同时经 GitHub Actions 编 macOS 产物并一起发布
+  ./scripts/release.sh --no-darwin      # 只发 Windows/Linux（不带时默认同时编 macOS）
 选项：--pre / --dry-run / --no-build / --only <full|no-ui> / -v <版本> / --title <标题> / --channel <通道> / --mandatory
-      --darwin-ci                       不需要设 GH_TOKEN：默认取 git 凭据助手的令牌
+      --no-darwin                       关闭 macOS 产物（默认开启：经 GitHub Actions 编 darwin）
+      macOS 产物不需要设 GH_TOKEN：默认取 git 凭据助手的令牌
                                         （可选 GH_REPO / GH_REF 覆盖默认仓库与分支）
 配置：**两个应用各一份**——release/release.conf（完整版 mti-sip-phone）与
       release/release-no-ui.conf（无 UI 版 mti-sip-phone-no-ui），各自一份上传令牌；
@@ -81,7 +82,7 @@ TITLE=""
 CHANNEL=""
 MANDATORY=0
 ONLY="" # 只发某个应用（full / no-ui）；留空 = 两个都发
-DARWIN_CI=0 # 1 = 触发 GitHub Actions 编 macOS 产物（--darwin-ci）
+DARWIN_CI=1 # 默认就触发 GitHub Actions 编 macOS 产物；--no-darwin 关掉
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -95,6 +96,7 @@ while [ $# -gt 0 ]; do
         --channel) CHANNEL="${2:-}"; shift ;;
         --mandatory) MANDATORY=1 ;;
         --darwin-ci) DARWIN_CI=1 ;;
+        --no-darwin) DARWIN_CI=0 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "未知参数：$1" >&2; usage >&2; exit 2 ;;
     esac
