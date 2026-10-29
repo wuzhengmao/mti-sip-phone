@@ -33,6 +33,7 @@
   .badge.ok { background: #dcfce7; color: var(--green); }
   .badge.err { background: #fee2e2; color: var(--red); }
   .badge.warn { background: #fef3c7; color: var(--warn); }
+  .badge.info { background: #dbeafe; color: var(--primary); }
   /* 在线座席（REQ-ACC-035）：状态圆点 + 技能组 tag（其余技能组收进 more 的悬停提示） */
   .dot {
     display: inline-block; width: 9px; height: 9px; border-radius: 50%;

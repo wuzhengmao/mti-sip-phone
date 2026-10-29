@@ -65,6 +65,8 @@
      *                                      等话务结束再注销，等待期间重连则**取消**排队任务
      * @param {boolean} [options.autoReconnect] 断线自动重连，默认 true
      * @param {number} [options.reconnectDelay] 重连间隔毫秒，默认 3000
+     * @param {boolean} [options.autoAnswer] 连上软电话后设置自动接听开关（true=自动接听、
+     *                                      false=关闭自动接听）。不传 = 不改软电话配置。
      * @param {string} [options.updateUrl]  更新站点根地址（REQ-UPD-018）。
      *                                      给了就连上软电话后写入其自动更新配置：软电话据此
      *                                      自己定时查询（不传 = 不改软电话配置）
@@ -79,6 +81,9 @@
       this.unregisterOnDisconnect = !!options.unregisterOnDisconnect;
       this.autoReconnect = options.autoReconnect !== false;
       this.reconnectDelay = options.reconnectDelay || 3000;
+
+      // 自动接听（undefined = 不改软电话配置；传了就连上后下发，见 _applyAutoAnswerOnConnect）
+      this._autoAnswerWanted = options.autoAnswer === undefined ? null : !!options.autoAnswer;
 
       // 更新配置（REQ-UPD-018）：给了才在连上后写入软电话（undefined = 不改）
       this._updateConfigWanted = null;
@@ -117,6 +122,8 @@
       this.on('connected', () => this._applyUpdateConfigOnConnect());
       // 连上后的注册策略：断线自动注销开关下发 + sipUri 登录（REQ-SDK-007/REQ-WS-020）
       this.on('connected', () => this._onConnectedPolicy());
+      // 构造参数给了 autoAnswer → 连上后写入软电话
+      this.on('connected', () => this._applyAutoAnswerOnConnect());
     }
 
     /** 是否已连接 */
@@ -192,7 +199,8 @@
      * 事件名：call.incoming / call.ringing / call.dialing / call.established /
      *         call.terminated / call.failed / call.muted / call.audio（麦克风/扬声器开关）/
      *         call.video / call.panel（通话面板快照，见 SipCallPanelState）/
-     *         cti.agent（坐席模式/置忙变化：{online, displayName, agentMode, isBusy}）/
+     *         cti.agent（坐席状态变化：{displayName, agentMode, isBusy, acw, isLeave}，
+     *                   agentMode=none 表示不在线）/
      *         cti.state（通话话务状态变化：{call}，call.cti 见协议 §16）/
      *         cti.failed（CTI 话务失败：{callId, kind, reason, message}）/
      *         cti.result（CTI 指令结果：{seq, success, code, message, action, data?}）/
@@ -410,7 +418,7 @@
 
     /**
      * 坐席置忙/置闲（协议 §9.3 的 setBusy / setIdle）。
-     * 真正生效后的状态经 `cti.agent` 事件回显（{online, displayName, agentMode, isBusy}）。
+     * 真正生效后的状态经 `cti.agent` 事件回显（{displayName, agentMode, isBusy, acw, isLeave}）。
      * @param {boolean} busy true = 置忙，false = 置闲
      * @returns {Promise<{action: string, seq: string}>}
      */
@@ -424,6 +432,12 @@
     /** 坐席置忙（setBusy 的便捷写法） */
     setBusy() { return this.setAgentBusy(true); }
 
+    /** 坐席离席（协议 §9.3 的 leave，isLeave=true） */
+    leave() { return this.ctiAction('leave'); }
+
+    /** 坐席复席（协议 §9.3 的 resume，isLeave=false，重新进入分配队列） */
+    resume() { return this.ctiAction('resume'); }
+
     /**
      * 发起一条 CTI 反向控制指令（REQ-ACC-026），与桌面通话面板的按钮一致：
      * 指令经 out-of-dialog NOTIFY（Event: MSP_ACTION）发给 CTI，等 MSP_RESULT
@@ -435,7 +449,7 @@
      *   monitor / takeover / exitThreeWay          → target（号码字符串）
      *   addConferenceMembers / removeConferenceMembers → members（号码数组）
      *   finishConsult / finishConference / whisper / stopWhisper /
-     *   intervene / intercept / setBusy / setIdle  → 不需要参数
+     *   intervene / intercept / setBusy / setIdle / leave / resume  → 不需要参数
      *
      * @param {string} action 动作名
      * @param {string|string[]} [arg] target 或 members
@@ -525,6 +539,25 @@
      */
     getState() {
       return this._request('system.getState', {});
+    }
+
+    /**
+     * 查询当前通话面板快照（`call.panel` 事件的负载，REQ-WS-023）。
+     * 无通话时 callPanel / conferencePanel 都为 null。
+     * @returns {Promise<{callPanel: Object|null, conferencePanel: Object|null}>}
+     */
+    getCallPanel() {
+      return this._request('system.getCallPanel', {});
+    }
+
+    /**
+     * 查询当前坐席状态（`cti.agent` 事件的负载，REQ-ACC-028）。
+     * agentMode=none 表示不在坐席模式。
+     * @returns {Promise<{displayName: string, agentMode: string, isBusy: boolean,
+     *   acw: boolean, isLeave: boolean, phoneStatus: string, agentStatus: string}>}
+     */
+    getAgentState() {
+      return this._request('system.getAgentState', {});
     }
 
     /**
@@ -1060,6 +1093,14 @@
           console.error('[sip-phone-sdk] sipUri 注册应用失败', e);
         });
       }
+    }
+
+    /** 内部：构造参数给了 autoAnswer 时，连上后写入软电话（undefined = 不改）。 */
+    _applyAutoAnswerOnConnect() {
+      if (this._autoAnswerWanted === null) {
+        return;
+      }
+      this.setAutoAnswer(this._autoAnswerWanted).catch(() => {});
     }
 
     /** 内部：解析 sipUri 并按需应用注册信息（与现有注册相同则忽略）。 */

@@ -194,7 +194,9 @@ type App struct {
 	// **只有坐席模式才在通话面板显示高级话务按钮**（咨询/转移/会议）。
 	agentOnline      bool
 	agentMode        string          // none / normal / dial_out / monitor（协议 §16.1）
-	agentBusy        bool            // 置忙（isBusy）：已注册时托盘/应用图标变黄
+	agentBusy        bool            // 置忙（isBusy）
+	agentACW         bool            // 话后整理中（acw）：已注册时托盘/应用图标变蓝
+	agentLeave       bool            // 离席（isLeave）
 	agentDisplayName string          // 坐席显示名（AGENT_ONLINE 的 displayName）
 	agentIcon        *hoverIcon      // 主窗体「已注册」后的坐席按钮（点击切换置忙/置闲）
 	rosterIcon       *hoverIcon      // 坐席模式下的「在线座席」入口（座位表图标）
@@ -1789,12 +1791,15 @@ func (a *App) buildTray() {
 }
 
 // trayIcon 按注册与坐席状态返回图标（REQ-UI-011 修订）：未注册/注册中红、
-// 已注册且坐席置忙黄、已注册且空闲绿。
+// 已注册且坐席置忙/离席黄、已注册且整理中蓝、已注册且空闲绿。
 func (a *App) trayIcon() fyne.Resource {
 	if !a.trayRegistered {
 		return IconPhoneRed
 	}
-	if a.agentBusy {
+	switch a.agentStatus() {
+	case "acw":
+		return IconPhoneBlue
+	case "busy", "leave":
 		return IconPhoneYellow
 	}
 	return IconPhoneGreen
@@ -1812,6 +1817,40 @@ func (a *App) setRegState(state string) {
 	}
 }
 
+// agentStatus 坐席状态的归一化值（free/busy/acw/leave）；未进坐席模式返回空串。
+// 优先级（用户口径）：离席 > 整理中 > 置忙 > 空闲。
+func (a *App) agentStatus() string {
+	if !a.agentOnline || a.agentMode == core.AgentModeNone {
+		return ""
+	}
+	switch {
+	case a.agentLeave:
+		return "leave"
+	case a.agentBusy && a.agentACW:
+		return "acw"
+	case a.agentBusy:
+		return "busy"
+	default:
+		return "free"
+	}
+}
+
+// seatStatusText 本机坐席状态的中文文案（与 core.AgentStatusText 同口径；
+// 注意与 ui_agents.go 的 agentStatusText——在线座席列表口径——区分）。
+func seatStatusText(status string) string {
+	switch status {
+	case "leave":
+		return "离席"
+	case "acw":
+		return "整理中"
+	case "busy":
+		return "置忙"
+	case "free":
+		return "空闲"
+	}
+	return ""
+}
+
 // appTitle 应用标题："MTI 软电话 - 本机号码"（未注册/未配置时只有应用名）。
 // 主窗口标题栏、托盘悬停提示与未接来电通知共用。
 func (a *App) appTitle() string {
@@ -1820,9 +1859,15 @@ func (a *App) appTitle() string {
 	if account != "" {
 		title += " - " + account
 	}
-	// 坐席模式（REQ-ACC-028）：标题/托盘提示在号码后追加坐席显示名
-	if a.agentOnline && a.agentDisplayName != "" {
-		title += " " + a.agentDisplayName
+	// 坐席模式（REQ-ACC-028）：标题/托盘提示在号码后追加坐席显示名，座席状态
+	//（空闲/置忙/整理中/离席）跟在其后（用户口径，空格隔开）。
+	if a.agentOnline {
+		if a.agentDisplayName != "" {
+			title += " " + a.agentDisplayName
+		}
+		if st := seatStatusText(a.agentStatus()); st != "" {
+			title += " " + st
+		}
 	}
 	return title
 }
@@ -1836,14 +1881,23 @@ func (a *App) updateWindowTitle() {
 }
 
 // applyAgentState 坐席状态变化：刷新坐席按钮（颜色/悬停文案/显隐）、班长模式
-// 的监听按钮、窗口标题，以及应用/托盘图标颜色（已注册且置忙 = 黄色）。
+// 的监听按钮、窗口标题，以及应用/托盘图标颜色（已注册且置忙/离席 = 黄色、
+// 整理中 = 蓝色）。
 func (a *App) applyAgentState() {
 	online := a.agentOnline && a.agentMode != core.AgentModeNone
+	status := a.agentStatus()
 	if a.agentIcon != nil {
 		if online {
 			iconColor := colorSuccessGreen
 			state, action := "空闲", "点击置忙"
-			if a.agentBusy {
+			switch status {
+			case "leave":
+				iconColor = colorHoldYellow
+				state, action = "离席", "点击复席"
+			case "acw":
+				iconColor = colorAgentACW
+				state, action = "整理中", "点击置闲"
+			case "busy":
 				iconColor = colorHoldYellow
 				state, action = "置忙", "点击置闲"
 			}
@@ -1871,9 +1925,9 @@ func (a *App) applyAgentState() {
 			a.rosterIcon.Hide()
 		}
 	}
-	// 顶栏的注册圆点与「已注册」文字也跟着置忙/置闲变色（REQ-ACC-034）
+	// 顶栏的注册圆点与「已注册」文字也跟着坐席状态变色（REQ-ACC-034）
 	if a.regDot != nil {
-		a.regDot.setBusy(a.agentBusy)
+		a.regDot.setAgentStatus(status)
 	}
 	a.setRegLabel(a.regState)
 	// 图标显隐改变状态行的最小宽度：必须重排，否则顶栏仍按旧宽度布局
@@ -1885,20 +1939,23 @@ func (a *App) applyAgentState() {
 	a.applyIconColors()
 }
 
-// toggleAgentBusy 点击坐席按钮：空闲 → 置忙（setBusy），置忙 → 置闲（setIdle）。
-// 结果由 CTI 推送的 MSP_EVENT_AGENT_ONLINE（携带最新 isBusy）回到界面。
+// toggleAgentBusy 点击坐席按钮（用户口径）：空闲 → setBusy，离席 → resume，
+// 置忙/整理中 → setIdle。结果由 CTI 推送的 MSP_EVENT_AGENT_ONLINE 回到界面。
 func (a *App) toggleAgentBusy() {
 	if !a.agentOnline || a.agentMode == core.AgentModeNone {
 		return
 	}
 	action := "setBusy"
-	if a.agentBusy {
+	switch a.agentStatus() {
+	case "leave":
+		action = "resume"
+	case "busy", "acw":
 		action = "setIdle"
 	}
 	if err := a.runCTI(nil, action, nil); err != nil {
 		return
 	}
-	logx.Logger().Info("坐席状态切换", "action", action, "原置忙", a.agentBusy)
+	logx.Logger().Info("坐席状态切换", "action", action, "状态", a.agentStatus())
 }
 
 // applyIconColors 应用图标 / 主窗口图标 / 托盘图标统一按状态着色
@@ -1941,10 +1998,12 @@ func (a *App) syncInitialState() {
 		a.regDot.setState(a.regState)
 	}
 	a.setRegLabel(a.regState)
-	a.agentOnline = st.AgentOnline
-	a.agentMode = st.AgentMode
-	a.agentBusy = st.AgentBusy
-	a.agentDisplayName = st.AgentDisplayName
+	a.agentMode = a.core.AgentMode()
+	a.agentOnline = a.agentMode != core.AgentModeNone
+	a.agentBusy = a.core.AgentBusy()
+	a.agentACW = a.core.AgentACW()
+	a.agentLeave = a.core.AgentLeave()
+	a.agentDisplayName = a.core.AgentDisplayName()
 	a.setAutoAnswer(st.AutoAnswer)
 	a.applyAgentState()
 	a.updateWindowTitle()
@@ -2167,18 +2226,26 @@ func (a *App) onEvent(ev core.Event) {
 		// 只有坐席模式才显示高级话务按钮。通话中就地重建面板（两方通话
 		// 才显示，拨号/振铃不显示——rebuildCallRows 按状态分支）。
 		if data, ok := ev.Data.(map[string]any); ok {
-			on, _ := data["online"].(bool)
 			if name, ok := data["displayName"].(string); ok {
 				a.agentDisplayName = name
 			}
 			if mode, ok := data["agentMode"].(string); ok {
 				a.agentMode = mode
 			}
+			on := a.agentMode != core.AgentModeNone
 			if busy, ok := data["isBusy"].(bool); ok {
 				a.agentBusy = busy && on
 			}
+			if acw, ok := data["acw"].(bool); ok {
+				a.agentACW = acw && on
+			}
+			if leave, ok := data["isLeave"].(bool); ok {
+				a.agentLeave = leave && on
+			}
 			if !on {
 				a.agentBusy = false
+				a.agentACW = false
+				a.agentLeave = false
 			}
 			a.agentOnline = on
 			// 这里不再打日志：core 的 setAgentOnline 已经打过一条「坐席模式变化」，
@@ -2383,11 +2450,16 @@ func (a *App) setRegLabel(state string) {
 	a.regLabel.SetBold(true)
 }
 
-// statusColor 注册状态文字/圆点的颜色：与圆点同色；**已注册且坐席置忙时用
-// 黄色**（与"注册中"同一个黄），让顶栏跟着置忙/置闲一起变（REQ-ACC-034）。
+// statusColor 注册状态文字/圆点的颜色：与圆点同色；**已注册时按坐席状态**
+//（置忙/离席黄、整理中蓝），让顶栏跟着坐席状态一起变（REQ-ACC-034）。
 func (a *App) statusColor(state string) color.Color {
-	if state == "registered" && a.agentBusy {
-		return busyColor
+	if state == "registered" {
+		switch a.agentStatus() {
+		case "leave", "busy":
+			return busyColor
+		case "acw":
+			return acwColor
+		}
 	}
 	if c, ok := dotColors[state]; ok {
 		return c

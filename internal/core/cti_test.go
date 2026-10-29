@@ -7,6 +7,34 @@ import (
 	"mti-sip-phone/internal/config"
 )
 
+// TestDeriveAgentStatus agentStatus 由 phoneStatus + isBusy/acw/isLeave 推算
+//（取值与 SipAgent.agentStatus 一致，用户口径）。
+func TestDeriveAgentStatus(t *testing.T) {
+	cases := []struct {
+		phone            string
+		leave, busy, acw bool
+		want             string
+	}{
+		{"free", true, false, false, "leave"}, // 离席优先级最高
+		{"talking", true, true, true, "leave"},
+		{"free", false, false, false, "free"},
+		{"free", false, true, false, "busy"},
+		{"free", false, true, true, "acw"},
+		{"dialing", false, true, true, "dialing"},
+		{"ringing", false, false, false, "ringing"},
+		{"talking", false, false, false, "talking"},
+		{"holding", false, false, false, "talking"},
+		{"", false, false, false, "unknown"},
+		{"weird", false, true, false, "unknown"},
+	}
+	for _, c := range cases {
+		if got := deriveAgentStatus(c.phone, c.leave, c.busy, c.acw); got != c.want {
+			t.Errorf("deriveAgentStatus(%q, leave=%v, busy=%v, acw=%v) = %q, want %q",
+				c.phone, c.leave, c.busy, c.acw, got, c.want)
+		}
+	}
+}
+
 // TestAgentMode 坐席模式（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）：
 // 新协议下 ONLINE **不再过期**（坐席状态的保持靠话机自己发心跳），只有
 // OFFLINE 或本地登出会退出。事件与应用级状态有关，**不需要有通话**。
@@ -45,9 +73,9 @@ func TestAgentMode(t *testing.T) {
 		t.Fatalf("退出坐席模式后 displayName 应为空，实际 %q", got)
 	}
 
-	// 状态快照里也要带上（网页/界面初始化用）
-	if app.State().AgentOnline {
-		t.Fatal("退出后 State().AgentOnline 应为 false")
+	// 状态快照里 agentMode 应为 none（表示不在线）
+	if app.State().AgentMode != AgentModeNone {
+		t.Fatalf("退出后 State().AgentMode 应为 none，实际 %q", app.State().AgentMode)
 	}
 
 	// 登出账号也要退出坐席模式（REQ-ACC-028 补充）

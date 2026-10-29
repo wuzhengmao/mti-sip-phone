@@ -213,7 +213,7 @@ func waitReg(t *testing.T, tel *regTel, want int) {
 }
 
 // SendHeartbeat 记录坐席心跳（MSP_HEARTBEAT）。
-func (r *regTel) SendHeartbeat(agentMode string, isBusy bool, displayName, status string, expires time.Duration) error {
+func (r *regTel) SendHeartbeat(agentMode string, isBusy bool, displayName, status string, acw, leave bool, expires time.Duration) error {
 	r.hbMu.Lock()
 	defer r.hbMu.Unlock()
 	r.hbs++

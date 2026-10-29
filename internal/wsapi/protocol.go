@@ -73,6 +73,8 @@ const (
 	MethodSetVideo          = "call.setVideo"          // 视频总开关（纯本地，REQ-VIDEO-008）
 	MethodDTMF              = "call.dtmf"              // 发送 DTMF（RFC 4733，REQ-CALL-006）
 	MethodGetState          = "system.getState"        // 查询状态
+	MethodGetCallPanel      = "system.getCallPanel"    // 查询通话面板快照（call.panel 负载，REQ-WS-023）
+	MethodGetAgentState     = "system.getAgentState"   // 查询坐席状态（cti.agent 负载）
 	MethodSetAutoAnswer     = "system.setAutoAnswer"   // 自动接听开关（桌面按钮与网页共用一份）
 	MethodRegister          = "system.register"        // 立即注册并恢复自动注册（REQ-ACC-024 / REQ-WS-021）
 	MethodUnregister        = "system.unregister"      // 取消注册、停止注册周期并关闭自动注册
@@ -148,8 +150,8 @@ const (
 	EvSystemConfig = "system.config"
 	// EvAudioReady 音频后端就绪（REQ-WS-016）：后台初始化完成，设备列表可枚举。
 	EvAudioReady = "audio.ready"
-	// EvCTIAgent 坐席模式/置忙状态变化（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）：
-	// {online, displayName, agentMode, isBusy}。
+	// EvCTIAgent 坐席状态变化（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）：
+	// {displayName, agentMode, isBusy, acw, isLeave}；**agentMode=none 表示不在线**。
 	EvCTIAgent = "cti.agent"
 	// EvCTIState 通话的话务状态变化（咨询/三方/监听/会议，REQ-ACC-026）：
 	// {call}，call.cti 里是完整的 CTIState。

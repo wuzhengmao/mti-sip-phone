@@ -39,17 +39,24 @@ func phonePNGBytes(name string) []byte {
 }
 
 // 托盘/窗口图标配色（REQ-UI-011）：未注册/注册中红色、已注册且空闲绿色、
-// 已注册且坐席置忙黄色。绿色还用于图标生成失败时的兜底圆点颜色。
+// 已注册且坐席置忙黄色、已注册且话后整理中蓝色。绿色还用于图标生成失败时的
+// 兜底圆点颜色。
 const (
 	ColorRed    = "#e53935"
 	ColorGreen  = "#43a047"
 	ColorYellow = "#fbc02d"
+	ColorBlue   = "#2196f3"
 )
 
 // PhoneYellowPNG 已注册且坐席置忙（黄色）话机图标 PNG 字节：把绿图按 alpha
 // 重新着色（形状不变，只换颜色）——仓库里只有绿/红两份原始图，黄色现生成。
 func PhoneYellowPNG() []byte {
 	return tintedPNG(PhoneGreenPNG(), ColorYellow)
+}
+
+// PhoneBluePNG 已注册且坐席处于话后整理态（蓝色）话机图标 PNG 字节。
+func PhoneBluePNG() []byte {
+	return tintedPNG(PhoneGreenPNG(), ColorBlue)
 }
 
 // tintedPNG 把 PNG 的图形按 hex 颜色重新着色（保留 alpha 通道）。

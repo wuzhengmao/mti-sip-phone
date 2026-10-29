@@ -319,14 +319,15 @@ func (l rightLinesLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	}
 }
 
-// agentStatusColor 座席状态颜色：绿=空闲、黄=呼叫/振铃/通话中、红=置忙或异常。
+// agentStatusColor 座席状态颜色：绿=空闲、黄=呼叫/振铃/通话中、红=置忙或异常
+//（含整理中/离席——在线座席列表的"不可用"统一红，与本机坐席按钮的黄/蓝口径不同）。
 func agentStatusColor(status string) color.NRGBA {
 	switch strings.ToLower(status) {
 	case "free":
 		return colorSuccessGreen
 	case "dialing", "ringing", "talking":
 		return colorHoldYellow
-	default: // busy / leave / not_ready / miss_phone / offline / free_offhook / 未知
+	default: // busy / acw / leave / not_ready / miss_phone / offline / free_offhook / 未知
 		return colorDangerRed
 	}
 }
@@ -346,6 +347,8 @@ func agentStatusText(status string) string {
 		return "摘机"
 	case "busy":
 		return "置忙"
+	case "acw":
+		return "整理中"
 	case "leave":
 		return "离席"
 	case "not_ready":

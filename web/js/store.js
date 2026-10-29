@@ -14,7 +14,7 @@ window.SipApp = window.SipApp || {};
     register: { state: 'unregistered', account: '', reason: '' },
     call: null,              // 当前通话（core.Call 快照，含 video/audio 字段）
     // 通话面板快照（call.panel，REQ-WS-023）：页面据此直接渲染面板，
-    // {agentMode,isBusy,callPanel,conferencePanel}；无通话时两个面板为 null。
+    // {callPanel,conferencePanel}；无通话时两个面板为 null（坐席状态走 cti.agent）。
     panel: null,
     version: '',
     os: '',
@@ -27,7 +27,7 @@ window.SipApp = window.SipApp || {};
     autoAnswer: false,
     contactCount: 0,
     // 坐席模式（REQ-ACC-028 / REQ-ACC-034）：system.state 快照 + cti.agent 事件维护
-    agent: { online: false, displayName: '', mode: 'none', busy: false },
+    agent: { online: false, displayName: '', mode: 'none', busy: false, acw: false, leave: false, phoneStatus: '', agentStatus: 'unknown' },
   };
 
   const sdk = new SipPhoneSDK({
@@ -107,12 +107,18 @@ window.SipApp = window.SipApp || {};
       if (data.autoAnswer !== undefined) state.autoAnswer = data.autoAnswer;
       if (data.update) state.update = data.update;
       if (data.recentDial) state.recentDial = data.recentDial;
-      // 坐席模式（REQ-ACC-028）：快照里带上 online/displayName/agentMode/isBusy
+      // 坐席状态：system.state 里只剩 agentMode（none = 不在线），完整状态由随后
+      // 的 cti.agent 事件补发（软电话在 system.state 之后、call.panel 之前推）。
+      const agentMode = data.agentMode || 'none';
       state.agent = {
-        online: !!data.agentOnline,
-        displayName: data.agentDisplayName || '',
-        mode: data.agentMode || 'none',
-        busy: !!data.agentBusy,
+        online: agentMode !== 'none',
+        displayName: '',
+        mode: agentMode,
+        busy: false,
+        acw: false,
+        leave: false,
+        phoneStatus: '',
+        agentStatus: 'unknown',
       };
       const calls = data.calls || [];
       // 软电话的 calls 保留历史（已结束的通话也在里面）：只取进行中的那条，
@@ -189,11 +195,16 @@ window.SipApp = window.SipApp || {};
   // ---- CTI（REQ-ACC-026 / REQ-ACC-028 / REQ-ACC-034）----
   // 坐席模式/置忙：顶栏徽章、在线座席页据此刷新。
   sdk.on('cti.agent', function (data) {
+    const mode = (data && data.agentMode) || 'none';
     state.agent = {
-      online: !!(data && data.online),
+      online: mode !== 'none',
       displayName: (data && data.displayName) || '',
-      mode: (data && data.agentMode) || 'none',
+      mode: mode,
       busy: !!(data && data.isBusy),
+      acw: !!(data && data.acw),
+      leave: !!(data && data.isLeave),
+      phoneStatus: (data && data.phoneStatus) || '',
+      agentStatus: (data && data.agentStatus) || 'unknown',
     };
     emit('agent', state.agent);
   });

@@ -16,7 +16,7 @@ import (
 )
 
 // 读超时：心跳周期内无消息则断开
-const readTimeout = 60 * time.Second
+const readTimeout = 180 * time.Second
 
 // wsConn 单个 WS 连接的状态：连接句柄 + 写串行化 + 视频订阅标识。
 // 文本消息与视频二进制帧共用同一把写锁（coder/websocket 的并发写）。
@@ -52,23 +52,26 @@ func (s *Server) serveConn(ctx context.Context, conn *websocket.Conn) {
 		}
 	}()
 
-	// 连接建立即推送当前状态快照（system.state 事件），客户端无需等待
+	// 连接建立即推送当前状态快照（system.state 事件），客户端无需等待。
+	// 顺序（用户要求）：system.state（坐席只剩 agentMode）→ cti.agent（坐席状态）
+	// → call.panel（通话面板快照）。
 	go func() {
 		c.wmu.Lock()
 		defer c.wmu.Unlock()
-		msg := Message{Type: "event", Event: "system.state", Data: s.app.State()}
-		_ = writeMsg(connCtx, conn, msg)
+		_ = writeMsg(connCtx, conn, Message{Type: "event", Event: "system.state", Data: s.app.State()})
+		_ = writeMsg(connCtx, conn, Message{Type: "event", Event: "cti.agent", Data: s.app.AgentState()})
 		// 通话面板快照（REQ-WS-023）：让刚连上的页面立刻有面板可渲染，
 		// 不用等下一次话务事件。
-		panelMsg := Message{Type: "event", Event: "call.panel", Data: s.app.PanelState()}
-		_ = writeMsg(connCtx, conn, panelMsg)
+		_ = writeMsg(connCtx, conn, Message{Type: "event", Event: "call.panel", Data: s.app.PanelState()})
 	}()
 
 	// 心跳：定期 Ping 探测连接活性并保持链路畅通。
 	// 读超时由客户端心跳消息（SDK 每 25 秒发空消息）重置，此处 Ping
 	// 用于探测死连接（等 pong 失败即断开）——此前无任何心跳，空闲
 	// 60 秒触发读超时断开后由 SDK 自动重连（用户反馈"过段时间断开
-	// 又重连"——bug 修复）。
+	// 又重连"——bug 修复）。读超时后来抬到 180s：Chrome 后台标签页会
+	// 把 SDK 的心跳定时器节流到每分钟一次，60s 会被误判断开；死连接
+	// 仍由这里的 Ping/pong 兜底（浏览器后台也会在网络层回 pong）。
 	go func() {
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
@@ -80,7 +83,7 @@ func (s *Server) serveConn(ctx context.Context, conn *websocket.Conn) {
 				pingCtx, pingCancel := context.WithTimeout(connCtx, 10*time.Second)
 				if err := conn.Ping(pingCtx); err != nil {
 					pingCancel()
-					logx.Logger().Debug("WS 心跳失败，断开连接", "err", err)
+					logx.Logger().Info("WS 心跳失败，断开连接", "err", err)
 					cancel()
 					return
 				}
@@ -98,7 +101,7 @@ func (s *Server) serveConn(ctx context.Context, conn *websocket.Conn) {
 			cancel()
 			// 心跳超时或正常关闭，不记错误日志
 			if !errors.Is(err, context.Canceled) {
-				logx.Logger().Debug("WS 连接断开", "err", err)
+				logx.Logger().Info("WS 连接断开", "err", err)
 			}
 			return
 		}
@@ -355,6 +358,12 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 
 	case MethodGetState:
 		resp = okMessage(msg.ID, s.app.State())
+
+	case MethodGetCallPanel:
+		resp = okMessage(msg.ID, s.app.PanelState())
+
+	case MethodGetAgentState:
+		resp = okMessage(msg.ID, s.app.AgentState())
 
 	case MethodSetAutoAnswer:
 		// 自动接听开关（桌面按钮与网页开关共用一份状态，变更后广播

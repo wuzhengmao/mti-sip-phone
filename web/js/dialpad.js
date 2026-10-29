@@ -211,7 +211,7 @@ window.SipApp = window.SipApp || {};
   function statusText(s) {
     const map = {
       free: '空闲', dialing: '呼叫中', ringing: '振铃中', talking: '通话中',
-      free_offhook: '摘机', busy: '置忙', leave: '离席', not_ready: '示忙',
+      free_offhook: '摘机中', busy: '置忙', acw: '整理中', leave: '离席', not_ready: '示忙',
       miss_phone: '话机未连接', offline: '离线',
     };
     return map[String(s || '').toLowerCase()] || (s || '未知');

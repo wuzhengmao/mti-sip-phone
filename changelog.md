@@ -6,6 +6,21 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
+## [1.0.19] - 2026-10-30
+
+### 新增
+
+- **CTI 坐席状态同步 `acw`（话后整理态）与 `isLeave`（离席）**：`MSP_EVENT_AGENT_ONLINE` 与 `MSP_HEARTBEAT` 增加 `acw`/`isLeave` 字段（心跳回显 CTI 最近一次 ONLINE 给出的值）。**坐席状态统一走 `cti.agent` 事件**：负载 `{displayName, agentMode, isBusy, acw, isLeave, phoneStatus, agentStatus}`，**`agentMode=none` 表示不在坐席模式**（去掉 `online` 字段）；`phoneStatus` 同 `MSP_HEARTBEAT` 的 `status`，`agentStatus` 由 `phoneStatus` + `isBusy`/`acw`/`isLeave` 推算（取值同 `SipAgent.agentStatus`，`isLeave`→`leave`、`free`+`isBusy`→`busy`/`acw`、`dialing`/`ringing`/`talking`/`holding`→对应值、其它 `unknown`）；**话务状态（phoneStatus）变化也会推 `cti.agent`**。`system.state` 只保留 `agentMode`（去掉 `agentOnline`/`agentDisplayName`/`agentBusy`/`agentACW`/`agentLeave`）；`call.panel` 只保留 `callPanel`/`conferencePanel`（去掉坐席字段）——三者不再重复。**状态归纳**（离席优先级最高）：`isLeave=true` → 离席，`isBusy=true && acw=true` → 整理中，`isBusy=true` → 置忙，否则空闲。桌面顶栏坐席按钮/注册圆点、网页坐席徽章、托盘提示（座席状态跟在显示名后面、空格隔开）都显示这四种状态；新增**蓝色**图标表示整理中（置忙/离席黄、空闲绿）。**坐席按钮点击**按状态切换：空闲→`setBusy`、离席→`resume`、置忙/整理中→`setIdle`；`MSP_ACTION` 白名单与 SDK 新增 `leave`/`resume`。**WS 连接建立时按 `system.state` → `cti.agent` → `call.panel` 顺序推送**。
+- **SDK 构造参数 `autoAnswer`**：构造时传 `autoAnswer: true/false`，连上软电话后自动下发自动接听开关（不传 = 不改软电话配置；断线重连后重新下发）。
+- **SDK `getCallPanel()` / `getAgentState()`**：新增 `system.getCallPanel` / `system.getAgentState`，应用可主动查询当前通话面板快照 / 坐席状态，不必等事件。
+
+### 修复
+
+- **WS 读超时从 60s 提高到 180s**：Chrome 后台标签页会把 SDK 心跳定时器（25s）节流到每分钟一次，60s 读超时会被误触发导致周期性断连。抬到 180s 后不再误断；死连接仍由 20s 的 Ping/pong 兜底检测。
+- **WS 断开日志提升到 info 级别**：`WS 心跳失败，断开连接` 与 `WS 连接断开` 从 Debug 提升到 Info，默认日志级别下也能看到网页断连（连接侧的「网页已连接」本就是 Info，断连此前在默认级别不可见）。
+- **相同 `call.panel` 快照只推一次**：挂断时「坐席进入整理态」（`cti.agent`）与「通话结束」两条路径先后触发面板发布，快照逐字节相同时跳过第二次，避免网页/SDK 收到两条一样的快照。
+- **坐席按钮悬停提示就地刷新**：坐席状态切换（空闲→置忙等）时指针仍停在按钮上，之前已弹出的提示不会跟着换文案，要移出去再进来才更新。现在 `hoverIcon.SetNote` / `compactButton.setTip` 在「当前显示的就是本控件旧提示」时原地重画。
+
 ## [1.0.18] - 2026-10-25
 
 ### 新增

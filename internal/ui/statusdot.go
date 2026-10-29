@@ -13,13 +13,16 @@ import (
 type statusDot struct {
 	widget.BaseWidget
 	state string
-	// busy 已注册且坐席置忙（isBusy=true）：圆点显示黄色（与"注册中"同一个黄），
+	// 已注册时的坐席状态（free/busy/acw/leave）：busy/leave 黄色、acw 蓝色，
 	// 与托盘/窗口图标的口径一致（REQ-ACC-034）。
-	busy bool
+	busy  bool // 置忙（isBusy）
+	acw   bool // 话后整理中（acw）
+	leave bool // 离席（isLeave）
 }
 
 // 状态颜色（与托盘/应用图标同口径，REQ-UI-011 修订）：
-// 绿=已注册且空闲、黄=已注册且坐席置忙、红=注册中/注册失败、灰=未注册/未配置。
+// 绿=已注册且空闲、黄=已注册且坐席置忙/离席、蓝=整理中、红=注册中/注册失败、
+// 灰=未注册/未配置。
 var dotColors = map[string]color.Color{
 	"registered":   color.NRGBA{R: 0x2e, G: 0xcc, B: 0x40, A: 0xff}, // 绿
 	"registering":  color.NRGBA{R: 0xe5, G: 0x39, B: 0x35, A: 0xff}, // 红（托盘图标注册中也是红）
@@ -27,8 +30,11 @@ var dotColors = map[string]color.Color{
 	"unregistered": color.NRGBA{R: 0x9e, G: 0x9e, B: 0x9e, A: 0xff}, // 灰
 }
 
-// busyColor 已注册且坐席置忙的颜色（与托盘黄色图标一致：#fbc02d）。
+// busyColor 已注册且坐席置忙/离席的颜色（与托盘黄色图标一致：#fbc02d）。
 var busyColor = color.NRGBA{R: 0xfb, G: 0xc0, B: 0x2d, A: 0xff}
+
+// acwColor 已注册且坐席话后整理中的颜色（蓝色，与托盘蓝色图标一致：#2196f3）。
+var acwColor = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff}
 
 func newStatusDot(state string) *statusDot {
 	d := &statusDot{state: state}
@@ -36,10 +42,17 @@ func newStatusDot(state string) *statusDot {
 	return d
 }
 
-// color 当前显示颜色：已注册且置忙时用黄色，其余按注册状态。
+// color 当前显示颜色：已注册时按坐席状态（离席/置忙黄、整理蓝），其余按注册状态。
 func (d *statusDot) color() color.Color {
-	if d.state == "registered" && d.busy {
-		return busyColor
+	if d.state == "registered" {
+		switch {
+		case d.leave:
+			return busyColor
+		case d.acw:
+			return acwColor
+		case d.busy:
+			return busyColor
+		}
 	}
 	if c, ok := dotColors[d.state]; ok {
 		return c
@@ -47,12 +60,15 @@ func (d *statusDot) color() color.Color {
 	return dotColors["unregistered"]
 }
 
-// setBusy 更新坐席置忙状态（只影响已注册时的颜色）。
-func (d *statusDot) setBusy(busy bool) {
-	if d.busy == busy {
+// setAgentStatus 更新坐席状态（free/busy/acw/leave，只影响已注册时的颜色）。
+func (d *statusDot) setAgentStatus(status string) {
+	busy := status == "busy"
+	acw := status == "acw"
+	leave := status == "leave"
+	if d.busy == busy && d.acw == acw && d.leave == leave {
 		return
 	}
-	d.busy = busy
+	d.busy, d.acw, d.leave = busy, acw, leave
 	d.Refresh()
 }
 

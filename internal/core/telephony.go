@@ -92,11 +92,11 @@ type Telephony interface {
 	SendCTICommand(action string, params map[string]any) (string, error)
 
 	// SendHeartbeat 发送一次坐席心跳（Event: MSP_HEARTBEAT，协议 §10）：
-	// agentMode（none/normal/dial_out/monitor）、isBusy、displayName 与 status
-	// 上报本地坐席/话务状态，expires 为 CTI 判定"不可用"的有效期
+	// agentMode（none/normal/dial_out/monitor）、isBusy、acw/isLeave、displayName
+	// 与 status 上报本地坐席/话务状态，expires 为 CTI 判定"不可用"的有效期
 	//（心跳间隔 × 2.5）。心跳没有业务回执，但 SIP 响应不是 200 时返回
 	// ErrCTINotifyUnsupported（服务端不支持 NOTIFY，话机应停止心跳并退出坐席）。
-	SendHeartbeat(agentMode string, isBusy bool, displayName, status string, expires time.Duration) error
+	SendHeartbeat(agentMode string, isBusy bool, displayName, status string, acw, leave bool, expires time.Duration) error
 }
 
 // AudioDevice 音频设备。

@@ -96,9 +96,9 @@ type ConferencePanel struct {
 }
 
 // CallPanelState call.panel 事件的负载（REQ-WS-023）。
+// 只含通话/会议面板快照；坐席状态（agentMode/isBusy/acw/isLeave）统一走
+// cti.agent 事件，不在这里重复（用户要求去重）。
 type CallPanelState struct {
-	AgentMode       string           `json:"agentMode"` // normal / dial_out / monitor
-	IsBusy          bool             `json:"isBusy"`    // 坐席置忙
 	CallPanel       *CallPanel       `json:"callPanel"` // 无通话时为 null
 	ConferencePanel *ConferencePanel `json:"conferencePanel"`
 }
@@ -142,8 +142,24 @@ func stampPanelTimes(c *Call, event string) {
 
 // publishCallPanel 发布通话面板快照（每次话务/坐席状态变化后调用）。
 // 无通话时 callPanel / conferencePanel 为 null——页面据此关闭面板。
+// **相同快照只推一次**：挂断时「坐席进入整理态」与「通话结束」两条路径可能先后
+// 触发，快照逐字节相同时跳过第二次（用户要求，避免网页/SDK 收到两条一样的）。
 func (a *App) publishCallPanel() {
-	a.bus.Publish("call.panel", a.PanelState())
+	st := a.PanelState()
+	b, err := json.Marshal(st)
+	if err != nil {
+		a.bus.Publish("call.panel", st)
+		return
+	}
+	key := string(b)
+	a.mu.Lock()
+	same := a.lastPanelJSON == key
+	a.lastPanelJSON = key
+	a.mu.Unlock()
+	if same {
+		return
+	}
+	a.bus.Publish("call.panel", st)
 }
 
 // PanelState 当前通话面板快照（wsapi 连接建立时也主动推一份）。
@@ -157,7 +173,7 @@ func (a *App) PanelState() *CallPanelState {
 	seen, srvCall, srvConf := a.srvPanelSeen, a.srvCallPanel, a.srvConfPanel
 	a.mu.RUnlock()
 
-	out := &CallPanelState{AgentMode: a.AgentMode(), IsBusy: a.AgentBusy()}
+	out := &CallPanelState{}
 	if seen {
 		out.CallPanel = srvCall
 		out.ConferencePanel = srvConf

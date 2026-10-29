@@ -48,17 +48,18 @@ type Options struct {
 // state 托盘运行期状态。图标与状态在 Run 之前就可能被设置（main 里先取
 // app.State() 快照再进消息循环），因此这里缓存下来，就绪时一并应用。
 var state struct {
-	mu         sync.Mutex
-	opts       Options
-	ready      bool   // systray 就绪（onReady 之后才能 SetIcon/SetTooltip）
-	registered bool   // 图标颜色：registered 才可能是绿/黄（否则红）
-	agentBusy  bool   // 已注册且坐席置忙 → 黄色图标
-	signedIn   bool   // 菜单：registered 或 registering → 「退出账号」，其余 → 「登录账号」
-	detail     string // 附加到提示里的信息（如本机号码）
-	lastOpen   time.Time
-	greenIcon  []byte
-	redIcon    []byte
-	yellowIcon []byte
+	mu          sync.Mutex
+	opts        Options
+	ready       bool   // systray 就绪（onReady 之后才能 SetIcon/SetTooltip）
+	registered  bool   // 图标颜色：registered 才可能是绿/黄/蓝（否则红）
+	agentStatus string // 坐席状态 free/busy/acw/leave（busy/leave→黄、acw→蓝）
+	signedIn    bool   // 菜单：registered 或 registering → 「退出账号」，其余 → 「登录账号」
+	detail      string // 附加到提示里的信息（如本机号码）
+	lastOpen    time.Time
+	greenIcon   []byte
+	redIcon     []byte
+	yellowIcon  []byte
+	blueIcon    []byte
 
 	accountItem *systray.MenuItem // 「登录账号 / 退出账号」菜单项（OnAccount 为 nil 时恒为 nil）
 }
@@ -73,6 +74,7 @@ func Run(o Options) {
 	state.greenIcon = loadIcon(appicon.PhoneGreenPNG(), appicon.ColorGreen)
 	state.redIcon = loadIcon(appicon.PhoneRedPNG(), appicon.ColorRed)
 	state.yellowIcon = loadIcon(appicon.PhoneYellowPNG(), appicon.ColorYellow)
+	state.blueIcon = loadIcon(appicon.PhoneBluePNG(), appicon.ColorBlue)
 	state.mu.Unlock()
 
 	// 左键点击：直接开控制台（**不弹菜单**）。必须在 systray.Run 之前设置：
@@ -166,11 +168,12 @@ func SetState(regState, detail string) {
 	applyAccountItem()
 }
 
-// SetAgentBusy 坐席置忙状态（已注册且置忙时托盘图标变黄，REQ-UI-011 修订）。
-// Run 之前调用也有效（状态缓存，就绪时统一应用）。
-func SetAgentBusy(busy bool) {
+// SetAgentStatus 坐席状态（REQ-UI-011 修订）：free/busy/acw/leave，已注册时
+// busy/leave 托盘图标变黄、acw 变蓝。Run 之前调用也有效（状态缓存，就绪时
+// 统一应用）。
+func SetAgentStatus(status string) {
 	state.mu.Lock()
-	state.agentBusy = busy
+	state.agentStatus = status
 	state.mu.Unlock()
 	applyIcon()
 }
@@ -205,12 +208,15 @@ func Quit() {
 // applyIcon 按当前注册状态换图标（托盘未就绪时只记状态，就绪时统一应用）。
 func applyIcon() {
 	state.mu.Lock()
-	ready, registered, busy := state.ready, state.registered, state.agentBusy
+	ready, registered, status := state.ready, state.registered, state.agentStatus
 	icon := state.redIcon
 	if registered {
 		icon = state.greenIcon
-		if busy {
+		switch status {
+		case "busy", "leave":
 			icon = state.yellowIcon
+		case "acw":
+			icon = state.blueIcon
 		}
 	}
 	state.mu.Unlock()
