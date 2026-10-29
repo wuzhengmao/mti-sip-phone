@@ -132,7 +132,23 @@ jobs:
           echo "== 3) 启动日志与崩溃记录 =="
           for i in $(seq 1 20); do grep -q "mti-sip-phone 启动" "$LOG" 2>/dev/null && break; sleep 1; done
           grep -q "mti-sip-phone 启动" "$LOG" || { echo "::error::没有启动日志"; tail -80 "$LOG" 2>/dev/null; exit 1; }
-          if [ -s "$APP_DIR/logs/crash.log" ]; then echo "::error::出现崩溃记录"; cat "$APP_DIR/logs/crash.log"; exit 1; fi
+          # crash.log 启动时**一定会写一行标题**（"=== 时间 banner ==="），只有标题行
+          # 说明正常；标题行之外还有内容才是真崩溃（logx/crash.go 的口径）。
+          if [ -f "$APP_DIR/logs/crash.log" ]; then
+            EXTRA="$(grep -vc '^=== ' "$APP_DIR/logs/crash.log" || true)"
+            if [ "${EXTRA:-0}" -gt 0 ]; then
+              echo "::error::崩溃记录里有内容"
+              cat "$APP_DIR/logs/crash.log"
+              exit 1
+            fi
+          fi
+          sleep 5
+          kill -0 "$PID" 2>/dev/null || {
+            echo "::error::进程启动后很快退出（疑似崩溃）"
+            tail -120 "$LOG" 2>/dev/null
+            cat "$APP_DIR/logs/crash.log" 2>/dev/null
+            exit 1
+          }
 
           echo "== 4) LaunchServices 收录 =="
           LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
