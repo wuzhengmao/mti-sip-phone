@@ -103,8 +103,9 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 ./scripts/release.sh --darwin-ci       # 同时经 GitHub Actions 编 macOS 产物并一起发布
 ```
 
-- **macOS 产物**（`--darwin-ci`）：需要在环境里设 `GH_TOKEN`（能触发 Actions 的 PAT）。
-  脚本先触发 `.github/workflows/build.yml`（正式版带 `SIP_PHONE_RELEASE=1`），和本地容器
+- **macOS 产物**（`--darwin-ci`）：默认使用 git 凭据助手里 github.com 的令牌（能 `git push`
+  到该仓库就有），也可用环境变量 `GH_TOKEN` 显式指定。脚本先触发
+  `.github/workflows/build.yml`（正式版带 `SIP_PHONE_RELEASE=1`），和本地容器
   编译**并行**，跑完自动下载两个架构的裸二进制与 universal DMG，一起打包上传。发布物新增
   `mti-sip-phone-macos-x64` / `-arm64`（裸 Mach-O，自动更新用）与
   `mti-sip-phone-macos-universal.dmg`（首次安装包）。

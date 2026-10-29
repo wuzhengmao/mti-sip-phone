@@ -21,8 +21,9 @@ fi
 #       同名环境变量可覆盖（UPDATE_SITE / APP_ID / UPLOAD_TOKEN / CA_CERT /
 #       INSECURE_TLS）。站点启用 TLS 时 UPDATE_SITE 必须直接写 https 地址
 #       （HTTP 端口会 301 跳转，而 POST 跟随 301 会退化成 GET）。
-#       --darwin-ci 另需 GH_TOKEN（GitHub PAT，能触发/读取 Actions）与可选
-#       GH_REPO（默认 wuzhengmao/mti-sip-phone）、GH_REF（默认当前分支）。
+#       --darwin-ci 需要能触发/读取 Actions 的 GitHub 令牌：**不设 GH_TOKEN 也行**——
+#       脚本会从 git 凭据助手取（能 git push 到该仓库就取得到）；也可显式给
+#       GH_TOKEN，或用 GH_REPO（默认 wuzhengmao/mti-sip-phone）、GH_REF（默认当前分支）。
 #       **脚本不会提交或推送代码**：CI 编的是远端分支的最新提交，本地 HEAD 必须
 #       已经推上去（不一致时脚本会直接报错，不会干等）。
 #
@@ -59,7 +60,8 @@ usage() {
   ./scripts/release.sh --title "体验优化版" --mandatory
   ./scripts/release.sh --darwin-ci      # 同时经 GitHub Actions 编 macOS 产物并一起发布
 选项：--pre / --dry-run / --no-build / --only <full|no-ui> / -v <版本> / --title <标题> / --channel <通道> / --mandatory
-      --darwin-ci                       需要 GH_TOKEN（GitHub PAT）；可选 GH_REPO / GH_REF
+      --darwin-ci                       不需要设 GH_TOKEN：默认取 git 凭据助手的令牌
+                                        （可选 GH_REPO / GH_REF 覆盖默认仓库与分支）
 配置：**两个应用各一份**——release/release.conf（完整版 mti-sip-phone）与
       release/release-no-ui.conf（无 UI 版 mti-sip-phone-no-ui），各自一份上传令牌；
       两份都读同名的环境变量覆盖：
@@ -217,8 +219,21 @@ cleanup_gh() {
 trap cleanup_gh EXIT
 
 if [ "$DARWIN_CI" = 1 ] && [ -z "${GH_TOKEN:-}" ]; then
-    echo "--darwin-ci 需要环境变量 GH_TOKEN（GitHub PAT，需 Actions 读写权限）" >&2
-    echo "  export GH_TOKEN=<token>            # 可选 GH_REPO / GH_REF 覆盖默认仓库与分支" >&2
+    # GH_TOKEN 没设时退回 git 的凭据助手：能 git push 到该仓库的机器上，
+    # 这里就能拿到同一份令牌（Git Credential Manager / 系统钥匙串 / store）。
+    GH_HOST="${GH_REPO%%/*}"
+    GH_TOKEN="$(printf 'protocol=https\nhost=%s\n\n' "$GH_HOST" |
+        GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null |
+        sed -n 's/^password=//p')"
+    if [ -n "$GH_TOKEN" ]; then
+        echo "GH_TOKEN 未设置：已从 git 凭据助手取到 $GH_HOST 的令牌。"
+    fi
+fi
+if [ "$DARWIN_CI" = 1 ] && [ -z "${GH_TOKEN:-}" ]; then
+    echo "--darwin-ci 需要能访问 Actions 的 GitHub 令牌，以下二选一：" >&2
+    echo "  1) 让 git 记住凭据（git push 过该仓库后一般就有）：git credential approve" >&2
+    echo "  2) 显式设置：bash: export GH_TOKEN=<token>；PowerShell: \$env:GH_TOKEN=\"<token>\"" >&2
+    echo "  （令牌需 Actions 读写权限；可选 GH_REPO / GH_REF 覆盖默认仓库与分支）" >&2
     exit 1
 fi
 

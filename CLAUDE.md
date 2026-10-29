@@ -140,9 +140,11 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 （`release=true` → `SIP_PHONE_RELEASE=1`），**与本地容器编译并行**，跑完用 REST API
 下载 `darwin-binaries`（两个架构的裸二进制）与 `macos-dmg`（universal DMG），裸二进制
 放进 `dist/`、DMG 另存为 `dist/macos-dmg-{full,no-ui}.dmg`（发布文件名不含版本号）。
-需要 `GH_TOKEN`（能触发/读取 Actions 的 PAT），可选 `GH_REPO` / `GH_REF`（默认
-`wuzhengmao/mti-sip-phone` 与当前分支）。**CI 编的是已提交的 HEAD**，工作区有未提交
-改动时脚本会提示。发布物里 macOS 的三项：`mti-sip-phone-macos-x64` / `-arm64`
+需要能触发/读取 Actions 的 GitHub 令牌——**不设 `GH_TOKEN` 也行**：脚本会用
+`git credential fill` 从 git 凭据助手取（能 `git push` 到该仓库的机器就取得到，实测可用）；
+也可显式给 `GH_TOKEN`，或用 `GH_REPO`（默认 `wuzhengmao/mti-sip-phone`）、`GH_REF`（默认当前分支）。
+**CI 编的是已提交的 HEAD**，工作区有未提交改动时脚本会提示；**本地 HEAD 必须已推到远端
+该分支**，否则脚本在触发前直接报错（不会干等）。发布物里 macOS 的三项：`mti-sip-phone-macos-x64` / `-arm64`
 （裸 Mach-O、`kind=portable`，自动更新下载的就是它——**不做 universal**，按 GOARCH
 分架构更小）与 `mti-sip-phone-macos-universal.dmg`（`kind=installer`，首次安装用）；
 `release.json` 的 `kind` 按产物逐条输出（其余平台仍是 portable）。
