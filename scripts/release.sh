@@ -221,10 +221,11 @@ trap cleanup_gh EXIT
 if [ "$DARWIN_CI" = 1 ] && [ -z "${GH_TOKEN:-}" ]; then
     # GH_TOKEN 没设时退回 git 的凭据助手：能 git push 到该仓库的机器上，
     # 这里就能拿到同一份令牌（Git Credential Manager / 系统钥匙串 / store）。
-    GH_HOST="${GH_REPO%%/*}"
+    # 注意 host 是 github.com（不是 GH_REPO 的第一段），取不到也不能让 set -e 退出。
+    GH_HOST="${GH_HOST:-github.com}"
     GH_TOKEN="$(printf 'protocol=https\nhost=%s\n\n' "$GH_HOST" |
         GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null |
-        sed -n 's/^password=//p')"
+        sed -n 's/^password=//p')" || true
     if [ -n "$GH_TOKEN" ]; then
         echo "GH_TOKEN 未设置：已从 git 凭据助手取到 $GH_HOST 的令牌。"
     fi
