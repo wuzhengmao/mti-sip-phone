@@ -405,6 +405,11 @@ macOS 与 Windows/Linux 的三处结构性差异，改相关代码前必读：
   `selfinstall.TargetDir()` 与配置目录是同一处（与 Windows 同口径）。测试里
   重定向它要改 **`HOME`**（`selfinstall_test.go` 的 `setTargetBase`），不是
   XDG 变量。
+- **路径比较要按符号链接解析后的形式**：macOS 的 `/var → /private/var` 会让
+  「临时目录下的 exe 不复制」「已在固定目录不复制」两条规则漏判（CI 实测：
+  `t.TempDir()` 给 `/var/folders/…`，exe 解析后是 `/private/var/folders/…`）。
+  `selfinstall.resolvePath` 逐级解析到最近的存在目录再拼回剩余部分（首次安装时
+  固定目录还不存在，直接 `EvalSymlinks` 会失败）——新增的路径比较都用它。
 - 开机自启是 `~/Library/LaunchAgents/cn.mti.sip-phone.plist`（`RunAtLoad` +
   `LimitLoadToSessionType=Aqua`）。**只写文件、不 bootstrap**：bootout/bootstrap
   会在程序运行时再拉起一份（撞单实例锁），对下次登录也没有额外作用。

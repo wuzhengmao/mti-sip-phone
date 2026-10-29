@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -50,6 +51,13 @@ var instanceSlot = flag.Int("instance", 0, "实例槽位（多实例沙箱，0=�
 var showVersion = flag.Bool("version", false, "打印版本号后退出")
 
 func main() {
+	// macOS：AppKit 只能在**主线程**上使用。仅托盘无 UI 版的 systray.Run 只做
+	// LockOSThread（锁住"调用它的当前线程"），Fyne 的 GLFW 同理——main 一开始
+	// 就把主 goroutine 锁在主线程上，才能保证那个"当前线程"就是主线程。
+	// 其余平台无副作用（本行不会执行）。
+	if runtime.GOOS == "darwin" {
+		runtime.LockOSThread()
+	}
 	flag.Parse()
 	if *showVersion {
 		fmt.Printf("mti-sip-phone %s (%s)\n", core.Version, core.Platform())
