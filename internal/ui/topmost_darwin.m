@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #include <math.h>
+#include <stdint.h>
 
 // macOS 通话面板/更新提示窗的窗口控制（AppKit）。全部函数都必须**在主线程**
 // 调用——Go 侧统一用 fyne.DoAndWait 排队（见 topmost_darwin.go）。
@@ -21,8 +22,8 @@ static double mti_scale_for(NSWindow *win) {
 
 // mti_style_panel 设成悬浮工具窗：置顶、所有桌面可见、不进 Mission Control
 // 与 Cmd+` 窗口切换；floating=0 时恢复普通层级。
-void mti_style_panel(void *w, int floating) {
-    NSWindow *win = (NSWindow *)w;
+void mti_style_panel(uintptr_t w, int floating) {
+    NSWindow *win = (NSWindow *)w;  // uintptr_t → NSWindow*（Go 侧传 uintptr，避免 unsafe.Pointer 转换）
     if (win == nil) {
         return;
     }
@@ -35,8 +36,8 @@ void mti_style_panel(void *w, int floating) {
     [win setHasShadow:YES];
 }
 
-void mti_set_level(void *w, int floating) {
-    NSWindow *win = (NSWindow *)w;
+void mti_set_level(uintptr_t w, int floating) {
+    NSWindow *win = (NSWindow *)w;  // uintptr_t → NSWindow*（Go 侧传 uintptr，避免 unsafe.Pointer 转换）
     if (win == nil) {
         return;
     }
@@ -45,8 +46,8 @@ void mti_set_level(void *w, int floating) {
 
 // mti_corner 把窗口放到工作区右下角（visibleFrame 已扣掉菜单栏与 Dock），
 // dx 是多实例槽位带来的整列左移量（point）。
-void mti_corner(void *w, int dx) {
-    NSWindow *win = (NSWindow *)w;
+void mti_corner(uintptr_t w, int dx) {
+    NSWindow *win = (NSWindow *)w;  // uintptr_t → NSWindow*（Go 侧传 uintptr，避免 unsafe.Pointer 转换）
     if (win == nil) {
         return;
     }
@@ -60,8 +61,8 @@ void mti_corner(void *w, int dx) {
 }
 
 // mti_frame 读窗口矩形，换算成「主屏左上原点、物理像素」。
-void mti_frame(void *w, int *x, int *y, int *wpx, int *hpx) {
-    NSWindow *win = (NSWindow *)w;
+void mti_frame(uintptr_t w, int *x, int *y, int *wpx, int *hpx) {
+    NSWindow *win = (NSWindow *)w;  // uintptr_t → NSWindow*（Go 侧传 uintptr，避免 unsafe.Pointer 转换）
     if (win == nil) {
         return;
     }
@@ -76,8 +77,8 @@ void mti_frame(void *w, int *x, int *y, int *wpx, int *hpx) {
 }
 
 // mti_move 按「主屏左上原点、物理像素」移动窗口。
-void mti_move(void *w, int x, int y) {
-    NSWindow *win = (NSWindow *)w;
+void mti_move(uintptr_t w, int x, int y) {
+    NSWindow *win = (NSWindow *)w;  // uintptr_t → NSWindow*（Go 侧传 uintptr，避免 unsafe.Pointer 转换）
     if (win == nil) {
         return;
     }

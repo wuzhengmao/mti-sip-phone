@@ -449,6 +449,10 @@ macOS 与 Windows/Linux 的三处结构性差异，改相关代码前必读：
   与 `/* #cgo … */` 紧邻，会被当成 C 代码解析（CI 实测报
   `character <U+3001> not allowed in an identifier`）。写成
   「`//` 说明 + 空行 + `/* */` + `import "C"`」。
+- **传递不透明句柄（如 `driver.MacWindowContext.NSWindow`）时按 `uintptr_t` 走，不要转
+  `unsafe.Pointer`**：Go 侧只有 `uintptr`，`unsafe.Pointer(h)` 会被 `go vet` 的
+  unsafeptr 检查判为 `possible misuse of unsafe.Pointer`（CI 的 vet 直接失败）。
+  C 侧签名用 `uintptr_t`、Go 侧传 `C.uintptr_t(h)`，在 C 里再转回 `NSWindow *`。
 
 ## 视频呼叫
 

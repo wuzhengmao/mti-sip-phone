@@ -20,12 +20,15 @@ package ui
 /*
 #cgo darwin LDFLAGS: -framework Cocoa
 #include <stdlib.h>
+#include <stdint.h>
 
-void mti_style_panel(void *win, int floating);
-void mti_set_level(void *win, int floating);
-void mti_corner(void *win, int dx);
-void mti_frame(void *win, int *x, int *y, int *w, int *h);
-void mti_move(void *win, int x, int y);
+// 窗口指针按 uintptr_t 传：Go 侧只有 uintptr（driver.MacWindowContext.NSWindow），
+// 转 unsafe.Pointer 会被 go vet 的 unsafeptr 检查判为 "possible misuse"。
+void mti_style_panel(uintptr_t win, int floating);
+void mti_set_level(uintptr_t win, int floating);
+void mti_corner(uintptr_t win, int dx);
+void mti_frame(uintptr_t win, int *x, int *y, int *w, int *h);
+void mti_move(uintptr_t win, int x, int y);
 int  mti_cursor(int *x, int *y);
 void mti_screen(int *x, int *y, int *w, int *h);
 void mti_workarea(int *x, int *y, int *w, int *h);
@@ -36,7 +39,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/driver"
@@ -107,7 +109,7 @@ func darwinStylePanel(h uintptr, floating bool) {
 		if floating {
 			f = 1
 		}
-		C.mti_style_panel(unsafe.Pointer(h), f)
+		C.mti_style_panel(C.uintptr_t(h), f)
 	})
 }
 
@@ -117,18 +119,18 @@ func darwinSetLevel(h uintptr, floating bool) {
 		if floating {
 			f = 1
 		}
-		C.mti_set_level(unsafe.Pointer(h), f)
+		C.mti_set_level(C.uintptr_t(h), f)
 	})
 }
 
 func darwinCorner(h uintptr, dx int) {
-	fyne.DoAndWait(func() { C.mti_corner(unsafe.Pointer(h), C.int(dx)) })
+	fyne.DoAndWait(func() { C.mti_corner(C.uintptr_t(h), C.int(dx)) })
 }
 
 func darwinFrame(h uintptr) (x, y, w, hh int, ok bool) {
 	fyne.DoAndWait(func() {
 		var cx, cy, cw, ch C.int
-		C.mti_frame(unsafe.Pointer(h), &cx, &cy, &cw, &ch)
+		C.mti_frame(C.uintptr_t(h), &cx, &cy, &cw, &ch)
 		if cw > 0 && ch > 0 {
 			x, y, w, hh, ok = int(cx), int(cy), int(cw), int(ch), true
 		}
@@ -137,7 +139,7 @@ func darwinFrame(h uintptr) (x, y, w, hh int, ok bool) {
 }
 
 func darwinMove(h uintptr, x, y int) {
-	fyne.DoAndWait(func() { C.mti_move(unsafe.Pointer(h), C.int(x), C.int(y)) })
+	fyne.DoAndWait(func() { C.mti_move(C.uintptr_t(h), C.int(x), C.int(y)) })
 }
 
 func darwinCursor() (x, y int, ok bool) {
