@@ -29,6 +29,7 @@ import (
 	"mti-sip-phone/internal/contacts"
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
+	"mti-sip-phone/internal/macurl"
 	"mti-sip-phone/internal/protocol"
 	"mti-sip-phone/internal/selfinstall"
 	"mti-sip-phone/internal/single"
@@ -45,8 +46,19 @@ var headless = flag.Bool("headless", false, "无界面模式（不启动 GUI）"
 // 查询参数 instance=N 指定（见 internal/protocol）。
 var instanceSlot = flag.Int("instance", 0, "实例槽位（多实例沙箱，0=主实例）")
 
+// showVersion 打印版本与目标平台后退出（CI 冒烟测试用：不需要图形会话）。
+var showVersion = flag.Bool("version", false, "打印版本号后退出")
+
 func main() {
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("mti-sip-phone %s (%s)\n", core.Version, core.Platform())
+		return
+	}
+
+	// macOS 的 sip:// 链接走苹果事件（点击链接时系统不给命令行参数）：处理器
+	// 要尽早装上，否则"点链接冷启动"的那一次会漏掉。其余平台为空操作。
+	macurl.Start()
 
 	// 1. 解析 sip:// / sips:// 协议拉起参数（Windows 下形如 "proto:sips://..."）
 	sipURL := protocol.FindURL(os.Args[1:])
@@ -358,6 +370,14 @@ func main() {
 	if sipURL != "" {
 		handleLaunchArgs(app, cfg, []string{sipURL}, nil)
 	}
+
+	// 8.5 macOS：接上苹果事件的 sip:// 链接（点击链接拉起/唤醒本实例时，
+	// 系统是把 URL 投递给运行中的应用，而不是重新起进程带参数——那条路走
+	// 单实例转发，这条路走这里）。其余平台为空操作。
+	macurl.SetHandler(func(u string) {
+		logx.Logger().Info("收到苹果事件的 sip:// 链接", "url", u)
+		go handleLaunchArgs(app, cfg, []string{u}, nil)
+	})
 
 	// 启动信息：GUI 子系统构建下无控制台（REQ-UI-013），统一写入日志；
 	// 仅在 headless 模式（控制台子系统）下打印到标准输出。

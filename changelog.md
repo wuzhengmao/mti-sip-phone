@@ -6,6 +6,22 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
+## [待发布]
+
+### 新增
+
+- **macOS 平台支持（构建 / 安装 / 协议 / 打包 / CI）**：
+  - **构建**：`./build.sh --target darwin`（或 `darwin-arm64` / `darwin-amd64` / `macos`）在 macOS 宿主上**一次出 amd64 与 arm64 两个架构**（Apple clang 的 `-arch` 跨编，不需要第二台机器），完整版与仅托盘无 UI 版各一份：`dist/sip-phone-darwin-<arch>`、`dist/sip-phone-no-ui-darwin-<arch>`。固定为基础版（G.711/G.722 + 音频设备 + 界面/托盘 + 信令 + WS）——macOS 摄像头采集未实现（`internal/video/camera_other.go`），第三方视频/Opus/AEC 静态库也还没有 darwin 版本。另外修正：非 Linux 宿主不再误编出 `linux-*` 产物（`linux-native` 目标加宿主判断）。
+  - **自安装（REQ-UPD-025）**：裸二进制直接运行时在 `~/Library/Application Support/mti-sip-phone/` 生成 **`.app` 应用包**（`MTI软电话.app` / 完整版 `MTI软电话-完整版.app`）——可执行文件进 `Contents/MacOS/`、`Info.plist` 写明 bundle 标识/版本/`LSUIElement`/麦克风与摄像头用途/`CFBundleURLTypes`、`Contents/Resources/AppIcon.icns` 由 `internal/appicon.ICNS`（纯 Go，多尺寸 PNG 内嵌）生成——再从包内可执行文件重启；桌面放指向该包的符号链接。**已在任一 `.app` 内不再搬迁**（DMG 挂载点 `/Volumes/…` 与 `AppTranslocation` 的临时路径除外，仍会装到固定目录）。`Info.plist`/图标内容没变就不重写，避免每次启动刷新 LaunchServices 的图标缓存。
+  - **sip:// / sips:// 协议（REQ-PROTO-006）**：`Info.plist` 的 `CFBundleURLTypes` 声明两个 scheme → `lsregister -f` 让 LaunchServices 收录 → `LSSetDefaultHandlerForURLScheme` 设为默认处理器。**URL 走苹果事件而不是命令行参数**：新增 `internal/macurl` 在 main 最早期装上 `NSAppleEventManager` 的 `kAEGetURL` 处理器（事件早于核心组装时先缓存、接上回调后补发），接到后复用 `handleLaunchArgs`（写账户配置 → 注册）。裸二进制（不在 `.app` 内）注册会得到明确错误。
+  - **开机自启**：`~/Library/LaunchAgents/cn.mti.sip-phone.plist`（`RunAtLoad` + `LimitLoadToSessionType=Aqua`），只写文件、不扰动 launchd 的已加载状态。
+  - **打包（REQ-REL-007）**：`scripts/package-macos.sh` 出新版——`--arch universal` 用 `lipo` 合并两个架构并**重新 ad-hoc 签名**（lipo 会让切片签名失效，Apple Silicon 上签名无效的二进制无法执行），`.app` 再整体 ad-hoc 签名；`Info.plist` 补齐 `sip`/`sips` URL scheme（与自安装同一套字段）；DMG 内含「应用程序」快捷方式。
+  - **CI（REQ-REL-008）**：`.github/workflows/build.yml` 在 macOS runner 上跑 `go vet ./...` → `./build.sh --target darwin` → 关键包单测 → `--version` 冒烟 → `package-macos.sh --arch universal --variant both` → 校验 `lipo -info` / `plutil -lint` 并上传两个 DMG。
+  - **自动更新**：macOS 替换包内可执行文件后重做 ad-hoc 签名（`internal/updater/resign_darwin.go`，失败只告警）。
+  - **新增 `-version` 命令行开关**：打印版本与目标平台后退出（不需要图形会话，供 CI 冒烟）。
+- **`internal/macbundle`**：macOS 应用包的目录结构、`Info.plist`、`AppIcon.icns` 与 LaunchServices 注册的统一实现（自安装、协议注册、打包脚本三处同一套字段与名字）。
+- **`internal/appicon.ICNS`**：纯 Go 生成 macOS `.icns`（icp4/icp5/icp6/ic07/ic08/ic09 六档 PNG 内嵌），无需 sips/iconutil，可跨平台单测。
+
 ## [1.0.18] - 2026-10-25
 
 ### 新增

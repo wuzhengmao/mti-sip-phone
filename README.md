@@ -18,10 +18,13 @@
 | --- | --- |
 | Windows | x86（32 位）/ x86_64 / arm64（基础版，无视频/Opus/AEC） |
 | Linux | x86_64 / arm64 |
+| macOS | arm64 / x86_64（基础版：无视频/Opus/AEC；可打 universal 包） |
 
 > **运行要求**：Windows 10 及以上（Go 1.24+ 的运行时不再支持 Windows 7/8——它用了 `ProcessPrng`
 > 这类 Win10 才有的 API）；Windows 产物是静态单文件，不依赖任何第三方 DLL。
 > Linux 产物依赖系统的图形/音频库（任何带桌面的发行版都具备），glibc 不低于构建机的版本。
+> macOS 要求 12 及以上；应用未做 Apple 开发者签名/公证，首次打开需右键「打开」或
+> `xattr -cr /Applications/MTI软电话.app` 清除隔离属性。
 
 ## 构建与运行
 
@@ -60,6 +63,16 @@ build.bat
 #   （386/arm64 同理，各出两份）
 #   注：仅托盘无 UI 版不链接 fyne/GLFW，所以 Linux 交叉**不需要图形栈开发包**
 
+# macOS（须在 macOS 上构建；一次出 amd64 + arm64，完整版与无 UI 版各一份）
+./build.sh --target darwin          # 也可 darwin-arm64 / darwin-amd64 / macos
+#   dist/sip-phone-darwin-<arch> / dist/sip-phone-no-ui-darwin-<arch>
+# 打成 .app + DMG（默认仅托盘无 UI；--variant both 同时出完整版）
+./scripts/package-macos.sh --arch universal
+#   dist/macos/MTI软电话.app、MTI软电话-完整版.app、MTI-SIP-Phone-*-darwin-universal.dmg
+#   universal = lipo 合并两架构后重新 ad-hoc 签名；DMG 拖进「应用程序」即安装
+# 也提供 GitHub Actions（.github/workflows/build.yml）：push 后在 macOS runner 上
+# 编译、跑测试并上传 universal DMG。
+
 # 手动构建（Windows 需将 MinGW 的 gcc 加入 PATH，或用 CC 指定）
 go build -ldflags "-s -w -H=windowsgui" -o dist/sip-phone.exe ./cmd/sip-phone  # 无控制台
 
@@ -73,7 +86,7 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 - 系统托盘常驻：单击托盘图标唤出主界面（拨号 / 配置），关闭窗口=最小化到托盘；
   **仅托盘无 UI 版**则左键点托盘 → 用系统默认浏览器打开控制台
 - 网页控制台：http://127.0.0.1:8765/ （WS 端口可配置，被占用自动 +1；无 token 鉴权）
-- 配置文件：`%APPDATA%/mti-sip-phone/config.json`（Windows）/ `~/.config/mti-sip-phone/config.json`（Linux）
+- 配置文件：`%APPDATA%/mti-sip-phone/config.json`（Windows）/ `~/.config/mti-sip-phone/config.json`（Linux）/ `~/Library/Application Support/mti-sip-phone/config.json`（macOS）
 - 日志文件：配置目录下 `logs/sip-phone.log`（按大小滚动，含 SIP 信令）
 - sip:// 协议：网页链接 `sip://账号:密码@服务器:5060` 拉起软电话并写入注册信息
 
@@ -142,6 +155,13 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 - 无界面纯 Go 构建（脚本已不产出，标签仍保留）：`-tags "headless noaudio"`（跳过界面层与音频后端，仅本地 WS 服务）
 
 平台差异：通话面板的「无标题栏 + 吸附工作区右下角 + 不进任务栏」在 Windows 用 Win32 实现，Linux 用 X11 实现（`_MOTIF_WM_HINTS` / `_NET_WM_STATE` / `_NET_WORKAREA`），**仅在 X11（含 XWayland）会话生效**——Wayland 不允许客户端自定位窗口、去装饰也由合成器决定。托盘的「退出」项在 Linux 上会标记为退出项（Fyne 不再自动追加 Quit 项），Windows 侧保持原样。
+
+macOS 的平台差异（详见 [CLAUDE.md](CLAUDE.md) 的「macOS（darwin）」一节）：
+
+- **安装形态是 `.app` 应用包**（程序图标与 sip:// 协议只能来自 `Info.plist`）。裸二进制直接运行时会在 `~/Library/Application Support/mti-sip-phone/` 生成应用包（完整版 `MTI软电话-完整版.app` / 无 UI 版 `MTI软电话.app`）、在桌面放指向它的链接，再从包内重启；已在 `.app` 内（如拖进「应用程序」）则不搬迁。
+- **sip:// / sips:// 通过苹果事件接收**（macOS 点链接时系统不传命令行参数），由 `internal/macurl` 在启动早期注册处理器。
+- **开机自启**写 `~/Library/LaunchAgents/cn.mti.sip-phone.plist`。
+- macOS 产物为**基础版**（G.711/G.722 + 音频 + 界面/托盘 + 信令 + WS）：摄像头采集尚未实现，视频/Opus/AEC 静态库暂无 darwin 版本。
 
 ## 网页接入示例
 

@@ -5,6 +5,9 @@
 //   - Windows：写 HKCU\Software\Classes（sip、sips 两个方案 + ProgID + Capabilities
 //     声明），成为「默认应用」候选；默认处理器由用户在系统设置中手动选择（防劫持机制）
 //   - Linux：写 ~/.local/share/applications 下的 .desktop 文件 + mimeapps.list
+//   - macOS：靠 .app 应用包（Info.plist 的 CFBundleURLTypes）——lsregister 收录
+//     后用 LaunchServices 设默认处理器（见 register_darwin.go）。URL 由系统以
+//     Apple Event 投递，不走命令行参数（见 internal/macurl）。
 package protocol
 
 import (
@@ -140,6 +143,8 @@ func RegisterProtocol(exePath string) error {
 		return registerWindows(exePath)
 	case "linux":
 		return registerLinux(exePath)
+	case "darwin":
+		return registerDarwin(exePath)
 	default:
 		return fmt.Errorf("暂不支持的系统: %s", runtime.GOOS)
 	}

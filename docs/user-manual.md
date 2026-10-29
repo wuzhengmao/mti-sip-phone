@@ -26,6 +26,7 @@
 | --- | --- |
 | Windows | **要求 Windows 10 及以上**（不支持 Windows 7/8）。单文件、**免安装** |
 | Linux | 需要带桌面的发行版（X11 或 Wayland）；glibc 版本不低于打包环境 |
+| macOS | **要求 12 及以上**（Apple Silicon 与 Intel 都支持）。应用**未做 Apple 签名/公证**，首次打开请**右键 → 打开**（或终端执行 `xattr -cr <应用>.app`），之后正常双击即可。视频通话暂不支持（摄像头采集未实现） |
 
 - 程序是**单个可执行文件**，下载后放到任意目录双击即可，**不需要安装、不写注册表**
   （Windows 版的"开机自启"会写当前用户注册表项，见下）。
@@ -33,10 +34,15 @@
   `%APPDATA%\mti-sip-phone\`、Linux `~/.local/share/mti-sip-phone/`）、**在桌面生成
   「MTI 软电话」快捷方式**，并从那里继续运行——以后无论从下载目录、桌面还是别的什么地方启动都一样，下载的文件
   被清理工具删掉也不影响使用（自动更新、开机自启、sip:// 拉起都围绕固定位置）。
+  **macOS** 稍有不同：程序图标和 sip:// 处理只能来自 `.app` 应用包，所以首次运行会在
+  `~/Library/Application Support/mti-sip-phone/` 生成**应用包**（`MTI软电话.app` /
+  完整版 `MTI软电话-完整版.app`）、在桌面放一个指向它的链接，再从包内重启；也可以直接使用
+  分发页的 **DMG**——把应用拖进「应用程序」即可，不会再复制到别处。
 - 启动后**常驻系统托盘**（Windows 在任务栏右下角；Linux 在托盘区），不占用任务栏。
   **关闭主窗口 = 隐藏到托盘**，程序继续运行（这是设计行为，不是退出）。
 - **退出**请用托盘图标右键菜单里的「退出」。
-- **开机自启**：默认开启（Windows 写当前用户注册表启动项；Linux 写 `~/.config/autostart`）。
+- **开机自启**：默认开启（Windows 写当前用户注册表启动项；Linux 写 `~/.config/autostart`；
+  macOS 写 `~/Library/LaunchAgents/cn.mti.sip-phone.plist`）。
   不需要时在配置页取消勾选。
 - 数据目录（配置、通话记录、通信录、日志，以及自安装后的程序本体）：
   - Windows：`%APPDATA%\mti-sip-phone\`

@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# mti-sip-phone Linux 构建脚本：本机 Linux GUI 产物 + Windows GUI / 对侧 Linux 架构交叉产物，输出到 dist/
+# mti-sip-phone 构建脚本：本机 Linux / macOS 产物 + Windows / 对侧 Linux 交叉产物，输出到 dist/
 #
 # 用法：
-#   ./build.sh                         全部 5 个目标 × 2 个变体（发布用）
+#   ./build.sh                         全部目标 × 2 个变体（发布用；宿主能编的才出）
 #   ./build.sh --target windows-amd64  只出 Windows amd64（完整版 + 无 UI 版，**测试用**，
 #                                      几十秒完成）；目标名见下方 want_target 附近
+#   ./build.sh --target darwin         只出 macOS 两个架构（amd64 + arm64，universal 打包用）
+#   ./build.sh --target darwin-arm64   只出本机 macOS arm64（在 Apple Silicon 上跑）
 #
-# 依赖：Go 1.24+、系统 gcc（CGO）
+# 依赖：Go 1.24+、系统 gcc/clang（CGO）
+#   - macOS 本机：Xcode Command Line Tools（clang）。darwin 目标只在 macOS 宿主上构建，
+#     但会同时编 amd64 与 arm64（Apple clang 原生支持 -arch 跨架构，universal 包需要两份）。
 #   - 交叉 Windows GUI 需 mingw-w64（amd64/arm64 主机均有包）：
 #       Debian/Ubuntu: sudo apt install gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
 #       Fedora:        sudo dnf install mingw64-gcc mingw32-gcc
@@ -40,6 +44,7 @@ cd "$(dirname "$0")"
 # 可重复或逗号分隔；不带该参数 = 全部目标（发布用）。
 # 目标名：linux-native / linux-cross / windows-amd64 / windows-386 / windows-arm64
 #         / linux（= native + cross）
+#         / darwin-amd64 / darwin-arm64 / darwin-native / darwin（= 两个 mac 架构）/ macos
 #         也可用架构别名 linux-amd64 / linux-arm64：与本机架构相同 → linux-native，
 #         对侧架构 → linux-cross。
 TARGETS=""
@@ -54,11 +59,11 @@ done
 # 目标名拼错时不能静默什么都不构建（踩过：--target linux-amd64 旧版直接空跑）。
 if [ -n "$TARGETS" ]; then
     for t in $(printf '%s' "$TARGETS" | tr ',' ' '); do
-        case " linux linux-native linux-cross linux-amd64 linux-arm64 windows-amd64 windows-386 windows-arm64 " in
+        case " linux linux-native linux-cross linux-amd64 linux-arm64 windows-amd64 windows-386 windows-arm64 darwin darwin-native darwin-amd64 darwin-arm64 macos " in
             *" $t "*) ;;
             *)
                 echo "未知目标：$t" >&2
-                echo "可用目标：linux / linux-native / linux-cross / linux-amd64 / linux-arm64 / windows-amd64 / windows-386 / windows-arm64" >&2
+                echo "可用目标：linux / linux-native / linux-cross / linux-amd64 / linux-arm64 / windows-amd64 / windows-386 / windows-arm64 / darwin / darwin-native / darwin-amd64 / darwin-arm64 / macos" >&2
                 exit 2
                 ;;
         esac
@@ -71,6 +76,7 @@ want_target() {
         *",$1,"*) return 0 ;;
     esac
     # 架构别名：linux-amd64 / linux-arm64（本机架构 → native，对侧 → cross）
+    # darwin-amd64 / darwin-arm64 / macos / darwin → darwin-<arch>（只在 macOS 宿主上出）
     case "$1" in
         linux-native)
             if [ -n "${NATIVE_ARCH:-}" ]; then
@@ -85,6 +91,18 @@ want_target() {
                     *",linux-$CROSS_ARCH,"*) return 0 ;;
                 esac
             fi
+            ;;
+        darwin-amd64|darwin-arm64)
+            case ",$TARGETS," in
+                *",darwin,"*|*",macos,"*) return 0 ;;
+            esac
+            _darch="${1#darwin-}"
+            case ",$TARGETS," in
+                *",darwin-$_darch,"*) return 0 ;;
+                *",darwin-native,"*)
+                    [ "${NATIVE_ARCH:-}" = "$_darch" ] && return 0
+                    ;;
+            esac
             ;;
     esac
     return 1
@@ -116,6 +134,7 @@ LDFLAGS="$LDFLAGS -X mti-sip-phone/internal/core.Version=${APP_VERSION}"
 echo "版本：${APP_VERSION}$([ "${SIP_PHONE_RELEASE:-}" = "1" ] && echo "（正式版）" || echo "（开发版，-rc）")"
 
 NATIVE_ARCH="$(go env GOARCH)"
+HOST_OS="$(uname -s)"
 
 # ---------- 交叉目标探测 ----------
 
@@ -445,16 +464,21 @@ out_name() {
     printf 'dist/sip-phone-%s%s-%s%s' "$VAR_INFIX" "$1" "$2" "$3"
 }
 
-# step_label 统一的进度行（共 10 步：5 个目标 × 2 个变体，跳过也算一步）。
+# step_label 统一的进度行（共 14 步：7 个目标 × 2 个变体，跳过也算一步）。
 STEP=0
 step_label() {
     STEP=$((STEP + 1))
-    echo "[$STEP/10] $*"
+    echo "[$STEP/14] $*"
 }
 
 # ---- 各目标（每个函数按当前变体出一份产物）----
 
 build_linux_native() {
+    # 必须在 Linux 宿主上编：否则 go build 默认 GOOS=darwin，产物却叫 linux-*。
+    if [ "$HOST_OS" != "Linux" ]; then
+        step_label "跳过 $VAR_LABEL linux/${NATIVE_ARCH}：当前宿主是 ${HOST_OS}，linux-native 只在 Linux 上构建"
+        return 0
+    fi
     codec_setup "linux-${NATIVE_ARCH}"
     apply_variant
     # SIP_PHONE_GLFW_X11=1：只编 glfw 的 X11 后端（不加 Wayland）。给老发行版基线用：
@@ -466,6 +490,46 @@ build_linux_native() {
     step_label "构建 $VAR_LABEL 本机版 $(out_name linux "${NATIVE_ARCH}" "")（${FEATURES}）..."
     printf '%s' "$CODEC_NOTES"
     go build $(tags_args) -ldflags "$LDFLAGS" -o "$(out_name linux "${NATIVE_ARCH}" "")" ./cmd/sip-phone
+}
+
+# ---- macOS（darwin）----
+# 只在 macOS 宿主上构建（不会跨 OS 乱出产物），但**一次出两个架构**：
+# Apple 的 clang 能用 -arch x86_64 / -arch arm64 编对侧架构，不需要第二台机器，
+# 也不需要额外的 SDK——universal（lipo 合并）就靠这两份裸二进制。
+# 两个变体都走本机 clang/CGO（Fyne OpenGL + miniaudio CoreAudio）。
+#
+# 刻意不走 codec_setup：第三方静态库（视频/Opus/AEC）还没有 darwin 版本，
+# 探测只会打印"跑 build-video-libs.sh 生成"这种对该目标无效的提示。固定为基础版
+#（G.711/G.722 + 音频设备 + 界面/托盘 + 信令 + WS），与 windows-arm64 同一口径。
+# 注意：macOS **没有摄像头采集后端**（internal/video/camera_other.go），即使日后
+# 补上 darwin 静态库，视频目标也仍然用不了。
+build_darwin_amd64() { build_darwin_one amd64; }
+build_darwin_arm64() { build_darwin_one arm64; }
+
+build_darwin_one() {
+    local arch="$1"
+    if [ "$HOST_OS" != "Darwin" ]; then
+        step_label "跳过 $VAR_LABEL darwin/${arch}：当前宿主是 ${HOST_OS}，macOS 产物只在 macOS 上构建"
+        return 0
+    fi
+    local cc="clang" cxx="clang++"
+    if [ "$arch" != "$NATIVE_ARCH" ]; then
+        case "$arch" in
+            amd64) cc="clang -arch x86_64"; cxx="clang++ -arch x86_64" ;;
+            arm64) cc="clang -arch arm64";  cxx="clang++ -arch arm64" ;;
+        esac
+    fi
+    BUILD_TAGS=""
+    if [ -n "$VAR_TAGS_EXTRA" ]; then
+        BUILD_TAGS="$VAR_TAGS_EXTRA"
+    fi
+    export CGO_CFLAGS=""
+    export CGO_CXXFLAGS=""
+    export CGO_LDFLAGS=""
+    step_label "构建 $VAR_LABEL $(out_name darwin "$arch" "")（CGO+音频，无视频/无Opus/无AEC，CC=${cc}）..."
+    CGO_ENABLED=1 GOOS=darwin GOARCH="$arch" CC="$cc" CXX="$cxx" \
+        go build $(tags_args) -ldflags "$LDFLAGS" \
+        -o "$(out_name darwin "$arch" "")" ./cmd/sip-phone
 }
 
 build_linux_cross() {
@@ -600,14 +664,28 @@ build_windows_arm64() {
 # 也不能静默空跑。
 if [ -n "$TARGETS" ] && ! { want_target linux || want_target linux-native || \
     want_target linux-cross || want_target windows-amd64 || \
-    want_target windows-386 || want_target windows-arm64; }; then
-    echo "所选目标在本机不可构建：$TARGETS（本机 ${NATIVE_ARCH}，交叉目标 ${CROSS_ARCH:-无}）" >&2
+    want_target windows-386 || want_target windows-arm64 || \
+    want_target darwin-amd64 || want_target darwin-arm64; }; then
+    echo "所选目标在本机不可构建：$TARGETS（宿主 ${HOST_OS}/${NATIVE_ARCH}，交叉目标 ${CROSS_ARCH:-无}）" >&2
     exit 2
+fi
+
+# darwin 目标只在 macOS 宿主上出。显式点名了却在别的宿主上跑 → 明确报错，
+# 不静默跳过（不传 --target 的"全量构建"不受影响，macOS 步会自己跳过）。
+if [ -n "$TARGETS" ] && [ "$HOST_OS" != "Darwin" ]; then
+    case ",$TARGETS," in
+        *",darwin,"*|*",darwin-native,"*|*",darwin-amd64,"*|*",darwin-arm64,"*|*",macos,"*)
+            echo "所选目标包含 macOS 产物，但当前宿主是 ${HOST_OS}（macOS 产物须在 macOS 上构建）" >&2
+            exit 2
+            ;;
+    esac
 fi
 
 variant_setup full
 { want_target linux || want_target linux-native; } && build_linux_native
 { want_target linux || want_target linux-cross; } && build_linux_cross
+want_target darwin-amd64 && build_darwin_amd64
+want_target darwin-arm64 && build_darwin_arm64
 want_target windows-amd64 && build_windows_amd64
 want_target windows-386 && build_windows_386
 want_target windows-arm64 && build_windows_arm64
@@ -615,6 +693,8 @@ want_target windows-arm64 && build_windows_arm64
 variant_setup noui
 { want_target linux || want_target linux-native; } && build_linux_native
 { want_target linux || want_target linux-cross; } && build_linux_cross
+want_target darwin-amd64 && build_darwin_amd64
+want_target darwin-arm64 && build_darwin_arm64
 want_target windows-amd64 && build_windows_amd64
 want_target windows-386 && build_windows_386
 want_target windows-arm64 && build_windows_arm64

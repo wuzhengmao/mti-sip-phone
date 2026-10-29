@@ -1,0 +1,78 @@
+name: 构建
+
+# macOS 产物只能在 macOS 上编译（Fyne/OpenGL 与 miniaudio 都要 CGO + Apple SDK），
+# 本仓库的开发机以 Windows 为主，所以用 GitHub Actions 的 macOS runner 做
+# 「编译 + 单测 + universal DMG 打包」的验证。Windows/Linux 产物仍走各自的构建机。
+
+on:
+  push:
+    branches: [dev, dev-macOs, master]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS universal DMG
+    # macos-14 = Apple Silicon（arm64）。build.sh 会用 clang -arch 同时编出
+    # amd64 与 arm64 两份裸二进制，再由 package-macos.sh lipo 成 universal。
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 环境信息
+        run: |
+          go version
+          uname -m
+          clang --version | head -1
+
+      - name: 静态检查（涵盖 darwin 专有文件）
+        run: go vet ./...
+
+      - name: 编译 darwin（amd64 + arm64，两个变体）
+        run: |
+          chmod +x build.sh scripts/package-macos.sh
+          ./build.sh --target darwin
+
+      - name: 单元测试
+        run: >
+          go test ./internal/appicon/ ./internal/macbundle/ ./internal/macurl/
+          ./internal/selfinstall/ ./internal/protocol/
+
+      - name: 冒烟测试（本机架构）
+        run: |
+          ./dist/sip-phone-darwin-arm64 --version
+          ./dist/sip-phone-no-ui-darwin-arm64 --version
+
+      - name: 打包 universal DMG（完整版 + 无 UI 版）
+        run: ./scripts/package-macos.sh --variant both --arch universal
+
+      - name: 校验产包
+        run: |
+          set -e
+          lipo -info "dist/macos/MTI软电话.app/Contents/MacOS/mti-sip-phone-no-ui"
+          lipo -info "dist/macos/MTI软电话-完整版.app/Contents/MacOS/mti-sip-phone"
+          plutil -lint "dist/macos/MTI软电话.app/Contents/Info.plist"
+          plutil -lint "dist/macos/MTI软电话-完整版.app/Contents/Info.plist"
+          # URL scheme 与仅托盘（LSUIElement）必须在 plist 里
+          plutil -extract CFBundleURLTypes xml1 -o - "dist/macos/MTI软电话.app/Contents/Info.plist"
+          ls -lh dist/macos/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/macos/*.dmg
+          if-no-files-found: error
+          retention-days: 14

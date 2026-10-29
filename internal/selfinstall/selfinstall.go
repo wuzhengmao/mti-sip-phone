@@ -67,6 +67,13 @@ func Relocate(exePath string, args []string) (relocated bool, dst string, err er
 		return false, "", nil
 	}
 
+	// 3b. macOS：已在稳定的 .app 应用包内 → 视为正式安装形态，不再复制
+	//（DMG 挂载点与 App Translocation 的临时路径除外，见 inInstalledAppBundle）。
+	// 否则从 DMG/Applications 启动都会被搬到固定目录。
+	if inInstalledAppBundle(real) {
+		return false, "", nil
+	}
+
 	// 4. 已在固定数据目录 → 无事可做
 	target, err := TargetDir()
 	if err != nil {
@@ -76,19 +83,28 @@ func Relocate(exePath string, args []string) (relocated bool, dst string, err er
 		return false, "", nil
 	}
 
-	// 5. 复制到固定数据目录（保留原文件名：完整版与无 UI 版不同名、互不覆盖）
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		return false, "", fmt.Errorf("创建固定数据目录失败: %w", err)
-	}
-	dst = filepath.Join(target, filepath.Base(real))
-	// 目标已存在且与源是同一文件（大小写差异/符号链接导致路径不同）→ 已就位
-	if fi, err := os.Stat(dst); err == nil {
-		if sf, err2 := os.Stat(real); err2 == nil && os.SameFile(fi, sf) {
-			return false, "", nil
+	// 5. 复制到固定数据目录（保留原文件名：完整版与无 UI 版不同名、互不覆盖）。
+	// macOS 的安装形态是 .app 应用包（程序图标与 sip:// 协议都靠它），交给平台
+	// 实现建包，返回包内可执行文件路径——从那里拉起才带应用包身份。
+	if runtime.GOOS == "darwin" {
+		dst, err = installAppBundle(real, target)
+		if err != nil {
+			return false, "", err
 		}
-	}
-	if err := copyFile(real, dst); err != nil {
-		return false, "", err
+	} else {
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return false, "", fmt.Errorf("创建固定数据目录失败: %w", err)
+		}
+		dst = filepath.Join(target, filepath.Base(real))
+		// 目标已存在且与源是同一文件（大小写差异/符号链接导致路径不同）→ 已就位
+		if fi, err := os.Stat(dst); err == nil {
+			if sf, err2 := os.Stat(real); err2 == nil && os.SameFile(fi, sf) {
+				return false, "", nil
+			}
+		}
+		if err := copyFile(real, dst); err != nil {
+			return false, "", err
+		}
 	}
 
 	// 6. 桌面快捷方式（便利项）：指向固定目录的副本——下载产物被清理后

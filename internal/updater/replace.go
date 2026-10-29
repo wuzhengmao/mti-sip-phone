@@ -42,6 +42,9 @@ func (u *Updater) replaceExe() error {
 		}
 		return fmt.Errorf("替换程序文件失败: %w", err)
 	}
+	// macOS：替换后的可执行文件要重做 ad-hoc 签名（否则应用包签名失效，
+	// Apple Silicon 上可能无法再启动）。失败只告警，不阻止更新。
+	resignAfterReplace(u.exePath)
 	return nil
 }
 
