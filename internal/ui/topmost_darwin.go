@@ -16,6 +16,7 @@ package ui
 //   - 坐标口径与 Windows/Linux 一致：**主屏左上角为原点的物理像素**；
 //     Cocoa 是左下原点、单位是 point，换算都在 topmost_darwin.m 里做。
 //     多显示器下以主屏为基准（跨屏拖动的位置可能不精确，面板默认在主屏）。
+
 /*
 #cgo darwin LDFLAGS: -framework Cocoa
 #include <stdlib.h>
