@@ -314,10 +314,16 @@ extract_zip() {
 
 # collect_darwin_ci 等 Actions 跑完，把裸二进制与 DMG 收进 dist/。
 collect_darwin_ci() {
-    local i run_id="" run_sha="" run_status="" conclusion="" aid zip bins dmg full_dmg no_dmg f
+    local i run_id="" run_sha="" run_status="" conclusion="" aid bins aid_size bins_size
+    local zip full_dmg no_dmg f waited
     CI_WORKDIR="$(mktemp -d)"
     echo "等待 GitHub Actions 编译 macOS（最多 40 分钟）…"
-    for i in $(seq 1 120); do
+    if [ -n "${GH_RUN_ID:-}" ]; then
+        # 复用一次已完成的运行（省一次 macOS 构建/调试用）：跳过"找运行"。
+        run_id="$GH_RUN_ID"
+        echo "复用已有运行 ID：$run_id（GH_RUN_ID）"
+    else
+        for i in $(seq 1 120); do
         gh_api GET "/repos/$GH_REPO/actions/runs?event=workflow_dispatch&branch=$CI_REF&per_page=5"
         run_id=""
         run_sha=""
@@ -328,20 +334,37 @@ collect_darwin_ci() {
         if [ -n "$run_id" ] && [ "$run_sha" = "$CI_SHA" ]; then
             break
         fi
+        if [ "$i" = 1 ] || [ $((i % 3)) = 0 ]; then
+            echo "  排队中…已等 $((i * 10)) 秒（找到运行后会打印运行 ID）"
+        fi
         sleep 10
-    done
-    if [ -z "$run_id" ] || [ "$run_sha" != "$CI_SHA" ]; then
+        done
+    fi
+    if [ -z "${GH_RUN_ID:-}" ] && { [ -z "$run_id" ] || [ "$run_sha" != "$CI_SHA" ]; }; then
         echo "没找到 $CI_SHA 的 GitHub Actions 运行（检查 $GH_REPO 的 Actions 页面）" >&2
         exit 1
     fi
-    echo "运行 ID：$run_id（$CI_SHA）"
+    echo "运行 ID：$run_id${CI_SHA:+（$CI_SHA）}"
 
+    run_status=""
     for i in $(seq 1 240); do
         gh_api GET "/repos/$GH_REPO/actions/runs/$run_id"
-        run_status="$(sed -n 's/^ *"status": "\([a-z_]*\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+        local st
+        st="$(sed -n 's/^ *"status": "\([a-z_]*\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+        if [ "$st" != "$run_status" ] && [ -n "$st" ]; then
+            run_status="$st"
+            case "$run_status" in
+                queued) echo "  等待 macOS runner（queued）…" ;;
+                in_progress) echo "  开始构建（in_progress）…" ;;
+                completed) echo "  构建结束（completed）" ;;
+            esac
+        fi
         if [ "$run_status" = completed ]; then
             conclusion="$(sed -n 's/^ *"conclusion": "\([a-z_]*\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
             break
+        fi
+        if [ $((i % 6)) = 0 ]; then
+            echo "  ……仍是 ${run_status:-unknown}，已等 $((i * 10)) 秒"
         fi
         sleep 10
     done
@@ -358,26 +381,37 @@ collect_darwin_ci() {
         cat "$GH_BODY" >&2
         exit 1
     fi
-    # artifact 对象里 id 在 name 之前（workflow_run.id 在后），"记住最近 id、遇到
-    # name 时配对"即可；只取我们认识的两个名字。
-    aid="$(awk '/"id": [0-9]+,?$/ { id=$2; gsub(/,/,"",id) }
-                /"name": "darwin-binaries"/ { print id; exit }' "$GH_BODY")"
-    bins="$(awk '/"id": [0-9]+,?$/ { id=$2; gsub(/,/,"",id) }
-                  /"name": "macos-dmg"/ { print id; exit }' "$GH_BODY")"
+    # artifact 对象里的顺序是 id → name → size_in_bytes（workflow_run.id 在
+    # size 之后，不会污染配对）；只取我们认识的两个名字。
+    local arts
+    arts="$(awk '
+        /"id": [0-9]+,?$/ { id=$2; gsub(/,/,"",id) }
+        /"name": "[^"]+"/ { n=$2; gsub(/[",]/,"",n); cur=n }
+        /"size_in_bytes": [0-9]+/ {
+            s=$2; gsub(/,/,"",s)
+            if (cur=="darwin-binaries" || cur=="macos-dmg") print cur, id, s
+        }' "$GH_BODY")"
+    aid="$(printf '%s\n' "$arts" | awk '$1=="darwin-binaries"{print $2}')"
+    aid_size="$(printf '%s\n' "$arts" | awk '$1=="darwin-binaries"{print $3}')"
+    bins="$(printf '%s\n' "$arts" | awk '$1=="macos-dmg"{print $2}')"
+    bins_size="$(printf '%s\n' "$arts" | awk '$1=="macos-dmg"{print $3}')"
     if [ -z "$aid" ] || [ -z "$bins" ]; then
         echo "artifact 列表里缺 darwin-binaries 或 macos-dmg（工作流是否更新过？）" >&2
         exit 1
     fi
+
+    # 国内网络下 artifact 走 blob 存储可能只有 ~100KB/s，一定是分钟级——带进度条，
+    # 并给足超时，允许断点续传/重试（-C - 配合 --retry 在中断后接着下）。
+    echo "下载 darwin-binaries（约 $(( ${aid_size:-0} / 1048576 )) MB）…"
     zip="$CI_WORKDIR/bins.zip"
-    # artifact 走 blob 存储，国内网络可能只有 ~100KB/s，40MB 要几分钟——超时给足，
-    # 并允许断点续传/重试（-C - 配合 --retry 在中断后接着下）。
-    curl -sSfL --retry 3 --retry-delay 5 --retry-all-errors --max-time 1800 -C - \
+    curl -fSL --progress-bar --retry 3 --retry-delay 5 --retry-all-errors --max-time 1800 -C - \
         -H "Authorization: Bearer $GH_TOKEN" \
         -o "$zip" "$GH_API/repos/$GH_REPO/actions/artifacts/$aid/zip" ||
         { echo "下载 darwin-binaries 失败" >&2; exit 1; }
     extract_zip "$zip" "$CI_WORKDIR/bins" || exit 1
+    echo "下载 macos-dmg（约 $(( ${bins_size:-0} / 1048576 )) MB）…"
     zip="$CI_WORKDIR/dmg.zip"
-    curl -sSfL --retry 3 --retry-delay 5 --retry-all-errors --max-time 1800 -C - \
+    curl -fSL --progress-bar --retry 3 --retry-delay 5 --retry-all-errors --max-time 1800 -C - \
         -H "Authorization: Bearer $GH_TOKEN" \
         -o "$zip" "$GH_API/repos/$GH_REPO/actions/artifacts/$bins/zip" ||
         { echo "下载 macos-dmg 失败" >&2; exit 1; }
@@ -414,8 +448,8 @@ fi
 
 BUILD_START="$(date +%s)"
 
-# macOS 的 CI 先触发，和下面的容器编译并行跑
-if [ "$DARWIN_CI" = 1 ]; then
+# macOS 的 CI 先触发，和下面的容器编译并行跑（GH_RUN_ID 给定时复用已有运行，不触发）
+if [ "$DARWIN_CI" = 1 ] && [ -z "${GH_RUN_ID:-}" ]; then
     dispatch_darwin_ci
 fi
 
