@@ -11,7 +11,14 @@ on:
       - '**/*.md'
       - 'docs/**'
   pull_request:
+  # 发布时由 scripts/release.sh --darwin-ci 触发（release=true → SIP_PHONE_RELEASE=1）
   workflow_dispatch:
+    inputs:
+      release:
+        description: 按正式版构建（SIP_PHONE_RELEASE=1，版本号不带 -rc）
+        type: choice
+        options: ["false", "true"]
+        default: "false"
 
 concurrency:
   group: build-${{ github.ref }}
@@ -24,6 +31,9 @@ jobs:
     # amd64 与 arm64 两份裸二进制，再由 package-macos.sh lipo 成 universal。
     runs-on: macos-14
     timeout-minutes: 40
+    # 空值 = 开发版（版本带 -rc）；"1" = 正式版。build.sh / package-macos.sh 都认它。
+    env:
+      SIP_PHONE_RELEASE: ${{ inputs.release == 'true' && '1' || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -70,6 +80,19 @@ jobs:
           plutil -extract CFBundleURLTypes xml1 -o - "dist/macos/MTI软电话.app/Contents/Info.plist"
           ls -lh dist/macos/*.dmg
 
+      # 发布用：两个架构的裸二进制（自动更新下载的就是它，不能是 DMG）
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-binaries
+          path: |
+            dist/sip-phone-darwin-amd64
+            dist/sip-phone-darwin-arm64
+            dist/sip-phone-no-ui-darwin-amd64
+            dist/sip-phone-no-ui-darwin-arm64
+          if-no-files-found: error
+          retention-days: 14
+
+      # 首次安装用：universal DMG（完整版 + 无 UI 版各一个）
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
