@@ -44,13 +44,13 @@ window.SipApp = window.SipApp || {};
   }
 
   /**
-   * 坐席状态（用户口径）：离席优先级最高，其次整理中（isBusy && acw），再置忙，
+   * 坐席状态（用户口径）：离席优先级最高，其次整理中（isBusy && isWork），再置忙，
    * 否则空闲。返回 {text, action, cls}：action 为点击徽章时发送的 CTI 动作
    *（空闲→setBusy，离席→resume，置忙/整理→setIdle）。
    */
   function agentStatusOf(ag) {
     if (ag.leave) return { text: '离席', action: 'resume', cls: 'warn' };
-    if (ag.busy && ag.acw) return { text: '整理中', action: 'setIdle', cls: 'info' };
+    if (ag.busy && ag.isWork) return { text: '整理中', action: 'setIdle', cls: 'info' };
     if (ag.busy) return { text: '置忙', action: 'setIdle', cls: 'warn' };
     return { text: '空闲', action: 'setBusy', cls: 'ok' };
   }

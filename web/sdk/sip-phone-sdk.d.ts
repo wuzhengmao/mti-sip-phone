@@ -63,7 +63,7 @@ declare class SipPhoneSDK {
    * 事件名：call.incoming / call.ringing / call.dialing / call.established /
    *         call.terminated / call.failed / call.muted / call.audio（麦克风/扬声器开关）/
    *         call.video / call.panel（通话面板快照，见 SipCallPanelState）/
-   *         cti.agent（坐席状态变化：{displayName, agentMode, isBusy, acw, isLeave}，agentMode=none 表示不在线）/
+   *         cti.agent（坐席状态变化：{displayName, agentMode, isBusy, isWork, isLeave}，agentMode=none 表示不在线）/
    *         cti.state（通话话务状态变化：{callId, call}）/
    *         cti.failed（CTI 话务失败：{callId, kind, reason, message}）/
    *         cti.result（CTI 指令结果：{seq, success, code, message, action, data?}）/
@@ -85,41 +85,35 @@ declare class SipPhoneSDK {
   /** 拨号；options.video=true 发起视频呼叫 */
   dial(target: string, options?: { video?: boolean; name?: string }): Promise<{ callId: string }>;
 
-  /** 视频呼叫（dial 的便捷写法）；name 为对端显示名（可选，优先于通信录名称） */
-  dialVideo(target: string, name?: string): Promise<{ callId: string }>;
-
   /** 接听；options.video=true 视频接听（打开摄像头双向视频） */
-  answer(callId: string, options?: { video?: boolean }): Promise<{ callId: string }>;
+  answer(options?: { video?: boolean }): Promise<{ callId: string }>;
 
-  /** 视频接听（answer 的便捷写法） */
-  answerVideo(callId: string): Promise<{ callId: string }>;
+  /** 挂断：话机按状态自动决定——来电振铃 → 拒接（486）、呼出振铃 → 取消、通话中 → 挂断 */
+  hangup(): Promise<{ callId: string }>;
 
-  /** 挂断 */
-  hangup(callId: string): Promise<{ callId: string }>;
+  /** 保持（走 SIP re-INVITE，对端会看到"保持"） */
+  hold(): Promise<{ callId: string }>;
 
-  /** 拒接，code 默认 486 */
-  reject(callId: string, code?: number): Promise<{ callId: string }>;
-
-  /** 保持（静音）切换 */
-  mute(callId: string, muted: boolean): Promise<{ callId: string }>;
+  /** 取消保持 */
+  unhold(): Promise<{ callId: string }>;
 
   /** 麦克风开关（纯本地动作；状态变化推 call.audio 事件） */
-  muteMic(callId: string, muted: boolean): Promise<{ callId: string }>;
+  muteMic(muted: boolean): Promise<{ callId: string }>;
 
   /** 扬声器开关（纯本地动作，继续接收） */
-  muteSpeaker(callId: string, muted: boolean): Promise<{ callId: string }>;
+  muteSpeaker(muted: boolean): Promise<{ callId: string }>;
 
   /** 麦克风增益（REQ-MEDIA-006，纯本地动作）；gainPercent 0–200，0 = 禁用 */
-  setMicGain(callId: string, gainPercent: number): Promise<{ callId: string }>;
+  setMicGain(gainPercent: number): Promise<{ callId: string }>;
 
   /** 扬声器音量（REQ-MEDIA-006，纯本地动作）；volumePercent 0–100，0 = 禁用 */
-  setSpeakerVolume(callId: string, volumePercent: number): Promise<{ callId: string }>;
+  setSpeakerVolume(volumePercent: number): Promise<{ callId: string }>;
 
   /** 发送 DTMF（RFC 4733，通话接通后有效）；digit 为单个字符：0-9 * # A-D */
-  sendDTMF(callId: string, digit: string): Promise<{ callId: string }>;
+  sendDTMF(digit: string): Promise<{ callId: string }>;
 
   /** 视频总开关（纯本地动作，REQ-VIDEO-008）；状态见 call.video 事件 */
-  setVideo(callId: string, enabled: boolean): Promise<{ callId: string }>;
+  setVideo(enabled: boolean): Promise<{ callId: string }>;
 
   /** 自动接听开关（与软电话界面按钮共用一份状态；变更推 system.autoAnswer 事件） */
   setAutoAnswer(enabled: boolean): Promise<{ enabled: boolean }>;
@@ -160,12 +154,15 @@ declare class SipPhoneSDK {
   /** 坐席复席（resume，isLeave=false，重新进入分配队列） */
   resume(): Promise<SipCTIActionResult>;
 
+  /** 坐席话后整理（setWork，isWork=true）；workSeconds 为整理时长（秒，可选） */
+  setWork(workSeconds?: number): Promise<SipCTIActionResult>;
+
   /**
    * 发起一条 CTI 反向控制指令（与桌面通话面板的按钮一致）。
    * 指令等待 MSP_RESULT 后 resolve；失败 code 为 cti_failed / cti_busy /
    * cti_timeout / cti_not_agent。
    */
-  ctiAction(action: string, arg?: string | string[]): Promise<SipCTIActionResult>;
+  ctiAction(action: string, arg?: string | string[] | Record<string, any>): Promise<SipCTIActionResult>;
 
   /** 发起咨询（被咨询方 = target） */
   consult(target: string): Promise<SipCTIActionResult>;
@@ -177,6 +174,8 @@ declare class SipPhoneSDK {
   consultTransfer(target: string): Promise<SipCTIActionResult>;
   /** 监听坐席（班长模式） */
   monitor(target: string): Promise<SipCTIActionResult>;
+  /** 结束监听（stopMonitor） */
+  stopMonitor(): Promise<SipCTIActionResult>;
   /** 代接坐席的振铃来电 */
   takeover(target: string): Promise<SipCTIActionResult>;
   /** 三方通话里强制挂断某一方（仅 owner） */
@@ -505,8 +504,8 @@ interface SipAgent {
   acd: string;
   /** 坐席模式：normal / dial_out / monitor */
   agentMode: string;
-  /** 座席状态：free / dialing / ringing / talking / busy / leave / not_ready /
-   *  free_offhook / miss_phone / offline */
+  /** 座席状态：free / ringing / talking / free_offhook / dialing / busy / leave /
+   *  work（整理中）；not_ready / miss_phone / offline 的坐席不会出现在列表里 */
   agentStatus: string;
 }
 
@@ -573,14 +572,15 @@ interface SipAgentState {
   agentMode: string;
   /** 是否置忙 */
   isBusy: boolean;
-  /** 是否处于话后整理态（isBusy=true 且 acw=true → 整理中） */
-  acw: boolean;
+  /** 是否处于话后整理态（isBusy=true 且 isWork=true → 整理中） */
+  isWork: boolean;
   /** 是否离席（优先级最高的"不可用"状态） */
   isLeave: boolean;
   /** 话务状态（MSP_HEARTBEAT 上报的 status）：free / dialing / ringing / talking / holding */
   phoneStatus: string;
-  /** 坐席状态（由 phoneStatus + isBusy/acw/isLeave 推算，取值同 SipAgent.agentStatus）：
-   *  leave / busy / acw / free / dialing / ringing / talking / unknown */
+  /** 坐席状态（由 agentMode + phoneStatus + isBusy/isWork/isLeave 推算，取值同 SipAgent.agentStatus）：
+   *  agentMode=none → offline；isLeave → leave；free+isBusy → busy/work，否则 free；
+   *  dialing / ringing / talking / holding → 对应值；其它 → unknown */
   agentStatus: string;
 }
 

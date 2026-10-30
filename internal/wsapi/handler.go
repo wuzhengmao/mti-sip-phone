@@ -172,22 +172,31 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		}
 		resp = okMessage(msg.ID, map[string]string{"callId": callID})
 
-	case MethodAnswer, MethodHangup, MethodReject, MethodMute, MethodMuteMic, MethodMuteSpeaker,
+	case MethodAnswer, MethodHangup, MethodMute, MethodMuteMic, MethodMuteSpeaker,
 		MethodSetMicGain, MethodSetSpeakerVolume, MethodSetVideo, MethodSetVideoPreview, MethodDTMF:
 		var p struct {
-			CallID  string `json:"callId"`
-			Code    int    `json:"code"`
-			Muted   bool   `json:"muted"`
-			Video   bool   `json:"video"`   // 仅 call.answer：true = 视频接听（REQ-VIDEO-004）
-			Enabled bool   `json:"enabled"` // 仅 call.setVideo：视频总开关（REQ-VIDEO-008）
-			Digit   string `json:"digit"`   // 仅 call.dtmf：一个 DTMF 字符（0-9 * # A-D）
+			CallID string `json:"callId"` // 可选：单通话限制，缺省自动定位当前通话（兼容旧客户端显式传）
+			Muted  bool   `json:"muted"`
+			Video  bool   `json:"video"`   // 仅 call.answer：true = 视频接听（REQ-VIDEO-004）
+			Enabled bool  `json:"enabled"` // 仅 call.setVideo / call.setVideoPreview
+			Digit  string `json:"digit"`   // 仅 call.dtmf：一个 DTMF 字符（0-9 * # A-D）
 			// 音量（REQ-MEDIA-006）：**百分比整数**，0 = 禁用（同开关的「关」）
 			Gain          *int `json:"gain"`          // 仅 call.setMicGain：0–200
 			SpeakerVolume *int `json:"speakerVolume"` // 仅 call.setSpeakerVolume：0–100
 		}
-		if err := json.Unmarshal(msg.Params, &p); err != nil || p.CallID == "" {
-			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("缺少参数 callId"))
+		if err := json.Unmarshal(msg.Params, &p); err != nil {
+			resp = errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("参数格式错误"))
 			break
+		}
+		// 单通话限制：不再要求 callId——缺省时自动定位当前进行中的通话；
+		// 没有通话则返回 call_not_found（兼容旧客户端仍可显式传 callId）。
+		callID := p.CallID
+		if callID == "" {
+			callID = s.app.ActiveCallID()
+			if callID == "" {
+				resp = errMessage(msg.ID, CodeCallNotFound, core.ErrCallNotFound)
+				break
+			}
 		}
 		if msg.Method == MethodDTMF && len(p.Digit) != 1 {
 			resp = errMessage(msg.ID, CodeInvalidParams,
@@ -208,38 +217,37 @@ func (s *Server) dispatch(ctx context.Context, c *wsConn, msg Message) {
 		switch msg.Method {
 		case MethodAnswer:
 			if p.Video {
-				err = s.app.AnswerVideo(p.CallID)
+				err = s.app.AnswerVideo(callID)
 			} else {
-				err = s.app.Answer(p.CallID)
+				err = s.app.Answer(callID)
 			}
 		case MethodHangup:
-			err = s.app.Hangup(p.CallID)
-		case MethodReject:
-			err = s.app.Reject(p.CallID, p.Code)
+			// 统一挂断：来电振铃 → 拒接（486）；呼出振铃 → 取消；通话中 → 挂断
+			err = s.app.HangupOrReject(callID)
 		case MethodMute:
-			err = s.app.Mute(p.CallID, p.Muted)
+			err = s.app.Mute(callID, p.Muted)
 		case MethodMuteMic:
-			err = s.app.MuteMic(p.CallID, p.Muted)
+			err = s.app.MuteMic(callID, p.Muted)
 		case MethodMuteSpeaker:
-			err = s.app.MuteSpeaker(p.CallID, p.Muted)
+			err = s.app.MuteSpeaker(callID, p.Muted)
 		case MethodSetMicGain:
-			err = s.app.SetMicGain(p.CallID, float32(*p.Gain)/100)
+			err = s.app.SetMicGain(callID, float32(*p.Gain)/100)
 		case MethodSetSpeakerVolume:
-			err = s.app.SetSpeakerVolume(p.CallID, float32(*p.SpeakerVolume)/100)
+			err = s.app.SetSpeakerVolume(callID, float32(*p.SpeakerVolume)/100)
 		case MethodSetVideo:
-			err = s.app.SetVideoEnabled(p.CallID, p.Enabled)
+			err = s.app.SetVideoEnabled(callID, p.Enabled)
 		case MethodSetVideoPreview:
 			// 本地回显开关（纯本地，REQ-VIDEO-009）：无 UI 版没有视频窗口，
 			// 这里只是与桌面口径保持一致（网页订阅本地画面走 video.subscribe）
-			err = s.app.SetVideoPreview(p.CallID, p.Enabled)
+			err = s.app.SetVideoPreview(callID, p.Enabled)
 		case MethodDTMF:
-			err = s.app.SendDTMF(p.CallID, p.Digit)
+			err = s.app.SendDTMF(callID, p.Digit)
 		}
 		if err != nil {
 			resp = errMessage(msg.ID, codeOf(err), err)
 			break
 		}
-		resp = okMessage(msg.ID, map[string]any{"callId": p.CallID})
+		resp = okMessage(msg.ID, map[string]any{"callId": callID})
 
 	case MethodVideoSubscribe:
 		// 视频功能不可用（本构建没有视频 / 用户关闭了「启用视频通话」总开关，

@@ -6,6 +6,19 @@
 > 开发过程中的变更**记入当前开发版本的段落**（标题日期写「待发布」），
 > 封版发布时再整理该段落并改为实际发布日期。
 
+## [1.0.20] - 2026-10-30
+
+### 变更
+
+- **SDK 通话接口去掉 `callId`、合并拒接、拆分保持**（破坏性变更，`web/sdk` + 网页控制台 + 协议文档）：软电话本就是**单通话**设计，`answer` / `hangup` / `muteMic` / `muteSpeaker` / `setMicGain` / `setSpeakerVolume` / `setVideo` / `sendDTMF` 不再需要传 `callId`——缺省自动定位当前通话，无通话返回 `call_not_found`（WS 侧仍兼容显式传 `callId`）。**`reject` 合并进 `hangup`**：话机按当前通话状态自动决定——来电振铃 → 拒接（486）、呼出振铃 → 取消（CANCEL）、通话中 → 挂断（BYE），WS 的 `call.reject` 一并移除。**`mute` 拆成 `hold()` / `unhold()`**（语义本就是 SIP 保持，与麦克风/扬声器静音区分开）。**移除便捷写法 `dialVideo` / `answerVideo`**，改用 `dial(target, {video:true})` / `answer({video:true})`。
+- **CTI 协议字段 `acw` 改名 `isWork`，新增 `setWork` / `stopMonitor` 动作**（破坏性变更，跟随 `docs/cti-sip-phone-protocol.md` 更新）：坐席「话后整理态」在 `MSP_HEARTBEAT` / `MSP_EVENT_AGENT_ONLINE` / `cti.agent` 事件里的字段名由 `acw` 改为 **`isWork`**，坐席状态归一化值由 `acw` 改为 **`work`**（整理中）——Go 侧 `AgentACW`→`AgentIsWork`、`agentACW`→`agentIsWork`，SDK/网页/文档的 `acw` 字段一并改为 `isWork`。**新增 CTI 动作 `setWork`**（话后整理，可选 `workSeconds` 整理时长）与 **`stopMonitor`**（结束监听），`cti.action` 白名单与 SDK（`setWork(workSeconds?)` / `stopMonitor()`）同步补齐。
+
+### 修复
+
+- **`cti.agent` 的 `agentStatus` 在非坐席模式下为 `offline`**：`agentMode=none`（座席不在线）时 `agentStatus` 固定返回 `offline`，不再按 `phoneStatus` 推成 `free`/`dialing` 等——与 `SipAgent.agentStatus` 的「离线」口径一致。
+- **关闭主窗体后重开回到主拨号页**：`enterCTIDialMode` 在 `mainW.Show()` 前先 `showDialPage()`，避免上次咨询/转移复用停留在「在线座席」子页、操作按钮还是旧的咨询/三方（用户实测：咨询后关窗再点转移，页面停在在线座席、按钮还是咨询/三方）。
+- **release.sh 的 macOS DMG 直接改名不再归档后挑选**：Actions 下载的 DMG 解压后直接改名为稳定副本 `dist/macos-dmg-{full,no-ui}.dmg`，不再先归档到 `dist/macos` 再 `ls` 挑选——归档目录残留旧版本会让 `ls` 按字典序选错版本（真机踩过，1.0.19 上传错成 1.0.18 的 DMG）。
+
 ## [1.0.19] - 2026-10-30
 
 ### 新增

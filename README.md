@@ -181,7 +181,7 @@ macOS 的平台差异（详见 [CLAUDE.md](CLAUDE.md) 的「macOS（darwin）」
   const sdk = new SipPhoneSDK();
   sdk.on('call.incoming', (data) => {
     if (confirm('接听 ' + data.call.remote + ' 的来电？')) {
-      sdk.answer(data.call.id);
+      sdk.answer();
     }
   });
   await sdk.connect();

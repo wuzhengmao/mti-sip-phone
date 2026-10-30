@@ -195,7 +195,7 @@ func TestPanelConferenceInvitee(t *testing.T) {
 	}
 }
 
-// TestPanelAgentMode agent_online 更新坐席状态（isBusy/acw/isLeave 归纳为
+// TestPanelAgentMode agent_online 更新坐席状态（isBusy/isWork/isLeave 归纳为
 // AgentStatus/AgentStatusText；call.panel 不再携带坐席字段）。
 func TestPanelAgentMode(t *testing.T) {
 	app := newPanelApp()
@@ -208,12 +208,12 @@ func TestPanelAgentMode(t *testing.T) {
 		t.Fatalf("置忙状态不符：status=%q text=%q", app.AgentStatus(), app.AgentStatusText())
 	}
 	app.OnMSPEvent("agent_online", map[string]any{
-		"agentMode": "normal", "isBusy": true, "acw": true, "isLeave": false})
-	if app.AgentStatus() != "acw" || app.AgentStatusText() != "整理中" {
+		"agentMode": "normal", "isBusy": true, "isWork": true, "isLeave": false})
+	if app.AgentStatus() != "work" || app.AgentStatusText() != "整理中" {
 		t.Fatalf("整理中状态不符：status=%q text=%q", app.AgentStatus(), app.AgentStatusText())
 	}
 	app.OnMSPEvent("agent_online", map[string]any{
-		"agentMode": "normal", "isBusy": false, "acw": false, "isLeave": true})
+		"agentMode": "normal", "isBusy": false, "isWork": false, "isLeave": true})
 	if app.AgentStatus() != "leave" || app.AgentStatusText() != "离席" {
 		t.Fatalf("离席状态不符：status=%q text=%q", app.AgentStatus(), app.AgentStatusText())
 	}
@@ -226,9 +226,9 @@ func TestPanelDedup(t *testing.T) {
 	sub := app.bus.Subscribe()
 	defer app.bus.Unsubscribe(sub)
 
-	// 第一次：坐席状态变化 → 推一份 call.panel（agentMode=normal, isBusy=true, acw=true）
+	// 第一次：坐席状态变化 → 推一份 call.panel（agentMode=normal, isBusy=true, isWork=true）
 	app.OnMSPEvent("agent_online", map[string]any{
-		"agentMode": "normal", "isBusy": true, "acw": true})
+		"agentMode": "normal", "isBusy": true, "isWork": true})
 	// 之后两次（挂断的其它路径）状态没变 → 都应被去重跳过
 	app.publishCallPanel()
 	app.publishCallPanel()

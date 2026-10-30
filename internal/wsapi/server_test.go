@@ -30,6 +30,10 @@ type stubTel struct {
 	mu   sync.Mutex // 记录发给电话层的 DTMF，供测试断言（handler 在自己的 goroutine 里跑）
 	dtmf []string
 
+	// 统一挂断（call.hangup）走的是哪条路径：reject（来电拒接）或 hangup。
+	hangupVia  string
+	rejectCode int
+
 	// CTI 指令桩（REQ-ACC-026 / REQ-ACC-035）：记录动作与参数，可选地
 	// 异步回一条 MSP_RESULT（不设就等 3 秒超时）。
 	ctiAction string
@@ -84,10 +88,19 @@ func (s *stubTel) Dial(ctx context.Context, target string) (string, error) {
 }
 func (s *stubTel) Answer(callID string) error { return nil }
 func (s *stubTel) Hangup(callID string) error {
+	s.mu.Lock()
+	s.hangupVia = "hangup"
+	s.mu.Unlock()
 	s.app.OnTerminated(callID, "local_hangup")
 	return nil
 }
-func (s *stubTel) Reject(callID string, code int) error        { return nil }
+func (s *stubTel) Reject(callID string, code int) error {
+	s.mu.Lock()
+	s.hangupVia = "reject"
+	s.rejectCode = code
+	s.mu.Unlock()
+	return nil
+}
 func (s *stubTel) Mute(callID string, muted bool) error        { return nil }
 func (s *stubTel) MuteMic(callID string, muted bool) error     { return nil }
 func (s *stubTel) MuteSpeaker(callID string, muted bool) error { return nil }
@@ -107,6 +120,13 @@ func (s *stubTel) dtmfDigits() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.dtmf...)
+}
+
+// hangupPath 最近一次统一挂断走的路径与拒接码（"reject"/"hangup"）。
+func (s *stubTel) hangupPath() (string, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hangupVia, s.rejectCode
 }
 func (s *stubTel) SetAutoAnswer(enabled bool) error    { return nil }
 func (s *stubTel) SetRPort(enabled bool) error         { return nil }
@@ -578,6 +598,48 @@ func TestHangupUnknownCall(t *testing.T) {
 	msg := waitResponse(t, conn)
 	if msg.Error == nil || msg.Error.Code != CodeCallNotFound {
 		t.Fatalf("错误码应为 %s，收到: %+v", CodeCallNotFound, msg.Error)
+	}
+}
+
+// TestHangupUnified call.hangup 不带 callId：单通话限制下自动定位当前通话，
+// 并按状态路由——来电振铃 → 拒接（486）、已接通 → 挂断。
+func TestHangupUnified(t *testing.T) {
+	ts, app, tel := newTestServerAll(t)
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+
+	// 来电振铃：统一挂断应走拒接（486）
+	app.OnIncoming("c-in", core.IncomingCall{Remote: "1002", RemoteName: "1002"})
+	waitEvent(t, conn, "call.incoming")
+	sendRequest(t, conn, Message{ID: json.RawMessage("1"), Method: "call.hangup", Params: json.RawMessage(`{}`)})
+	resp := waitResponse(t, conn)
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("来电振铃统一挂断应成功，收到: %+v（错误: %+v）", resp, resp.Error)
+	}
+	if via, code := tel.hangupPath(); via != "reject" || code != 486 {
+		t.Fatalf("来电振铃应走拒接(486)，实际 via=%s code=%d", via, code)
+	}
+
+	// stub 的 Reject 不会结束通话，手动结束以清空单通话占用
+	app.OnTerminated("c-in", "rejected")
+	waitEvent(t, conn, "call.terminated")
+
+	// 呼出接通：统一挂断应走 hangup（stub 的 Hangup 会结束通话）
+	sendRequest(t, conn, Message{ID: json.RawMessage("2"), Method: "call.dial",
+		Params: json.RawMessage(`{"target":"1001"}`)})
+	msg, _ := waitResponseAndEvent(t, conn, "call.dialing")
+	if msg.OK == nil || !*msg.OK {
+		t.Fatalf("拨号应成功，收到: %+v", msg)
+	}
+	waitEvent(t, conn, "call.established")
+
+	sendRequest(t, conn, Message{ID: json.RawMessage("3"), Method: "call.hangup", Params: json.RawMessage(`{}`)})
+	resp, _ = waitResponseAndEvent(t, conn, "call.terminated")
+	if resp.OK == nil || !*resp.OK {
+		t.Fatalf("通话中统一挂断应成功，收到: %+v", resp)
+	}
+	if via, _ := tel.hangupPath(); via != "hangup" {
+		t.Fatalf("通话中应走挂断，实际 via=%s", via)
 	}
 }
 

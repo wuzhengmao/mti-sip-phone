@@ -171,12 +171,14 @@ SIP NOTIFY 关键头：
 | action | 参数 | 对应 CTI 接口 |
 |---|---|---|
 | `setBusy` | — | `setBusy(extension)`（坐席置忙） |
+| `setWork` | `workSeconds`（可选，整理时长，缺省取服务端上限） | `setWork(extension, workSeconds)`（话后整理） |
 | `setIdle` | — | `setIdle(extension)`（坐席置闲） |
 | `leave` | — | `leave(extension)`（坐席离席，`isLeave=true`，不再参与话务分配） |
 | `resume` | — | `resume(extension)`（坐席复席，`isLeave=false`，重新进入分配队列） |
 
-- 处理结果通过 `MSP_RESULT` 回执；置忙/置闲、离席/复席成功后 CTI 会额外推送 `MSP_EVENT_AGENT_ONLINE`（见 §16.1）同步最新 `isBusy`/`isLeave`。
-- 坐席处于**话后整理态**（`acw=true`，呼入话务结束后 CTI 自动进入的置忙）时，`setIdle` 立即结束整理态；`setBusy` 把整理态转为普通置忙（`acw=false`）。
+- 处理结果通过 `MSP_RESULT` 回执；置忙/整理/置闲、离席/复席成功后 CTI 会额外推送 `MSP_EVENT_AGENT_ONLINE`（见 §16.1）同步最新 `isBusy`/`isWork`/`isLeave`。
+- `setWork` 只能在坐席**正在呼入通话中**（`callId` 为呼入且已接通）时发起，否则回 `AGENT_NOT_ANSWER_INCOMING`；通话结束后坐席进入整理态（`isBusy=true`、`isWork=true`），持续 `workSeconds` 后自动置闲。
+- **话后整理是一种特殊的忙，可以被置忙覆盖**：整理态下 `setBusy` 转为普通置忙（`isWork=false`，整理计时取消）；`setIdle` 立即结束整理态；离席（`leave`）优先于整理态。
 
 #### 9.4 会议
 
@@ -206,7 +208,7 @@ SIP NOTIFY 关键头：
 | `displayName` | 坐席显示名（`agentInfo.displayName`，可能为空） |
 | `acd` | 技能组，格式 `110:1,122:1`（技能组:等级，逗号分隔，可能为空） |
 | `agentMode` | 坐席模式（小写）：`normal` / `dial_out` / `monitor` |
-| `agentStatus` | 坐席状态（小写）：`free` / `ringing` / `talking` / `free_offhook` / `dialing` / `busy` / `leave` / `acw`(整理中)；`not_ready`(未连接) / `miss_phone`(无话机) / `offline`(离线) 的坐席不会出现在列表中 |
+| `agentStatus` | 坐席状态（小写）：`free` / `ringing` / `talking` / `free_offhook` / `dialing` / `busy` / `leave` / `work`(整理中)；`not_ready`(未连接) / `miss_phone`(无话机) / `offline`(离线) 的坐席不会出现在列表中 |
 
 ### 10. 心跳（MSP_HEARTBEAT）
 
@@ -222,7 +224,7 @@ SIP NOTIFY 关键头：
 body：
 
 ```json
-{"seq":"1","extension":"2001","expires":60,"status":"free","agentMode":"normal","isBusy":false,"acw":false,"isLeave":false,"displayName":"张三"}
+{"seq":"1","extension":"2001","expires":60,"status":"free","agentMode":"normal","isBusy":false,"isWork":false,"isLeave":false,"displayName":"张三"}
 ```
 
 | 字段 | 必填 | 说明 |
@@ -233,7 +235,7 @@ body：
 | `status` | 是 | 话机当前状态（字符串，大小写不敏感）：`free` 空闲 / `dialing` 拨号 / `ringing` 振铃 / `talking` 通话 / `holding` 保持 |
 | `agentMode` | 是 | 话机当前坐席模式：`none` 未登录坐席 / `normal` 普通模式 / `dial_out` 外拨模式 / `monitor` 班长模式 |
 | `isBusy` | 是 | 话机当前的置忙状态（boolean，true=置忙） |
-| `acw` | 否 | 话机当前是否处于**话后整理态**（boolean）：CTI 在呼入话务结束后自动置忙并保持 `postCallin` 秒，此时 `isBusy=true`、`acw=true`；自动置闲或人工置忙/置闲后 `acw=false`。缺省（不携带）表示话机未上报，CTI 跳过该项比对 |
+| `isWork` | 否 | 话机当前是否处于**话后整理态**（boolean）：整理态是一种特殊的忙，此时 `isBusy=true`、`isWork=true`；整理结束或人工置忙/置闲后 `isWork=false`。缺省（不携带）表示话机未上报，CTI 跳过该项比对 |
 | `isLeave` | 否 | 话机当前是否**离席**（boolean）：CTI 的 `leave`/`resume` 分别置 `true`/`false`。缺省表示话机未上报，CTI 跳过该项比对 |
 | `displayName` | 否 | 话机侧记录的坐席显示名（可为空） |
 
@@ -244,7 +246,7 @@ CTI 处理：
 3. **话机状态对齐**：比对 `status` 与 CTI 侧记录的话机状态，不一致时以话机上报为准**强制刷新** CTI 侧状态，并联动刷新坐席状态（如 `FREE` → 坐席空闲、`TALKING` → 坐席通话中）。
    - 为容忍信令延迟（话机侧状态更新慢于 CTI），CTI 会记录每次话机状态变更的时间：若 CTI 侧状态最近一次变更**不足 3 秒**，本轮不刷新，等待话机侧信令追上。
    - 若话机状态由**非空闲**被强制更新为**空闲**，CTI 会检查该分机是否仍有残留话务，有则挂断对应通道并强制复位本地话务状态。
-4. 检测 `agentMode`/`isBusy`/`acw`/`isLeave`/`displayName` 与 CTI 侧坐席属性是否一致，不一致时推送 `MSP_EVENT_AGENT_ONLINE`（携带 CTI 侧最新的 `agentMode`/`isBusy`/`acw`/`isLeave`/`displayName`）或 `MSP_EVENT_AGENT_OFFLINE` 同步（见 §16）。
+4. 检测 `agentMode`/`isBusy`/`isWork`/`isLeave`/`displayName` 与 CTI 侧坐席属性是否一致，不一致时推送 `MSP_EVENT_AGENT_ONLINE`（携带 CTI 侧最新的 `agentMode`/`isBusy`/`isWork`/`isLeave`/`displayName`）或 `MSP_EVENT_AGENT_OFFLINE` 同步（见 §16）。
 5. 若 `extension` 不是本机分机号（不匹配分机号规则），CTI 不处理该心跳，并回推一次 `MSP_UNSUPPORTED`（`reason=not_extension`）；话机收到后应停止心跳并退出坐席模式（见 §13）。
 
 心跳**无** `MSP_RESULT` 回执。
@@ -261,7 +263,7 @@ CTI 处理：
 | 失败 | `{"seq":"<字符串>","action":"<动作>","success":false,"code":"<错误码>","message":"<错误信息>"}` |
 
 - `seq` 原样回显请求里的字符串序列号，用于话机把回执与请求对齐；`action` 一并回显便于排查。
-- `code` 为**错误码名称**（与 CTI 内部错误码枚举一致），如 `AGENT_NOT_IN_CALL`（坐席不在通话中）、`AGENT_NOT_IN_CONSULT`（坐席不在咨询中）、`TARGET_AGENT_IS_BUSY`（目标坐席正忙）等；话机按字符串原样展示/记录即可，无需识别具体取值。
+- `code` 为**错误码名称**（与 CTI 内部错误码枚举一致），如 `AGENT_NOT_IN_CALL`（坐席不在通话中）、`AGENT_NOT_IN_CONSULT`（坐席不在咨询中）、`AGENT_NOT_ANSWER_INCOMING`（坐席没有正在接听的呼入，`setWork` 前置条件）、`TARGET_AGENT_IS_BUSY`（目标坐席正忙）等；话机按字符串原样展示/记录即可，无需识别具体取值。
 - `data`：仅带返回值的动作携带（目前为 `listAgents`），失败时不携带。示例：
   `{"seq":"7","action":"listAgents","success":true,"data":[{"agent":"2001","displayName":"张三","acd":"110:1","agentMode":"normal","agentStatus":"free"}]}`
 - 失败示例：坐席不在通话中时发起咨询 → `{"seq":"3","action":"consult","success":false,"code":"AGENT_NOT_IN_CALL","message":"坐席不在通话中"}`。
@@ -298,7 +300,7 @@ Event: MSP_HEARTBEAT
 Content-Type: application/json
 Content-Length: 73
 
-{"seq":"3","extension":"2001","expires":60,"status":"free","agentMode":"normal","isBusy":false,"acw":false,"isLeave":false,"displayName":"张三"}
+{"seq":"3","extension":"2001","expires":60,"status":"free","agentMode":"normal","isBusy":false,"isWork":false,"isLeave":false,"displayName":"张三"}
 ```
 
 #### 12.4 失败回执（坐席不在通话中）
@@ -314,7 +316,7 @@ Content-Length: 109
 
 ### 13. 话机侧实现要求
 
-1. 心跳：进入坐席模式后周期性发送 `MSP_HEARTBEAT`，`expires` 建议取发送间隔的 2~3 倍；`status`/`agentMode`/`isBusy`/`displayName` 均以话机本地实时状态为准，`acw`/`isLeave` 回显 CTI 最近一次 `MSP_EVENT_AGENT_ONLINE` 给出的值（不支持时可省略）；`seq` 为字符串且需保证不重复。
+1. 心跳：进入坐席模式后周期性发送 `MSP_HEARTBEAT`，`expires` 建议取发送间隔的 2~3 倍；`status`/`agentMode`/`isBusy`/`displayName` 均以话机本地实时状态为准，`isWork`/`isLeave` 回显 CTI 最近一次 `MSP_EVENT_AGENT_ONLINE` 给出的值（不支持时可省略）；`seq` 为字符串且需保证不重复。
 2. 操作指令：任意时刻发送 `MSP_ACTION`（无需在通话中），`Content-Type` 固定 `application/json`，body 携带 `seq`（字符串，不重复）、`extension`、`action` 及该动作所需参数。
 3. 收到 FreeSWITCH 回的 `200 OK` 仅表示信令送达；业务结果以 `MSP_RESULT` 为准（按 `seq` 对齐）。
 4. 保持/取回/挂断由话机本地完成，无需经本协议上报 CTI。
@@ -375,13 +377,13 @@ CTI 推给话机的事件只有三类：坐席状态（`MSP_EVENT_AGENT_ONLINE/O
 
 | 事件 | body | 话机动作 |
 |---|---|---|
-| `MSP_EVENT_AGENT_ONLINE` | `{"extension":"2001","displayName":"张三","agentMode":"normal","isBusy":false,"acw":false,"isLeave":false,"status":"free","timestamp":N}` | 进入坐席状态，并同步坐席模式、置忙/整理态/离席与话机状态 |
+| `MSP_EVENT_AGENT_ONLINE` | `{"extension":"2001","displayName":"张三","agentMode":"normal","isBusy":false,"isWork":false,"isLeave":false,"status":"free","timestamp":N}` | 进入坐席状态，并同步坐席模式、置忙/整理态/离席与话机状态 |
 | `MSP_EVENT_AGENT_OFFLINE` | `{"extension":"2001","timestamp":N}` | 立即退出坐席状态 |
 
 - `displayName` 为坐席显示名（登录时指定），可能为空。
 - `agentMode`：`none` 未登录坐席 / `normal` 普通模式 / `dial_out` 外拨模式 / `monitor` 班长模式。
 - `isBusy`：是否置忙（boolean）。
-- `acw`：是否处于**话后整理态**（boolean）。呼入话务结束后 CTI 自动置忙并在 `postCallin` 秒内保持整理态，此时 `isBusy=true`、`acw=true`；自动置闲或人工置忙/置闲后 CTI 会再推一次 ONLINE 把 `acw` 置回 `false`。话机据此区分「忙」与「整理中」。
+- `isWork`：是否处于**话后整理态**（boolean）。整理态是一种特殊的忙（`isBusy=true`、`isWork=true`）：呼入话务结束后自动进入，或通话中由 `setWork` 主动发起；整理结束或人工置忙/置闲后 CTI 会再推一次 ONLINE 把 `isWork` 置回 `false`。话机据此区分「忙」与「整理中」。
 - `isLeave`：是否**离席**（boolean）。CTI 的 `leave`/`resume` 改变该属性并推送 ONLINE。
 - `status`：CTI 侧的话机状态（字符串，同 §10 心跳 `status` 取值：`free` / `dialing` / `ringing` / `talking` / `holding`）。话机收到后应与本地状态比对，不一致时立即补发一次 `MSP_HEARTBEAT`（让 CTI 侧尽快收敛到话机本地状态）。
 - 话机收到 `MSP_EVENT_AGENT_ONLINE` 后进入**坐席状态**（通话面板可用），收到 `MSP_EVENT_AGENT_OFFLINE` 后退出。
@@ -390,8 +392,8 @@ CTI 推给话机的事件只有三类：坐席状态（`MSP_EVENT_AGENT_ONLINE/O
 - 触发时机（仅以下场景推送，不再周期续期）：
   1. **坐席登录**时推送一次 `MSP_EVENT_AGENT_ONLINE`；
   2. **坐席登出**时推送一次 `MSP_EVENT_AGENT_OFFLINE`；
-  3. **置忙/置闲**、**话后整理态进入/结束**、**离席/复席**、**坐席模式切换**（普通/外拨/班长）时推送一次 `MSP_EVENT_AGENT_ONLINE`，携带最新的 `agentMode`/`isBusy`/`acw`/`isLeave`；
-  4. **心跳属性不一致**时：话机上报的 `agentMode`/`isBusy`/`acw`/`isLeave`/`displayName` 与 CTI 侧坐席属性不一致，推送 `MSP_EVENT_AGENT_ONLINE`（话机未进坐席模式、模式/置忙/整理态/离席不一致、显示名不一致）或 `MSP_EVENT_AGENT_OFFLINE`（CTI 已登出但话机仍停留坐席模式）同步。
+  3. **置忙/置闲**、**话后整理态进入/结束**、**离席/复席**、**坐席模式切换**（普通/外拨/班长）时推送一次 `MSP_EVENT_AGENT_ONLINE`，携带最新的 `agentMode`/`isBusy`/`isWork`/`isLeave`；
+  4. **心跳属性不一致**时：话机上报的 `agentMode`/`isBusy`/`isWork`/`isLeave`/`displayName` 与 CTI 侧坐席属性不一致，推送 `MSP_EVENT_AGENT_ONLINE`（话机未进坐席模式、模式/置忙/整理态/离席不一致、显示名不一致）或 `MSP_EVENT_AGENT_OFFLINE`（CTI 已登出但话机仍停留坐席模式）同步。
 - 同一分机可能多次收到 ONLINE，话机按幂等处理。
 - 若 CTI 判定该号码不是本机分机号，会推送 `MSP_UNSUPPORTED`，话机应退出坐席模式并停止发送 `MSP_HEARTBEAT`（见 §10/§13）。
 

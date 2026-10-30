@@ -108,7 +108,7 @@ type State struct {
 	Instance int `json:"instance"`
 	// AgentMode 坐席模式（none/normal/dial_out/monitor，协议 §16.1）。
 	// **none 表示不在坐席模式（座席不在线）**。详细的坐席状态（displayName/
-	// isBusy/acw/isLeave）统一走 `cti.agent` 事件，这里不再重复（用户要求去重）。
+	// isBusy/isWork/isLeave）统一走 `cti.agent` 事件，这里不再重复（用户要求去重）。
 	AgentMode string `json:"agentMode,omitempty"`
 }
 
@@ -523,6 +523,20 @@ func (a *App) Reject(callID string, code int) error {
 	}
 	logx.Logger().Info("拒接呼叫", "callId", callID, "code", code)
 	return nil
+}
+
+// HangupOrReject 统一挂断（网页 call.hangup，REQ-SDK 简化）：单通话限制下
+// 按该通话状态自动选择——呼入振铃中 → 拒接（486）；呼出振铃中 → 取消（CANCEL）；
+// 已接通 → 挂断（BYE）。与 Reject/Hangup 相比，调用方无需判断来电/呼出/通话中。
+func (a *App) HangupOrReject(callID string) error {
+	c := a.getCall(callID)
+	if c == nil {
+		return ErrCallNotFound
+	}
+	if c.Direction == "incoming" && c.State == CallRinging {
+		return a.Reject(callID, 486)
+	}
+	return a.Hangup(callID)
 }
 
 // SetAutoAnswer 开关自动接听。
@@ -1044,6 +1058,15 @@ func (a *App) activeCall() *Call {
 		}
 	}
 	return nil
+}
+
+// ActiveCallID 当前进行中通话的 ID（单通话限制：振铃或已接通）；无则空串。
+// 供 WS 层在「不要求 callId」的接口里自动定位当前通话。
+func (a *App) ActiveCallID() string {
+	if c := a.activeCall(); c != nil {
+		return c.ID
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

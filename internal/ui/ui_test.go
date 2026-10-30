@@ -1079,11 +1079,11 @@ func TestTrayIconBusy(t *testing.T) {
 	if got := a.trayIcon(); got != IconPhoneYellow {
 		t.Fatalf("已注册且置忙应为黄色，实际 %v", got.Name())
 	}
-	a.agentACW = true
+	a.agentIsWork = true
 	if got := a.trayIcon(); got != IconPhoneBlue {
 		t.Fatalf("已注册且整理中应为蓝色，实际 %v", got.Name())
 	}
-	a.agentACW = false
+	a.agentIsWork = false
 	a.agentBusy = false
 	a.agentLeave = true
 	if got := a.trayIcon(); got != IconPhoneYellow {

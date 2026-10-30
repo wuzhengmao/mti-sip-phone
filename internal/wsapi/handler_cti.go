@@ -50,16 +50,17 @@ func (s *Server) dispatchCTI(ctx context.Context, msg Message) (Message, bool) {
 	switch msg.Method {
 	case MethodCTIAction:
 		var p struct {
-			Action  string   `json:"action"`
-			Target  string   `json:"target"`
-			Members []string `json:"members"`
-			Member  string   `json:"member"`
+			Action      string   `json:"action"`
+			Target      string   `json:"target"`
+			Members     []string `json:"members"`
+			Member      string   `json:"member"`
+			WorkSeconds *int     `json:"workSeconds"` // 仅 setWork：话后整理时长（秒，可选）
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil {
 			return errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("参数格式错误")), true
 		}
 		action := strings.TrimSpace(p.Action)
-		params, err := ctiParams(action, strings.TrimSpace(p.Target), p.Members, strings.TrimSpace(p.Member))
+		params, err := ctiParams(action, strings.TrimSpace(p.Target), p.Members, strings.TrimSpace(p.Member), p.WorkSeconds)
 		if err != nil {
 			return errMessage(msg.ID, CodeInvalidParams, err), true
 		}
@@ -76,9 +77,10 @@ func (s *Server) dispatchCTI(ctx context.Context, msg Message) (Message, bool) {
 //   - target 可选（缺省用当前咨询）：consultThreeWay / consultTransfer；
 //   - 带 members：addConferenceMembers / removeConferenceMembers；
 //   - 带 member：会议成员会控（禁音/禁听/禁视频的开关）；
+//   - setWork：可选 workSeconds（话后整理时长，缺省取服务端上限）；
 //   - 无参数：finishConsult / finishConference / whisper / stopWhisper /
-//     intervene / intercept / setBusy / setIdle / leave / resume。
-func ctiParams(action, target string, members []string, member string) (map[string]any, error) {
+//     stopMonitor / intervene / intercept / setBusy / setIdle / leave / resume。
+func ctiParams(action, target string, members []string, member string, workSeconds *int) (map[string]any, error) {
 	switch action {
 	case "consult", "transfer", "monitor", "takeover", "exitThreeWay":
 		if target == "" {
@@ -118,7 +120,13 @@ func ctiParams(action, target string, members []string, member string) (map[stri
 			return nil, fmt.Errorf("动作 %s 需要参数 member", action)
 		}
 		return map[string]any{"member": member}, nil
-	case "finishConsult", "finishConference", "whisper", "stopWhisper", "intervene", "intercept",
+	case "setWork":
+		// 可选 workSeconds（话后整理时长，缺省取服务端上限，协议 §9.3）
+		if workSeconds != nil && *workSeconds > 0 {
+			return map[string]any{"workSeconds": *workSeconds}, nil
+		}
+		return nil, nil
+	case "finishConsult", "finishConference", "whisper", "stopWhisper", "stopMonitor", "intervene", "intercept",
 		"setBusy", "setIdle", "leave", "resume":
 		return nil, nil
 	}

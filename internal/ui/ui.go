@@ -195,7 +195,7 @@ type App struct {
 	agentOnline      bool
 	agentMode        string          // none / normal / dial_out / monitor（协议 §16.1）
 	agentBusy        bool            // 置忙（isBusy）
-	agentACW         bool            // 话后整理中（acw）：已注册时托盘/应用图标变蓝
+	agentIsWork      bool            // 话后整理中（isWork）：已注册时托盘/应用图标变蓝
 	agentLeave       bool            // 离席（isLeave）
 	agentDisplayName string          // 坐席显示名（AGENT_ONLINE 的 displayName）
 	agentIcon        *hoverIcon      // 主窗体「已注册」后的坐席按钮（点击切换置忙/置闲）
@@ -1797,7 +1797,7 @@ func (a *App) trayIcon() fyne.Resource {
 		return IconPhoneRed
 	}
 	switch a.agentStatus() {
-	case "acw":
+	case "work":
 		return IconPhoneBlue
 	case "busy", "leave":
 		return IconPhoneYellow
@@ -1817,7 +1817,7 @@ func (a *App) setRegState(state string) {
 	}
 }
 
-// agentStatus 坐席状态的归一化值（free/busy/acw/leave）；未进坐席模式返回空串。
+// agentStatus 坐席状态的归一化值（free/busy/work/leave）；未进坐席模式返回空串。
 // 优先级（用户口径）：离席 > 整理中 > 置忙 > 空闲。
 func (a *App) agentStatus() string {
 	if !a.agentOnline || a.agentMode == core.AgentModeNone {
@@ -1826,8 +1826,8 @@ func (a *App) agentStatus() string {
 	switch {
 	case a.agentLeave:
 		return "leave"
-	case a.agentBusy && a.agentACW:
-		return "acw"
+	case a.agentBusy && a.agentIsWork:
+		return "work"
 	case a.agentBusy:
 		return "busy"
 	default:
@@ -1841,7 +1841,7 @@ func seatStatusText(status string) string {
 	switch status {
 	case "leave":
 		return "离席"
-	case "acw":
+	case "work":
 		return "整理中"
 	case "busy":
 		return "置忙"
@@ -1894,8 +1894,8 @@ func (a *App) applyAgentState() {
 			case "leave":
 				iconColor = colorHoldYellow
 				state, action = "离席", "点击复席"
-			case "acw":
-				iconColor = colorAgentACW
+			case "work":
+				iconColor = colorAgentIsWork
 				state, action = "整理中", "点击置闲"
 			case "busy":
 				iconColor = colorHoldYellow
@@ -1949,7 +1949,7 @@ func (a *App) toggleAgentBusy() {
 	switch a.agentStatus() {
 	case "leave":
 		action = "resume"
-	case "busy", "acw":
+	case "busy", "work":
 		action = "setIdle"
 	}
 	if err := a.runCTI(nil, action, nil); err != nil {
@@ -2001,7 +2001,7 @@ func (a *App) syncInitialState() {
 	a.agentMode = a.core.AgentMode()
 	a.agentOnline = a.agentMode != core.AgentModeNone
 	a.agentBusy = a.core.AgentBusy()
-	a.agentACW = a.core.AgentACW()
+	a.agentIsWork = a.core.AgentIsWork()
 	a.agentLeave = a.core.AgentLeave()
 	a.agentDisplayName = a.core.AgentDisplayName()
 	a.setAutoAnswer(st.AutoAnswer)
@@ -2236,15 +2236,15 @@ func (a *App) onEvent(ev core.Event) {
 			if busy, ok := data["isBusy"].(bool); ok {
 				a.agentBusy = busy && on
 			}
-			if acw, ok := data["acw"].(bool); ok {
-				a.agentACW = acw && on
+			if isWork, ok := data["isWork"].(bool); ok {
+				a.agentIsWork = isWork && on
 			}
 			if leave, ok := data["isLeave"].(bool); ok {
 				a.agentLeave = leave && on
 			}
 			if !on {
 				a.agentBusy = false
-				a.agentACW = false
+				a.agentIsWork = false
 				a.agentLeave = false
 			}
 			a.agentOnline = on
@@ -2457,8 +2457,8 @@ func (a *App) statusColor(state string) color.Color {
 		switch a.agentStatus() {
 		case "leave", "busy":
 			return busyColor
-		case "acw":
-			return acwColor
+		case "work":
+			return isWorkColor
 		}
 	}
 	if c, ok := dotColors[state]; ok {

@@ -301,7 +301,6 @@ window.SipApp.views = window.SipApp.views || {};
     mount: function () {
       const fail = function (e) { App.ui.toast(App.util.errText(e), 'err'); };
       const call = function () { return store.state.call; };
-      const id = function () { return store.callID(); };
 
       // 拨号入口：弹出拨号对话框（拨号盘 / 在线座席），位置跟随鼠标点击处
       $('btnOpenDial').addEventListener('click', function (e) {
@@ -348,25 +347,25 @@ window.SipApp.views = window.SipApp.views || {};
       // 会议
       ctiBtn('btnFinishConference', function () { return sdk.finishConference(); });
 
-      $('btnAnswer').addEventListener('click', function () { sdk.answer(id()).catch(fail); });
-      $('btnAnswerVideo').addEventListener('click', function () { sdk.answerVideo(id()).catch(fail); });
-      $('btnReject').addEventListener('click', function () { sdk.reject(id()).catch(fail); });
-      $('btnHangup').addEventListener('click', function () { sdk.hangup(id()).catch(fail); });
+      $('btnAnswer').addEventListener('click', function () { sdk.answer().catch(fail); });
+      $('btnAnswerVideo').addEventListener('click', function () { sdk.answer({ video: true }).catch(fail); });
+      $('btnReject').addEventListener('click', function () { sdk.hangup().catch(fail); });
+      $('btnHangup').addEventListener('click', function () { sdk.hangup().catch(fail); });
       $('btnMute').addEventListener('click', function () {
         const c = call();
-        sdk.mute(id(), !(c && c.muted)).catch(fail);
+        (c && c.muted ? sdk.unhold() : sdk.hold()).catch(fail);
       });
       $('btnMic').addEventListener('click', function () {
         const c = call();
-        sdk.muteMic(id(), !(c && c.micMuted)).catch(fail);
+        sdk.muteMic(!(c && c.micMuted)).catch(fail);
       });
       $('btnSpeaker').addEventListener('click', function () {
         const c = call();
-        sdk.muteSpeaker(id(), !(c && c.speakerMuted)).catch(fail);
+        sdk.muteSpeaker(!(c && c.speakerMuted)).catch(fail);
       });
       $('btnVideoToggle').addEventListener('click', function () {
         const c = call();
-        sdk.setVideo(id(), !(c && c.video && c.video.enabled)).catch(fail);
+        sdk.setVideo(!(c && c.video && c.video.enabled)).catch(fail);
       });
 
       const bindSlider = function (el, valEl, send) {
@@ -383,10 +382,10 @@ window.SipApp.views = window.SipApp.views || {};
         });
       };
       bindSlider($('volSpeaker'), $('volSpeakerVal'), function (v) {
-        if (store.callID()) sdk.setSpeakerVolume(store.callID(), v).catch(fail);
+        sdk.setSpeakerVolume(v).catch(fail);
       });
       bindSlider($('volMic'), $('volMicVal'), function (v) {
-        if (store.callID()) sdk.setMicGain(store.callID(), v).catch(fail);
+        sdk.setMicGain(v).catch(fail);
       });
 
       $('chkAutoAnswer').addEventListener('change', function () {

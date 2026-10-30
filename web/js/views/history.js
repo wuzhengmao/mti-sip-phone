@@ -104,7 +104,7 @@ window.SipApp.views = window.SipApp.views || {};
     });
     const vcall = App.dom.el('button', { class: 'ghost' }, '视频');
     vcall.addEventListener('click', function () {
-      sdk.dialVideo(r.remote, r.displayName).catch(function (e) { App.ui.toast(App.util.errText(e), 'err'); });
+      sdk.dial(r.remote, { video: true, name: r.displayName }).catch(function (e) { App.ui.toast(App.util.errText(e), 'err'); });
     });
     const del = App.dom.el('button', { class: 'red' }, '删除');
     del.addEventListener('click', function () {

@@ -557,7 +557,7 @@ var (
 	colorCallGreen     = color.NRGBA{R: 0x2e, G: 0x7d, B: 0x32, A: 0xff}
 	colorHoldYellow    = color.NRGBA{R: 0xfb, G: 0xc0, B: 0x2d, A: 0xff} // 保持
 	colorHoldBlue      = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff} // 取消保持/开关开
-	colorAgentACW      = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff} // 坐席整理中（与 colorHoldBlue 同值）
+	colorAgentIsWork   = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff} // 坐席整理中（与 colorHoldBlue 同值）
 	colorSwitchGray    = color.NRGBA{R: 0xbd, G: 0xbd, B: 0xbd, A: 0xff} // 开关关
 	colorTransformGray = color.NRGBA{R: 0x44, G: 0x48, B: 0x4f, A: 0xf2} // 旋转/镜像未生效（深灰，压在画面上）
 	colorIconBlack     = color.NRGBA{R: 0x1a, G: 0x1a, B: 0x1a, A: 0xff} // 呼叫按钮文字（固定黑）
