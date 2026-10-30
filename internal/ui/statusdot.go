@@ -13,11 +13,11 @@ import (
 type statusDot struct {
 	widget.BaseWidget
 	state string
-	// 已注册时的坐席状态（free/busy/acw/leave）：busy/leave 黄色、acw 蓝色，
+	// 已注册时的坐席状态（free/busy/work/leave）：busy/leave 黄色、work 蓝色，
 	// 与托盘/窗口图标的口径一致（REQ-ACC-034）。
-	busy  bool // 置忙（isBusy）
-	acw   bool // 话后整理中（acw）
-	leave bool // 离席（isLeave）
+	busy   bool // 置忙（isBusy）
+	isWork bool // 话后整理中（isWork）
+	leave  bool // 离席（isLeave）
 }
 
 // 状态颜色（与托盘/应用图标同口径，REQ-UI-011 修订）：
@@ -33,8 +33,8 @@ var dotColors = map[string]color.Color{
 // busyColor 已注册且坐席置忙/离席的颜色（与托盘黄色图标一致：#fbc02d）。
 var busyColor = color.NRGBA{R: 0xfb, G: 0xc0, B: 0x2d, A: 0xff}
 
-// acwColor 已注册且坐席话后整理中的颜色（蓝色，与托盘蓝色图标一致：#2196f3）。
-var acwColor = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff}
+// isWorkColor 已注册且坐席话后整理中的颜色（蓝色，与托盘蓝色图标一致：#2196f3）。
+var isWorkColor = color.NRGBA{R: 0x21, G: 0x96, B: 0xf3, A: 0xff}
 
 func newStatusDot(state string) *statusDot {
 	d := &statusDot{state: state}
@@ -48,8 +48,8 @@ func (d *statusDot) color() color.Color {
 		switch {
 		case d.leave:
 			return busyColor
-		case d.acw:
-			return acwColor
+		case d.isWork:
+			return isWorkColor
 		case d.busy:
 			return busyColor
 		}
@@ -60,15 +60,15 @@ func (d *statusDot) color() color.Color {
 	return dotColors["unregistered"]
 }
 
-// setAgentStatus 更新坐席状态（free/busy/acw/leave，只影响已注册时的颜色）。
+// setAgentStatus 更新坐席状态（free/busy/work/leave，只影响已注册时的颜色）。
 func (d *statusDot) setAgentStatus(status string) {
 	busy := status == "busy"
-	acw := status == "acw"
+	isWork := status == "work"
 	leave := status == "leave"
-	if d.busy == busy && d.acw == acw && d.leave == leave {
+	if d.busy == busy && d.isWork == isWork && d.leave == leave {
 		return
 	}
-	d.busy, d.acw, d.leave = busy, acw, leave
+	d.busy, d.isWork, d.leave = busy, isWork, leave
 	d.Refresh()
 }
 

@@ -38,7 +38,6 @@ SDK 由软电话自身提供，**不需要在页面里放一份**：
   <script src="http://127.0.0.1:8765/sdk/sip-phone-sdk.js"></script>
   <script>
     const sdk = new SipPhoneSDK({ url: 'ws://127.0.0.1:8765/ws' });
-    let callId = null;
 
     sdk.on('connected',    () => status.textContent = '已连接软电话');
     sdk.on('disconnected', () => status.textContent = '已断开');
@@ -49,24 +48,21 @@ SDK 由软电话自身提供，**不需要在页面里放一份**：
 
     // 来电：这里先自动接听演示；实际产品应展示接听/拒接按钮
     sdk.on('call.incoming', (data) => {
-      callId = data.callId;
-      sdk.answer(callId).catch((e) => console.error('接听失败', e.message));
+      sdk.answer().catch((e) => console.error('接听失败', e.message));
     });
 
     sdk.on('call.established', (data) => {
-      callId = data.callId;
       hangup.disabled = false;
       status.textContent = '通话中：' + data.call.remote;
     });
 
     sdk.on('call.terminated', () => {
-      callId = null;
       hangup.disabled = true;
       status.textContent = '通话结束';
     });
 
-    dial.onclick = () => sdk.dial('1001').then((r) => { callId = r.callId; });
-    hangup.onclick = () => callId && sdk.hangup(callId);
+    dial.onclick = () => sdk.dial('1001');
+    hangup.onclick = () => sdk.hangup();
 
     sdk.connect().catch((e) => status.textContent = '连接失败：' + e.message);
   </script>
@@ -75,7 +71,8 @@ SDK 由软电话自身提供，**不需要在页面里放一份**：
 ```
 
 三件事记住就够起步：**`connect()` 必须显式调用**（构造函数不会自动连）、
-**一切操作都要 `callId`**（来自事件或 `dial` 的返回值）、**事件用 `on('call.xxx', fn)` 订阅**。
+**通话类操作不用传 `callId`**（软电话是**单通话**设计，自己知道当前通话，不在通话会返回
+`call_not_found`；`dial` 仍返回 `{callId}` 供显示）、**事件用 `on('call.xxx', fn)` 订阅**。
 
 ## 3. 连接与生命周期
 
@@ -118,7 +115,7 @@ await sdk.connect();
 
 | 概念 | 说明 |
 | --- | --- |
-| **callId** | 每通电话的唯一标识。**只有两个来源**：事件负载里的 `data.callId`，或 `dial()` 的返回值。不要自己猜/缓存失效的 ID |
+| **callId** | 每通电话的唯一标识（来自事件负载的 `data.callId` 或 `dial()` 的返回值）。**通话类方法不再需要你传 `callId`**——软电话是单通话，自己定位当前通话；`callId` 主要用于展示/日志/通话记录 |
 | **Promise 错误** | 所有方法返回 Promise；失败时 reject 一个 `Error`，**`err.code`** 是错误码（见 §7），`err.message` 是中文描述 |
 | **事件** | 软电话广播给**所有**已连接页面；`sdk.on('事件名', fn)` 订阅，`on('*')` 订阅全部（本地事件 `connected`/`disconnected` 除外） |
 | **通话状态** | `ringing`（振铃）→ `established`（通话中）→ `terminated`（结束）；呼出另有 `call.dialing` |
@@ -130,27 +127,26 @@ await sdk.connect();
 
 | 方法 | 说明 |
 | --- | --- |
-| `dial(target, {video, name})` | 拨号。`target` 为号码或 SIP URI；`video: true`（或 `dialVideo(target)`）发起**视频呼叫**；`name` = 对端显示名（如在线座席列表的 `displayName`，**优先于通信录名称**，为空照旧）。返回 `{callId}` |
-| `answer(callId, {video})` | 接听。`video: true`（或 `answerVideo(callId)`）= **视频接听**（开摄像头双向视频）；普通接听 = 不接受视频（对端也不再发） |
-| `hangup(callId)` | 挂断（振铃中呼出 = 取消；振铃中呼入 = 拒接） |
-| `reject(callId, code)` | 拒接，`code` 为 SIP 状态码，默认 `486` |
-| `mute(callId, muted)` | **保持/取消保持**（走 SIP re-INVITE，对端会看到"保持"）。与麦克风开关是两回事 |
-| `sendDTMF(callId, digit)` | 发送 DTMF（RFC 4733），`digit` 为单字符 `0-9 * # A-D`；**仅通话接通后有效** |
+| `dial(target, {video, name})` | 拨号。`target` 为号码或 SIP URI；`video: true` 发起**视频呼叫**；`name` = 对端显示名（如在线座席列表的 `displayName`，**优先于通信录名称**，为空照旧）。返回 `{callId}` |
+| `answer({video})` | 接听。`video: true` = **视频接听**（开摄像头双向视频）；普通接听 = 不接受视频（对端也不再发） |
+| `hangup()` | 挂断。话机按当前通话状态自动决定：**来电振铃 → 拒接（486）**、**呼出振铃 → 取消（CANCEL）**、**通话中 → 挂断（BYE）** |
+| `hold()` / `unhold()` | **保持 / 取消保持**（走 SIP re-INVITE，对端会看到"保持"）。与麦克风开关是两回事 |
+| `sendDTMF(digit)` | 发送 DTMF（RFC 4733），`digit` 为单字符 `0-9 * # A-D`；**仅通话接通后有效** |
 
 ### 5.2 音频控制（纯本地动作，不发 SIP 信令）
 
 | 方法 | 说明 |
 | --- | --- |
-| `muteMic(callId, muted)` | 麦克风开关（关 = 不发送，对端听不到） |
-| `muteSpeaker(callId, muted)` | 扬声器开关（关 = 不播放，仍继续接收） |
-| `setMicGain(callId, 0..200)` | 麦克风增益，百分比整数。**0 = 禁用**（等同关麦克风），>0 自动解除禁用 |
-| `setSpeakerVolume(callId, 0..100)` | 扬声器音量，百分比整数。**0 = 禁用** |
+| `muteMic(muted)` | 麦克风开关（关 = 不发送，对端听不到） |
+| `muteSpeaker(muted)` | 扬声器开关（关 = 不播放，仍继续接收） |
+| `setMicGain(0..200)` | 麦克风增益，百分比整数。**0 = 禁用**（等同关麦克风），>0 自动解除禁用 |
+| `setSpeakerVolume(0..100)` | 扬声器音量，百分比整数。**0 = 禁用** |
 
 ### 5.3 视频
 
 | 方法 | 说明 |
 | --- | --- |
-| `setVideo(callId, enabled)` | 本次通话的**视频总开关**（关 = 不看远端、不推本地、视频窗口关闭） |
+| `setVideo(enabled)` | 本次通话的**视频总开关**（关 = 不看远端、不推本地、视频窗口关闭） |
 | `subscribeVideo(opts)` | 订阅画面并**由 SDK 渲染到 `<video>`**，见 §6 |
 | `unsubscribeVideo()` | 取消本连接的全部订阅（软电话恢复显示自己的视频窗口） |
 | `rotateVideo(channel?)` / `mirrorVideo(channel?)` | 画面旋转 +90° / 水平镜像开关；状态**存在软电话侧**，桌面窗口的按钮会同步变化 |
@@ -260,8 +256,10 @@ const { agents } = await sdk.listAgents();   // 在线座席
 await sdk.setAgentBusy(true);                // 置忙（false = 置闲；同 setIdle()/setBusy()）
 await sdk.leave();                           // 离席（isLeave=true）
 await sdk.resume();                          // 复席（isLeave=false，重新进入分配队列）
+await sdk.setWork(60);                       // 话后整理（可选 workSeconds 整理时长秒数）
 await sdk.takeover('2002');                  // 代接 2002 的振铃来电
 await sdk.monitor('2002');                   // 班长监听
+await sdk.stopMonitor();                     // 结束监听
 await sdk.consult('2002');                   // 咨询（转移/三方见下表）
 ```
 
@@ -270,11 +268,12 @@ await sdk.consult('2002');                   // 咨询（转移/三方见下表�
 | `listAgents()` | 在线座席：`{agents:[{agent,displayName,acd,agentMode,agentStatus}], count}`（按座席号排序） |
 | `setAgentBusy(busy)` / `setBusy()` / `setIdle()` | 坐席置忙/置闲；生效状态经 `cti.agent` 事件回显 |
 | `leave()` / `resume()` | 坐席离席 / 复席（`isLeave` 置 `true`/`false`）；生效状态经 `cti.agent` 事件回显 |
+| `setWork(workSeconds?)` | 坐席话后整理（`isWork=true`）；`workSeconds` 为整理时长（秒，可选，缺省取服务端上限）；生效状态经 `cti.agent` 事件回显 |
 | `setConferenceMemberMuted(member, muted)` / `setConferenceMemberDeafened(member, deafened)` / `setConferenceMemberVideoMuted(member, muted)` | 会议成员会控（owner，参数 `member` 为成员号码） |
 | `ctiAction(action, arg?)` | 通用入口：`arg` 为字符串 = `target`、数组 = `members`、对象 = 直接并入参数（如 `{member: "2002"}`） |
 | `consult(target)` / `consultThreeWay(target)` | 咨询 / 咨询转三方 |
 | `transfer(target)` / `consultTransfer(target)` | 直接转移 / 咨询转移 |
-| `monitor(target)` / `takeover(target)` | 监听 / 代接 |
+| `monitor(target)` / `stopMonitor()` / `takeover(target)` | 监听 / 结束监听 / 代接 |
 | `exitThreeWay(target)` | 三方通话里强制挂断某一方（仅 owner） |
 | `addConferenceMembers(members)` / `removeConferenceMembers(members)` | 加/减会议成员 |
 | `finishConsult()` / `finishConference()` | 结束咨询 / 结束会议（owner） |
@@ -283,12 +282,12 @@ await sdk.consult('2002');                   // 咨询（转移/三方见下表�
 失败错误码：`cti_failed`（平台拒绝，`message` 里带平台错误码）、`cti_busy`（已有指令在途，
 同一时间只允许一条）、`cti_timeout`、`cti_not_agent`。
 
-坐席状态统一走 **`cti.agent` 事件**（负载 `{displayName, agentMode, isBusy, acw, isLeave}`，
+坐席状态统一走 **`cti.agent` 事件**（负载 `{displayName, agentMode, isBusy, isWork, isLeave}`，
 **`agentMode=none` 表示不在坐席模式**）；`getState()` 里只留 `agentMode`（none = 不在线）。
 **状态归纳**（离席优先级最高）：`isLeave=true` → 离席，
-`isBusy=true && acw=true` → 整理中，`isBusy=true` → 置忙，否则空闲。座席状态颜色约定与桌面一致：
+`isBusy=true && isWork=true` → 整理中，`isBusy=true` → 置忙，否则空闲。座席状态颜色约定与桌面一致：
 空闲绿、置忙黄、整理中蓝、离席黄。在线座席列表（`listAgents`）的 `agentStatus` 颜色口径另见其字段说明：
-`free` 绿、`dialing`/`ringing`/`talking` 黄、其余（`busy`/`leave`/`not_ready`/`miss_phone`/`offline`…）红。
+`free` 绿、`dialing`/`ringing`/`talking` 黄、其余（`busy`/`work`/`leave`/`not_ready`/`miss_phone`/`offline`…）红。
 
 ## 6. 视频订阅（重点）
 
@@ -346,7 +345,7 @@ sub.transforms();
 | `calllog.changed` | 通话记录被删除/清空 | `{action, deleted}`（新增记录仍由 `call.terminated`/`call.failed` 驱动） |
 | `system.config` | 配置被改写 | `{section, values}`，`section`: `account`/`audio`/`video`/`log`/`ws`/`autoStart` |
 | `audio.ready` | 音频后端后台初始化完成 | `{ready}`；据此刷新设备下拉（无 UI 版没有桌面界面，这是唯一信号） |
-| `cti.agent` | 坐席状态变化 | `{displayName, agentMode, isBusy, acw, isLeave}`；`agentMode=none` 表示不在线（连接建立时在 `system.state` 之后、`call.panel` 之前补推一份） |
+| `cti.agent` | 坐席状态变化 | `{displayName, agentMode, isBusy, isWork, isLeave}`；`agentMode=none` 表示不在线（连接建立时在 `system.state` 之后、`call.panel` 之前补推一份） |
 | `cti.state` | 通话的话务状态变化（双方通话生命周期 CALL_*，以及咨询/三方/监听/会议） | `{callId, call}`；`call.cti` 是完整 `CTIState`（`talkState` 等；双方通话另有 `mspCallId`（CTI 侧话务 ID）、`callPhase`（`dialing`/`ringing`/`talking`）、主被叫与接听坐席的名称字段）。`callPhase=ringing` 时把状态显示为「振铃中」；`CALL_FINISHED`/`CALL_FAILED` 由软电话挂断，页面收到 `call.terminated` 关掉通话卡片即可 |
 | `cti.failed` | CTI 话务失败（CALL_FAILED / CONSULT_FAILED） | `{callId, kind, reason, message}`；`kind=call`（refuse 呼叫未接通 / cancel 呼叫已取消 / takeover 呼叫被代接）、`kind=consult`（refuse 咨询未接通 / cancel 咨询已取消），`message` 已翻成中文，直接 toast 即可 |
 | `call.panel` | **通话面板快照**（REQ-WS-023 / REQ-SDK-010，由 CTI 的 `MSP_CALL_PANEL_UPDATED`/`MSP_CONFERENCE_PANEL_UPDATED` 整份面板驱动） | `{agentMode, isBusy, callPanel, conferencePanel}`。应用可直接用它渲染自己的通话面板。**字段保留协议名、不丢弃话机未用到的属性**（`callStatus`/`callerNo`/`calledNo`/`intercom`/`ringingTime`/`offhookTime` 等原样交给应用），唯一的改写是 `peer`/`member` 合并成 `{number,name,note}` 对象：`callPanel` = `{callId, agent?, callType?, callMode?, owner?, state, startTime, title, failCause?, callList}`。`callPanel.owner` 是**当前操作的发起方**（咨询=咨询方、三方=发起方、监听=班长；`callMode=normal` 时没有）：`normal` 才显示咨询/转移/会议入口；`consult` 时只有 owner 显示三方/咨询转移/结束咨询（被咨询方按普通通话显示）；`three-way` 时只有 owner 显示移除/强制挂断。`callPanel.title` 是状态文案、`callPanel.state` 决定显示哪些按钮（`dialing`/`ringing`/`incoming`/`talking`/`consult-dialing`/`consult-ringing`/`consult-talking`/`three-way`/`monitoring`/`whispering`）、`callList` 每项 = `{callerNo?, calledNo?, peer:{number,name,note}, intercom?, skillGroup?, callType?, callStatus, startTime, ringingTime?, offhookTime?, target?（监听时的被叫）}`。会议时 `conferencePanel` = `{confId, owner（主持人号码）, memberList:[{member:{number,name,note}, intercom, owner, state, timestamp}]}`（`member` 与 `peer` 同为对象；主持人第一行；`state` 透传 dialing/ringing/talking/holding 与会控 muted/deafened/vmuted）。**`peer`/`member` 的 `note` 只在协议没有给名称、回退到通信录时才有**（此时 `name` 也来自通信录）；协议已经给了名称时只有 `name`、不带备注。**两个 panel 互斥**：会议接通后只有 `conferencePanel`；被叫在会议邀请振铃阶段只有 `callPanel`（来电），接通后才切换。**两个 panel 都为 `null` 表示没有进行中的通话**（关闭面板） |

@@ -206,7 +206,7 @@ TITLE=""
 # macOS 只能在 macOS 上编译：本地容器在编 Windows/Linux 的 10 个产物时，同时
 # 触发 GitHub Actions 编 darwin 两个架构，跑完把 artifact 下载回 dist/：
 #   裸二进制（自动更新下载的目标）→ dist/sip-phone[-no-ui]-darwin-<arch>
-#   universal DMG（首次安装包）    → dist/macos/，另存稳定副本 dist/macos-dmg-<变体>.dmg
+#   universal DMG（首次安装包）    → 解压后直接改名为 dist/macos-dmg-<变体>.dmg（稳定名，上传用）
 # dispatch 放在容器编译之前、collect 放在之后，两边并行，总时长取较慢的一边。
 GH_REPO="${GH_REPO:-wuzhengmao/mti-sip-phone}"
 GH_WORKFLOW="${GH_WORKFLOW:-build.yml}"
@@ -425,10 +425,11 @@ collect_darwin_ci() {
         cp -f "$CI_WORKDIR/bins/$f" "$ROOT/dist/$f"
         chmod 755 "$ROOT/dist/$f"
     done
-    mkdir -p "$ROOT/dist/macos"
-    cp -f "$CI_WORKDIR/dmg/"*.dmg "$ROOT/dist/macos/"
-    full_dmg="$(ls "$ROOT/dist/macos/"MTI-SIP-Phone-full-*.dmg 2>/dev/null | head -1)"
-    no_dmg="$(ls "$ROOT/dist/macos/"MTI-SIP-Phone-no-ui-*.dmg 2>/dev/null | head -1)"
+    # DMG 解压后直接改名为稳定名，不再先归档到 dist/macos 再 ls 选：
+    # DMG 文件名带版本号，归档目录里残留旧版本会让 ls 按字典序选错（真机踩过）。
+    # 这里直接在刚解压的临时目录里 glob（只有本次产物），cp 成稳定名即可。
+    full_dmg="$(ls "$CI_WORKDIR/dmg/"MTI-SIP-Phone-full-*.dmg 2>/dev/null | head -1)"
+    no_dmg="$(ls "$CI_WORKDIR/dmg/"MTI-SIP-Phone-no-ui-*.dmg 2>/dev/null | head -1)"
     [ -n "$full_dmg" ] || { echo "Actions 产物缺少完整版 DMG" >&2; exit 1; }
     [ -n "$no_dmg" ] || { echo "Actions 产物缺少无 UI 版 DMG" >&2; exit 1; }
     cp -f "$full_dmg" "$ROOT/dist/macos-dmg-full.dmg"

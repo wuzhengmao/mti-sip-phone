@@ -46,7 +46,7 @@ func TestAgentStatusColor(t *testing.T) {
 		{"ringing", "yellow"},
 		{"talking", "yellow"},
 		{"busy", "red"},
-		{"acw", "red"},
+		{"work", "red"},
 		{"free_offhook", "red"},
 		{"offline", "red"},
 		{"", "red"},

@@ -1,7 +1,7 @@
 /**
  * mti-sip-phone 网页端 JS SDK
  *
- * 通过本地 WebSocket 连接 SIP 软电话，实现对软电话的控制（拨号/接听/挂断/拒接/静音）
+ * 通过本地 WebSocket 连接 SIP 软电话，实现对软电话的控制（拨号/接听/挂断/保持/静音）
  * 与事件监听（来电振铃、通话建立、挂断、注册状态变化等）。
  *
  * 用法：
@@ -28,7 +28,7 @@
  *   await sdk.importContactsJSON(list); // 导入 JSON（REST POST /api/contacts，收数组或整个对象）
  *
  * 视频（REQ-VIDEO-009）：
- *   await sdk.dialVideo('1001');                     // 视频呼叫
+ *   await sdk.dial('1001', { video: true });        // 视频呼叫
  *   await sdk.subscribeVideo({                       // 订阅并把画面渲染到 <video>
  *     remote: document.getElementById('remoteVideo'),  // 必传
  *     local:  document.getElementById('localVideo')    // 可选（不传 = 不订阅本地回显）
@@ -199,7 +199,7 @@
      * 事件名：call.incoming / call.ringing / call.dialing / call.established /
      *         call.terminated / call.failed / call.muted / call.audio（麦克风/扬声器开关）/
      *         call.video / call.panel（通话面板快照，见 SipCallPanelState）/
-     *         cti.agent（坐席状态变化：{displayName, agentMode, isBusy, acw, isLeave}，
+     *         cti.agent（坐席状态变化：{displayName, agentMode, isBusy, isWork, isLeave}，
      *                   agentMode=none 表示不在线）/
      *         cti.state（通话话务状态变化：{call}，call.cti 见协议 §16）/
      *         cti.failed（CTI 话务失败：{callId, kind, reason, message}）/
@@ -250,126 +250,96 @@
     }
 
     /**
-     * 视频呼叫（dial 的便捷写法）。
-     * @param {string} target 号码或 SIP URI
-     * @param {string} [name] 对端显示名（可选）
-     * @returns {Promise<{callId: string}>}
-     */
-    dialVideo(target, name) {
-      return this.dial(target, { video: true, name: name });
-    }
-
-    /**
      * 接听。
-     * @param {string} callId
      * @param {{video?: boolean}} [options] video=true 视频接听（打开摄像头双向视频）
      * @returns {Promise<{callId: string}>}
      */
-    answer(callId, options) {
+    answer(options) {
       options = options || {};
-      return this._request('call.answer', { callId: callId, video: !!options.video });
+      return this._request('call.answer', { video: !!options.video });
     }
 
     /**
-     * 视频接听（answer 的便捷写法）。
-     * @param {string} callId
+     * 挂断。话机按当前通话状态自动决定：来电振铃 → 拒接（486）、
+     * 呼出振铃 → 取消（CANCEL）、通话中 → 挂断（BYE）。
      * @returns {Promise<{callId: string}>}
      */
-    answerVideo(callId) {
-      return this.answer(callId, { video: true });
+    hangup() {
+      return this._request('call.hangup', {});
     }
 
     /**
-     * 挂断。
-     * @param {string} callId
+     * 保持（走 SIP re-INVITE，对端会看到"保持"）。
      * @returns {Promise<{callId: string}>}
      */
-    hangup(callId) {
-      return this._request('call.hangup', { callId: callId });
+    hold() {
+      return this._request('call.mute', { muted: true });
     }
 
     /**
-     * 拒接。
-     * @param {string} callId
-     * @param {number} [code] SIP 状态码，默认 486（忙）
+     * 取消保持。
      * @returns {Promise<{callId: string}>}
      */
-    reject(callId, code) {
-      return this._request('call.reject', { callId: callId, code: code || 486 });
-    }
-
-    /**
-     * 保持（静音）切换。
-     * @param {string} callId
-     * @param {boolean} muted
-     * @returns {Promise<{callId: string}>}
-     */
-    mute(callId, muted) {
-      return this._request('call.mute', { callId: callId, muted: !!muted });
+    unhold() {
+      return this._request('call.mute', { muted: false });
     }
 
     /**
      * 麦克风开关（纯本地动作，不发 SIP 信令；状态变化推 call.audio 事件）。
-     * @param {string} callId
      * @param {boolean} muted true = 静音麦克风（停止发送本地音频）
      * @returns {Promise<{callId: string}>}
      */
-    muteMic(callId, muted) {
-      return this._request('call.muteMic', { callId: callId, muted: !!muted });
+    muteMic(muted) {
+      return this._request('call.muteMic', { muted: !!muted });
     }
 
     /**
      * 扬声器开关（纯本地动作，继续接收）。
-     * @param {string} callId
      * @param {boolean} muted true = 静音扬声器（停止本地播放）
      * @returns {Promise<{callId: string}>}
      */
-    muteSpeaker(callId, muted) {
-      return this._request('call.muteSpeaker', { callId: callId, muted: !!muted });
+    muteSpeaker(muted) {
+      return this._request('call.muteSpeaker', { muted: !!muted });
     }
 
     /**
      * 麦克风增益（REQ-MEDIA-006，纯本地动作，不发 SIP 信令）。
      * 0 = 禁用（等同把麦克风开关关掉），大于 0 时同时解除禁用。
      * 状态变化会推 call.audio 事件（滚轮连调时事件会被合并，见软电话侧说明）。
-     * @param {string} callId
      * @param {number} gainPercent 0–200 的百分比整数
      * @returns {Promise<{callId: string}>}
      */
-    setMicGain(callId, gainPercent) {
-      return this._request('call.setMicGain', { callId: callId, gain: Math.round(gainPercent) });
+    setMicGain(gainPercent) {
+      return this._request('call.setMicGain', { gain: Math.round(gainPercent) });
     }
 
     /**
      * 扬声器音量（REQ-MEDIA-006，纯本地动作）。
      * 0 = 禁用（等同把扬声器开关关掉），大于 0 时同时解除禁用。
-     * @param {string} callId
      * @param {number} volumePercent 0–100 的百分比整数
      * @returns {Promise<{callId: string}>}
      */
-    setSpeakerVolume(callId, volumePercent) {
-      return this._request('call.setSpeakerVolume', { callId: callId, speakerVolume: Math.round(volumePercent) });
+    setSpeakerVolume(volumePercent) {
+      return this._request('call.setSpeakerVolume', { speakerVolume: Math.round(volumePercent) });
     }
 
     /**
      * 发送 DTMF（RFC 4733 telephone-event，通话接通后有效，REQ-CALL-006）。
-     * @param {string} callId
      * @param {string} digit 单个字符：0-9 * # A-D
      * @returns {Promise<{callId: string}>}
      */
-    sendDTMF(callId, digit) {
-      return this._request('call.dtmf', { callId: callId, digit: String(digit) });
+    sendDTMF(digit) {
+      return this._request('call.dtmf', { digit: String(digit) });
     }
 
     /**
      * 视频总开关（纯本地动作，不发 SIP 信令，REQ-VIDEO-008）：
      * 关闭 = 不显示远端视频、不推送本地视频、视频窗口关闭；状态见 call.video 事件。
-     * @param {string} callId
      * @param {boolean} enabled
      * @returns {Promise<{callId: string}>}
      */
-    setVideo(callId, enabled) {
-      return this._request('call.setVideo', { callId: callId, enabled: !!enabled });
+    setVideo(enabled) {
+      return this._request('call.setVideo', { enabled: !!enabled });
     }
 
     /**
@@ -418,7 +388,7 @@
 
     /**
      * 坐席置忙/置闲（协议 §9.3 的 setBusy / setIdle）。
-     * 真正生效后的状态经 `cti.agent` 事件回显（{displayName, agentMode, isBusy, acw, isLeave}）。
+     * 真正生效后的状态经 `cti.agent` 事件回显（{displayName, agentMode, isBusy, isWork, isLeave}）。
      * @param {boolean} busy true = 置忙，false = 置闲
      * @returns {Promise<{action: string, seq: string}>}
      */
@@ -438,6 +408,11 @@
     /** 坐席复席（协议 §9.3 的 resume，isLeave=false，重新进入分配队列） */
     resume() { return this.ctiAction('resume'); }
 
+    /** 坐席话后整理（协议 §9.3 的 setWork，isWork=true）；workSeconds 为整理时长（秒，可选，缺省取服务端上限） */
+    setWork(workSeconds) {
+      return this.ctiAction('setWork', workSeconds ? { workSeconds: Math.round(workSeconds) } : undefined);
+    }
+
     /**
      * 发起一条 CTI 反向控制指令（REQ-ACC-026），与桌面通话面板的按钮一致：
      * 指令经 out-of-dialog NOTIFY（Event: MSP_ACTION）发给 CTI，等 MSP_RESULT
@@ -448,7 +423,8 @@
      *   consult / consultThreeWay / transfer / consultTransfer /
      *   monitor / takeover / exitThreeWay          → target（号码字符串）
      *   addConferenceMembers / removeConferenceMembers → members（号码数组）
-     *   finishConsult / finishConference / whisper / stopWhisper /
+     *   setWork                                     → {workSeconds}（可选，整理时长秒数）
+     *   finishConsult / finishConference / whisper / stopWhisper / stopMonitor /
      *   intervene / intercept / setBusy / setIdle / leave / resume  → 不需要参数
      *
      * @param {string} action 动作名
@@ -481,6 +457,9 @@
 
     /** 监听某坐席（班长模式） */
     monitor(target) { return this.ctiAction('monitor', target); }
+
+    /** 结束监听（协议 §9.2 的 stopMonitor） */
+    stopMonitor() { return this.ctiAction('stopMonitor'); }
 
     /** 代接某坐席的振铃来电 */
     takeover(target) { return this.ctiAction('takeover', target); }
@@ -554,7 +533,7 @@
      * 查询当前坐席状态（`cti.agent` 事件的负载，REQ-ACC-028）。
      * agentMode=none 表示不在坐席模式。
      * @returns {Promise<{displayName: string, agentMode: string, isBusy: boolean,
-     *   acw: boolean, isLeave: boolean, phoneStatus: string, agentStatus: string}>}
+     *   isWork: boolean, isLeave: boolean, phoneStatus: string, agentStatus: string}>}
      */
     getAgentState() {
       return this._request('system.getAgentState', {});

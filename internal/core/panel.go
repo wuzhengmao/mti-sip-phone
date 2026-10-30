@@ -96,7 +96,7 @@ type ConferencePanel struct {
 }
 
 // CallPanelState call.panel 事件的负载（REQ-WS-023）。
-// 只含通话/会议面板快照；坐席状态（agentMode/isBusy/acw/isLeave）统一走
+// 只含通话/会议面板快照；坐席状态（agentMode/isBusy/isWork/isLeave）统一走
 // cti.agent 事件，不在这里重复（用户要求去重）。
 type CallPanelState struct {
 	CallPanel       *CallPanel       `json:"callPanel"` // 无通话时为 null

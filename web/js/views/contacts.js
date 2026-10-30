@@ -64,7 +64,7 @@ window.SipApp.views = window.SipApp.views || {};
     });
     const vcall = App.dom.el('button', { class: 'ghost' }, '视频');
     vcall.addEventListener('click', function () {
-      sdk.dialVideo(c.number).catch(function (e) { App.ui.toast(App.util.errText(e), 'err'); });
+      sdk.dial(c.number, { video: true }).catch(function (e) { App.ui.toast(App.util.errText(e), 'err'); });
     });
     const edit = App.dom.el('button', { class: 'ghost' }, '编辑');
     edit.addEventListener('click', function () { editContact(c); });

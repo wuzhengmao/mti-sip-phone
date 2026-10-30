@@ -327,7 +327,7 @@ func agentStatusColor(status string) color.NRGBA {
 		return colorSuccessGreen
 	case "dialing", "ringing", "talking":
 		return colorHoldYellow
-	default: // busy / acw / leave / not_ready / miss_phone / offline / free_offhook / 未知
+	default: // busy / work / leave / not_ready / miss_phone / offline / free_offhook / 未知
 		return colorDangerRed
 	}
 }
@@ -347,7 +347,7 @@ func agentStatusText(status string) string {
 		return "摘机"
 	case "busy":
 		return "置忙"
-	case "acw":
+	case "work":
 		return "整理中"
 	case "leave":
 		return "离席"

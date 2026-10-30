@@ -15,7 +15,7 @@ type agentState struct {
 	online      bool
 	mode        string // none / normal / dial_out / monitor（协议 §16.1）
 	busy        bool   // 置忙（isBusy）
-	acw         bool   // 话后整理态（isBusy=true 且 acw=true → 整理中）
+	isWork      bool   // 话后整理态（isBusy=true 且 isWork=true → 整理中）
 	leave       bool   // 离席（isLeave）
 	displayName string // 坐席显示名（AGENT_ONLINE 的 displayName，可能为空）
 }
@@ -206,13 +206,13 @@ func (a *App) OnMSPEvent(event string, body map[string]any) {
 		name := strOf(body, "displayName")
 		mode := normalizeAgentMode(strOf(body, "agentMode"))
 		busy, _ := body["isBusy"].(bool)
-		acw, _ := body["acw"].(bool)
+		isWork, _ := body["isWork"].(bool)
 		leave, _ := body["isLeave"].(bool)
 		if mode == AgentModeNone {
 			a.setAgentOnline(false, "", AgentModeNone, false, false, false)
 			return
 		}
-		a.setAgentOnline(true, name, mode, busy, acw, leave)
+		a.setAgentOnline(true, name, mode, busy, isWork, leave)
 		// 协议 §16.1 新增 status：CTI 侧认为的话机状态（free/dialing/ringing/
 		// talking/holding）。与本地不一致时立即补发一次心跳上报本地真实状态，
 		// 否则要等下一个心跳周期（默认 20 秒）CTI 才能收敛。
@@ -440,11 +440,11 @@ func (a *App) AgentBusy() bool {
 	return a.agent.online && a.agent.busy
 }
 
-// AgentACW 坐席是否处于话后整理态（acw）；未登录坐席时恒 false。
-func (a *App) AgentACW() bool {
+// AgentIsWork 坐席是否处于话后整理态（isWork）；未登录坐席时恒 false。
+func (a *App) AgentIsWork() bool {
 	a.agent.mu.Lock()
 	defer a.agent.mu.Unlock()
-	return a.agent.online && a.agent.acw
+	return a.agent.online && a.agent.isWork
 }
 
 // AgentLeave 坐席是否离席（isLeave）；未登录坐席时恒 false。
@@ -454,8 +454,8 @@ func (a *App) AgentLeave() bool {
 	return a.agent.online && a.agent.leave
 }
 
-// AgentStatus 坐席状态的归一化值（协议 §16.1 的 isBusy/acw/isLeave 归纳）：
-// free / busy / acw / leave；未进坐席模式返回空串。
+// AgentStatus 坐席状态的归一化值（协议 §16.1 的 isBusy/isWork/isLeave 归纳）：
+// free / busy / work / leave；未进坐席模式返回空串。
 // 优先级（用户口径）：离席 > 整理中 > 置忙 > 空闲。
 func (a *App) AgentStatus() string {
 	a.agent.mu.Lock()
@@ -466,8 +466,8 @@ func (a *App) AgentStatus() string {
 	switch {
 	case a.agent.leave:
 		return "leave"
-	case a.agent.busy && a.agent.acw:
-		return "acw"
+	case a.agent.busy && a.agent.isWork:
+		return "work"
 	case a.agent.busy:
 		return "busy"
 	default:
@@ -481,7 +481,7 @@ func (a *App) AgentStatusText() string {
 	switch a.AgentStatus() {
 	case "leave":
 		return "离席"
-	case "acw":
+	case "work":
 		return "整理中"
 	case "busy":
 		return "置忙"
@@ -494,19 +494,23 @@ func (a *App) AgentStatusText() string {
 // deriveAgentStatus 由 phoneStatus（MSP_HEARTBEAT 的 status）与坐席状态推算
 // agentStatus（取值与 SipAgent.agentStatus 一致，用户口径）：
 //
+//	online=false（agentMode=none）→ offline
 //	isLeave=true → leave
-//	phoneStatus=free：isBusy=true → busy（acw=false）/ acw（acw=true）；isBusy=false → free
+//	phoneStatus=free：isBusy=true → busy（isWork=false）/ work（isWork=true）；isBusy=false → free
 //	phoneStatus=dialing → dialing；ringing → ringing；talking/holding → talking
 //	其它 → unknown
-func deriveAgentStatus(phoneStatus string, isLeave, isBusy, acw bool) string {
+func deriveAgentStatus(phoneStatus string, isLeave, isBusy, isWork, online bool) string {
+	if !online {
+		return "offline"
+	}
 	if isLeave {
 		return "leave"
 	}
 	switch phoneStatus {
 	case "free":
 		if isBusy {
-			if acw {
-				return "acw"
+			if isWork {
+				return "work"
 			}
 			return "busy"
 		}
@@ -525,18 +529,18 @@ func deriveAgentStatus(phoneStatus string, isLeave, isBusy, acw bool) string {
 // agentEventData 构造 cti.agent 事件的负载（REQ-ACC-028）。
 // **不含 online**：是否在线由 `agentMode=none` 表示（用户要求去重）。
 // phoneStatus 是 MSP_HEARTBEAT 上报的 status，agentStatus 由它推算出。
-func agentEventData(on bool, displayName, mode string, busy, acw, leave bool, phoneStatus string) map[string]any {
+func agentEventData(on bool, displayName, mode string, busy, isWork, leave bool, phoneStatus string) map[string]any {
 	isLeave := on && leave
 	isBusy := on && busy
-	isACW := on && acw
+	isWorkOn := on && isWork
 	return map[string]any{
 		"displayName": displayName,
 		"agentMode":   mode,
 		"isBusy":      isBusy,
-		"acw":         isACW,
+		"isWork":      isWorkOn,
 		"isLeave":     isLeave,
 		"phoneStatus": phoneStatus,
-		"agentStatus": deriveAgentStatus(phoneStatus, isLeave, isBusy, isACW),
+		"agentStatus": deriveAgentStatus(phoneStatus, isLeave, isBusy, isWorkOn, on),
 	}
 }
 
@@ -549,14 +553,14 @@ func (a *App) AgentState() map[string]any {
 	displayName := a.agent.displayName
 	mode := a.agent.mode
 	busy := a.agent.busy
-	acw := a.agent.acw
+	isWork := a.agent.isWork
 	leave := a.agent.leave
 	a.agent.mu.Unlock()
 
 	if mode == "" || !on {
 		mode = AgentModeNone
 	}
-	return agentEventData(on, displayName, mode, busy, acw, leave, a.callStatus())
+	return agentEventData(on, displayName, mode, busy, isWork, leave, a.callStatus())
 }
 
 // publishAgentState 发布当前坐席状态（cti.agent），带最新 phoneStatus 与推算的
@@ -566,30 +570,30 @@ func (a *App) publishAgentState() {
 }
 
 // setAgentOnline 更新坐席模式（心跳由注册状态驱动，见 startHeartbeat）。
-// displayName / mode / busy / acw / leave 只在 online=true 时有意义；状态有变化
+// displayName / mode / busy / isWork / leave 只在 online=true 时有意义；状态有变化
 // 才发布 cti.agent。
-func (a *App) setAgentOnline(on bool, displayName, mode string, busy, acw, leave bool) {
+func (a *App) setAgentOnline(on bool, displayName, mode string, busy, isWork, leave bool) {
 	if mode == "" {
 		mode = AgentModeNormal
 	}
 	if !on {
-		mode, busy, acw, leave = AgentModeNone, false, false, false
+		mode, busy, isWork, leave = AgentModeNone, false, false, false
 	}
 	a.agent.mu.Lock()
 	changed := a.agent.online != on || a.agent.displayName != displayName ||
 		a.agent.mode != mode || a.agent.busy != (on && busy) ||
-		a.agent.acw != (on && acw) || a.agent.leave != (on && leave)
+		a.agent.isWork != (on && isWork) || a.agent.leave != (on && leave)
 	a.agent.online = on
 	a.agent.displayName = displayName
 	a.agent.mode = mode
 	a.agent.busy = on && busy
-	a.agent.acw = on && acw
+	a.agent.isWork = on && isWork
 	a.agent.leave = on && leave
 	a.agent.mu.Unlock()
 
 	if changed {
 		logx.Logger().Info("坐席模式变化", "online", on, "mode", mode,
-			"busy", on && busy, "acw", on && acw, "leave", on && leave,
+			"busy", on && busy, "isWork", on && isWork, "leave", on && leave,
 			"displayName", displayName)
 		a.publishAgentState()
 		a.publishCallPanel()
@@ -676,8 +680,8 @@ func (a *App) heartbeatLoop(stop <-chan struct{}) {
 }
 
 // sendHeartbeatOnce 发一次 MSP_HEARTBEAT（expires = 间隔 × 2.5）。body 按协议
-// §10 上报 agentMode（字符串）、isBusy、acw/isLeave 与 status；未登录坐席时
-// agentMode=none、acw/isLeave 均为 false。
+// §10 上报 agentMode（字符串）、isBusy、isWork/isLeave 与 status；未登录坐席时
+// agentMode=none、isWork/isLeave 均为 false。
 func (a *App) sendHeartbeatOnce() {
 	if a.tel == nil {
 		return
@@ -686,13 +690,13 @@ func (a *App) sendHeartbeatOnce() {
 	expires := time.Duration(float64(interval) * heartbeatExpiresFactor)
 	mode := a.AgentMode()
 	busy := a.AgentBusy()
-	acw := a.AgentACW()
+	isWork := a.AgentIsWork()
 	leave := a.AgentLeave()
 	status := a.callStatus()
 	a.mu.Lock()
 	a.lastCallStatus = status
 	a.mu.Unlock()
-	if err := a.tel.SendHeartbeat(mode, busy, a.AgentDisplayName(), status, acw, leave, expires); err != nil {
+	if err := a.tel.SendHeartbeat(mode, busy, a.AgentDisplayName(), status, isWork, leave, expires); err != nil {
 		// 非 200 响应 = 服务端不支持 NOTIFY（协议 1.0.18）：与 MSP_UNSUPPORTED
 		// 同样处理，停止心跳并退出坐席模式。
 		if errors.Is(err, ErrCTINotifyUnsupported) {
@@ -703,7 +707,7 @@ func (a *App) sendHeartbeatOnce() {
 		return
 	}
 	logx.Logger().Debug("已发送 CTI 心跳", "expires", expires.String(),
-		"agentMode", mode, "isBusy", busy, "acw", acw, "isLeave", leave, "status", status)
+		"agentMode", mode, "isBusy", busy, "isWork", isWork, "isLeave", leave, "status", status)
 }
 
 // strOf 读 MSP_EVENT body 里的字符串字段（缺失/类型不符返回空串）。

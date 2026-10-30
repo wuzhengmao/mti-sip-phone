@@ -990,6 +990,10 @@ func (a *App) dialInputMode() bool {
 // 允许输入（不再发 DTMF），呼叫按钮换成对应的两行动作。
 func (a *App) enterCTIDialMode(mode string) {
 	a.ctiDialMode = mode
+	// 回到主拨号页：上次复用可能停在「在线座席」等子页（子页行按钮按旧的
+	// ctiDialMode 渲染），不重置会带着旧页面与旧按钮（用户实测：咨询后关窗、
+	// 再点转移，页面还停在在线座席、按钮还是咨询/三方）。
+	a.showDialPage()
 	a.mainW.Show()
 	a.mainShown = true
 	a.mainW.RequestFocus()

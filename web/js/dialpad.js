@@ -154,7 +154,7 @@ window.SipApp = window.SipApp || {};
     switch (mode) {
       case 'consult': return sdk.consultThreeWay(no);
       case 'transfer': return sdk.consultTransfer(no);
-      default: return sdk.dialVideo(no, name);
+      default: return sdk.dial(no, { video: true, name: name });
     }
   }
 
@@ -211,7 +211,7 @@ window.SipApp = window.SipApp || {};
   function statusText(s) {
     const map = {
       free: '空闲', dialing: '呼叫中', ringing: '振铃中', talking: '通话中',
-      free_offhook: '摘机中', busy: '置忙', acw: '整理中', leave: '离席', not_ready: '示忙',
+      free_offhook: '摘机中', busy: '置忙', work: '整理中', leave: '离席', not_ready: '示忙',
       miss_phone: '话机未连接', offline: '离线',
     };
     return map[String(s || '').toLowerCase()] || (s || '未知');
@@ -263,7 +263,7 @@ window.SipApp = window.SipApp || {};
     const st = String(a.agentStatus || '').toLowerCase();
     if (free) {
       add('phone-out', '呼叫', function () { return sdk.dial(a.agent, { name: a.displayName }); }, '', true);
-      add('video-out', '视频呼叫', function () { return sdk.dialVideo(a.agent, a.displayName); }, '', true);
+      add('video-out', '视频呼叫', function () { return sdk.dial(a.agent, { video: true, name: a.displayName }); }, '', true);
     } else if (st === 'talking' && App.callui.isMonitor()) {
       add('monitor', '监听', function () { return sdk.monitor(a.agent); }, '已发起监听');
     } else if (st === 'ringing') {
@@ -431,7 +431,7 @@ window.SipApp = window.SipApp || {};
 
       const d = App.dom.el('button', { class: 'ghost' }, k);
       d.addEventListener('click', function () {
-        if (store.callID()) sdk.sendDTMF(store.callID(), k).catch(function (e) {
+        sdk.sendDTMF(k).catch(function (e) {
           App.ui.toast(App.util.errText(e), 'err');
         });
       });

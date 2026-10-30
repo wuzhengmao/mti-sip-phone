@@ -27,7 +27,7 @@ window.SipApp = window.SipApp || {};
     autoAnswer: false,
     contactCount: 0,
     // 坐席模式（REQ-ACC-028 / REQ-ACC-034）：system.state 快照 + cti.agent 事件维护
-    agent: { online: false, displayName: '', mode: 'none', busy: false, acw: false, leave: false, phoneStatus: '', agentStatus: 'unknown' },
+    agent: { online: false, displayName: '', mode: 'none', busy: false, isWork: false, leave: false, phoneStatus: '', agentStatus: 'unknown' },
   };
 
   const sdk = new SipPhoneSDK({
@@ -115,7 +115,7 @@ window.SipApp = window.SipApp || {};
         displayName: '',
         mode: agentMode,
         busy: false,
-        acw: false,
+        isWork: false,
         leave: false,
         phoneStatus: '',
         agentStatus: 'unknown',
@@ -201,7 +201,7 @@ window.SipApp = window.SipApp || {};
       displayName: (data && data.displayName) || '',
       mode: mode,
       busy: !!(data && data.isBusy),
-      acw: !!(data && data.acw),
+      isWork: !!(data && data.isWork),
       leave: !!(data && data.isLeave),
       phoneStatus: (data && data.phoneStatus) || '',
       agentStatus: (data && data.agentStatus) || 'unknown',

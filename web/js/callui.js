@@ -585,7 +585,6 @@ window.SipApp = window.SipApp || {};
     const st = cp ? cp.state : '';
     const agent = isAgent();
     const owner = !!(conf && conf.owner && norm(conf.owner) === selfNumber());
-    const id = function () { return store.callID(); };
     const out = [];
     const add = function (bid, label, cls, icon, cti, run) {
       out.push({ id: bid, label: label, cls: cls || '', icon: icon || null, cti: !!cti, run: run });
@@ -596,13 +595,13 @@ window.SipApp = window.SipApp || {};
     const incomingRinging = !!call && call.state === 'ringing' && call.direction === 'incoming';
     if (incomingRinging || st === 'incoming') {
       add('btnAnswer', '接听', 'green', { img: '/img/phone-out.png' }, false,
-        function () { return sdk.answer(id()); });
+        function () { return sdk.answer(); });
       if (call && call.hasVideo) {
         add('btnAnswerVideo', '视频接听', 'green', { img: '/img/video-out.png' }, false,
-          function () { return sdk.answerVideo(id()); });
+          function () { return sdk.answer({ video: true }); });
       }
       add('btnReject', '拒接', 'red', { svg: 'stop' }, false,
-        function () { return sdk.reject(id()); });
+        function () { return sdk.hangup(); });
       return out;
     }
     // 会议时服务端只给 conferencePanel（callPanel 为 null），不能因此不显示按钮
@@ -659,7 +658,7 @@ window.SipApp = window.SipApp || {};
       const muted = !!(call && call.muted);
       add('btnMute', muted ? '取消保持' : '保持', 'yellow',
         { svg: muted ? 'replay' : 'pause' }, false,
-        function () { return sdk.mute(id(), !muted); });
+        function () { return muted ? sdk.unhold() : sdk.hold(); });
     }
     // 挂断（按状态换文案/图标）。**咨询发起方不显示挂断**——与桌面一致：
     // 退出咨询走各方行上的「结束咨询/取消咨询」。
@@ -668,7 +667,7 @@ window.SipApp = window.SipApp || {};
         : (st === 'monitoring' || st === 'whispering') ? '结束监听' : '挂断';
       const icon = (conf || st === 'three-way')
         ? { img: '/img/exit-conference.png' } : { svg: 'stop' };
-      add('btnHangup', label, 'red', icon, false, function () { return sdk.hangup(id()); });
+      add('btnHangup', label, 'red', icon, false, function () { return sdk.hangup(); });
     }
     return out;
   }

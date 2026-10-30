@@ -52,7 +52,7 @@ var state struct {
 	opts        Options
 	ready       bool   // systray 就绪（onReady 之后才能 SetIcon/SetTooltip）
 	registered  bool   // 图标颜色：registered 才可能是绿/黄/蓝（否则红）
-	agentStatus string // 坐席状态 free/busy/acw/leave（busy/leave→黄、acw→蓝）
+	agentStatus string // 坐席状态 free/busy/work/leave（busy/leave→黄、work→蓝）
 	signedIn    bool   // 菜单：registered 或 registering → 「退出账号」，其余 → 「登录账号」
 	detail      string // 附加到提示里的信息（如本机号码）
 	lastOpen    time.Time
@@ -168,8 +168,8 @@ func SetState(regState, detail string) {
 	applyAccountItem()
 }
 
-// SetAgentStatus 坐席状态（REQ-UI-011 修订）：free/busy/acw/leave，已注册时
-// busy/leave 托盘图标变黄、acw 变蓝。Run 之前调用也有效（状态缓存，就绪时
+// SetAgentStatus 坐席状态（REQ-UI-011 修订）：free/busy/work/leave，已注册时
+// busy/leave 托盘图标变黄、work 变蓝。Run 之前调用也有效（状态缓存，就绪时
 // 统一应用）。
 func SetAgentStatus(status string) {
 	state.mu.Lock()
@@ -215,7 +215,7 @@ func applyIcon() {
 		switch status {
 		case "busy", "leave":
 			icon = state.yellowIcon
-		case "acw":
+		case "work":
 			icon = state.blueIcon
 		}
 	}

@@ -63,8 +63,7 @@ const (
 const (
 	MethodDial              = "call.dial"              // 拨号
 	MethodAnswer            = "call.answer"            // 接听
-	MethodHangup            = "call.hangup"            // 挂断
-	MethodReject            = "call.reject"            // 拒接
+	MethodHangup            = "call.hangup"            // 挂断（来电振铃→拒接486 / 呼出振铃→取消 / 通话中→挂断）
 	MethodMute              = "call.mute"              // 保持（静音）
 	MethodMuteMic           = "call.muteMic"           // 麦克风开关（纯本地，REQ-UI-023）
 	MethodMuteSpeaker       = "call.muteSpeaker"       // 扬声器开关（纯本地，REQ-UI-023）
@@ -151,7 +150,7 @@ const (
 	// EvAudioReady 音频后端就绪（REQ-WS-016）：后台初始化完成，设备列表可枚举。
 	EvAudioReady = "audio.ready"
 	// EvCTIAgent 坐席状态变化（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）：
-	// {displayName, agentMode, isBusy, acw, isLeave}；**agentMode=none 表示不在线**。
+	// {displayName, agentMode, isBusy, isWork, isLeave}；**agentMode=none 表示不在线**。
 	EvCTIAgent = "cti.agent"
 	// EvCTIState 通话的话务状态变化（咨询/三方/监听/会议，REQ-ACC-026）：
 	// {call}，call.cti 里是完整的 CTIState。

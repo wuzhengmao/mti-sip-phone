@@ -7,30 +7,32 @@ import (
 	"mti-sip-phone/internal/config"
 )
 
-// TestDeriveAgentStatus agentStatus 由 phoneStatus + isBusy/acw/isLeave 推算
+// TestDeriveAgentStatus agentStatus 由 phoneStatus + isBusy/isWork/isLeave 推算
 //（取值与 SipAgent.agentStatus 一致，用户口径）。
 func TestDeriveAgentStatus(t *testing.T) {
 	cases := []struct {
-		phone            string
-		leave, busy, acw bool
-		want             string
+		phone                    string
+		leave, busy, isWork, on  bool
+		want                     string
 	}{
-		{"free", true, false, false, "leave"}, // 离席优先级最高
-		{"talking", true, true, true, "leave"},
-		{"free", false, false, false, "free"},
-		{"free", false, true, false, "busy"},
-		{"free", false, true, true, "acw"},
-		{"dialing", false, true, true, "dialing"},
-		{"ringing", false, false, false, "ringing"},
-		{"talking", false, false, false, "talking"},
-		{"holding", false, false, false, "talking"},
-		{"", false, false, false, "unknown"},
-		{"weird", false, true, false, "unknown"},
+		{"free", false, false, false, false, "offline"}, // 非坐席模式 → offline（优先级最高）
+		{"talking", true, true, true, false, "offline"},
+		{"free", true, false, false, true, "leave"}, // 离席优先级最高
+		{"talking", true, true, true, true, "leave"},
+		{"free", false, false, false, true, "free"},
+		{"free", false, true, false, true, "busy"},
+		{"free", false, true, true, true, "work"},
+		{"dialing", false, true, true, true, "dialing"},
+		{"ringing", false, false, false, true, "ringing"},
+		{"talking", false, false, false, true, "talking"},
+		{"holding", false, false, false, true, "talking"},
+		{"", false, false, false, true, "unknown"},
+		{"weird", false, true, false, true, "unknown"},
 	}
 	for _, c := range cases {
-		if got := deriveAgentStatus(c.phone, c.leave, c.busy, c.acw); got != c.want {
-			t.Errorf("deriveAgentStatus(%q, leave=%v, busy=%v, acw=%v) = %q, want %q",
-				c.phone, c.leave, c.busy, c.acw, got, c.want)
+		if got := deriveAgentStatus(c.phone, c.leave, c.busy, c.isWork, c.on); got != c.want {
+			t.Errorf("deriveAgentStatus(%q, leave=%v, busy=%v, isWork=%v, on=%v) = %q, want %q",
+				c.phone, c.leave, c.busy, c.isWork, c.on, got, c.want)
 		}
 	}
 }
