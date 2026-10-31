@@ -46,9 +46,11 @@ concurrency:
 jobs:
   macos:
     name: macOS universal DMG
-    # macos-14 = Apple Silicon（arm64）。build.sh 会用 clang -arch 同时编出
+    # macos-15 = Apple Silicon（arm64）。build.sh 会用 clang -arch 同时编出
     # amd64 与 arm64 两份裸二进制，再由 package-macos.sh lipo 成 universal。
-    runs-on: macos-14
+    # 不用 macos-14：该镜像 2026-11-02 退役，brownout 期间任务会被直接判失败；
+    # 也不用 macos-latest（会随 GitHub 滚动升级，构建环境不可预期）。
+    runs-on: macos-15
     timeout-minutes: 40
     # 空值 = 开发版（版本带 -rc）；"1" = 正式版。build.sh / package-macos.sh 都认它。
     env:

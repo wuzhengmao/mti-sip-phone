@@ -444,7 +444,9 @@ macOS 与 Windows/Linux 的三处结构性差异，改相关代码前必读：
   会 panic）；`screenBounds`/`screenWorkArea` 是同步接口、由主线程调用，
   直接调 C。`endCallPanelDrag` **不能等拖动会话退出**（会话最后一次移动要
   主线程执行，主线程正等它就互相等死）——位置在每次移动时已记下，直接读。
-- 验证走 GitHub Actions（`.github/workflows/build.yml`，macOS runner）：
+- 验证走 GitHub Actions（`.github/workflows/build.yml`，macOS runner **固定 `macos-15`**——
+  `macos-14` 已于 2026-11-02 退役，brownout 期间任务直接失败；不用 `macos-latest` 是为了
+  避免镜像随 GitHub 滚动升级）：
   `go vet ./...`（覆盖 darwin 专有文件）→ `./build.sh --target darwin` →
   关键包单测 → `--version` 冒烟 → universal DMG → **运行期冒烟**（用裸二进制跑一次
   自安装：断言生成 `MTI软电话-无UI版.app`、进程从包内启动、无 `crash.log`、
