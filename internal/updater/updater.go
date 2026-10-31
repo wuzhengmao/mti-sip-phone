@@ -27,12 +27,13 @@ import (
 
 // Options 构造参数（由 cmd/sip-phone 注入，测试可替换）。
 type Options struct {
-	Bus        *core.Bus    // 事件发布（system.update）；可为 nil
-	ExePath    string       // 当前可执行文件路径；空则取 os.Executable()
-	Restart    func() error // 替换成功后调用：请求进程重启（由 cmd 实现）
-	IsBusy     func() bool  // 是否有进行中的通话（nil = 不等待）
-	HTTPClient *http.Client // 测试注入；nil 用默认客户端
-	Timeout    time.Duration
+	Bus         *core.Bus             // 事件发布（system.update）；可为 nil
+	ExePath     string                // 当前可执行文件路径；空则取 os.Executable()
+	Restart     func() error          // 替换成功后调用：请求进程重启（由 cmd 实现）
+	OnInstalled func(core.UpdateInfo) // 替换成功、重启之前调用（多实例通知等）；可为 nil
+	IsBusy      func() bool           // 是否有进行中的通话（nil = 不等待）
+	HTTPClient  *http.Client          // 测试注入；nil 用默认客户端
+	Timeout     time.Duration
 }
 
 // Updater 自动更新状态机。
@@ -266,6 +267,11 @@ func (u *Updater) applyNow() error {
 	if err := u.replaceExe(); err != nil {
 		u.fail(friendlyError(err))
 		return err
+	}
+	// 多实例：可执行文件已替换，通知其它实例（它们会在空闲后各自重启）。
+	// 必须放在 Restart 之前——本进程一重启就不再有机会通知。
+	if u.opts.OnInstalled != nil {
+		u.opts.OnInstalled(info)
 	}
 	logx.Logger().Info("更新已应用，正在重启", "version", info.Version)
 	if u.opts.Restart != nil {

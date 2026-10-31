@@ -165,6 +165,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 - **职责**：接收前端告知的新版本 → 用户确认 → 下载（sha256 + 可执行魔数校验、大小上限、可取消）→ 替换自身（`.old` 备份 + 回滚）→ 请求重启（通话中挂起等待）。
 - **关键文件**：`updater.go`（状态机 idle/available/downloading/ready/failed）、`download.go`、`replace.go`、`version.go`（版本比较，含预发布语义）。
 - **关系**：由 `core.Updater` 接口暴露给 WS/UI；重启动作最终由 `cmd` 实现。软电话**自己不查更新服务器**（查询在网页 SDK 侧）。
+- **多实例联动（REQ-UPD-026）**：替换成功后、重启之前调用 `Options.OnInstalled`，由 `internal/multiinstance` 把「新版本已就位」写进主配置目录的共享标记 `restart-all.json`；各实例的轮询器（`multiinstance.Watch`）据此判断自己在跑旧镜像时，等**没有进行中的通话**再重启。判定用「来源槽位 + 标记时间晚于进程启动 + 可执行文件 sha256」，重启后的新进程不会被同一条标记循环触发。
 
 ### 4.7 `internal/wsapi`（本地控制服务）
 
@@ -198,6 +199,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 | `internal/logx` | slog 日志：分级、滚动 + gzip 归档、`TraceSIP` 信令跟踪（自动脱敏） | 日志里不得出现密码/摘要 |
 | `internal/protocol` | `sip://` 解析与系统协议注册 | Windows 注册表实现单独文件（导入 x/sys/windows 会破坏交叉编译） |
 | `internal/single` | 单实例锁 + 第二实例参数转发（随机 token） | Windows 互斥体 / Linux flock |
+| `internal/multiinstance` | 多实例协作（REQ-UPD-026）：共享重启标记 `restart-all.json` 的写入/读取与轮询 | 标记在主配置目录、指纹 + 启动时间判定，避免循环重启 |
 | `internal/autostart` | 开机自启（HKCU Run / XDG autostart） | 每次启动按配置同步 |
 | `web/` | 网页控制台 + JS SDK（都内嵌进二进制，无构建步骤） | 控制台是"网页接入"的活文档；改完必须重建二进制才生效 |
 | `release/` + `scripts/release.sh` | 发布配置与一键发布 | 见 auto-update.md |

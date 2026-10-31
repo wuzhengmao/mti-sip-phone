@@ -10,10 +10,15 @@
 
 ### 新增
 
-- **SDK 引导器（bootstrap）独立出来，支持动态加载 SDK**（`web/sdk/sip-phone-bootstrap.js` / `.d.ts`，方案见 `docs/sdk-bootstrap.md`）：应用只打包这份极小的引导器，真正的 SDK 每次从本机软电话动态加载（`http://127.0.0.1:<端口>/sdk/sip-phone-sdk.js?v=<version>|<buildTime>`），**SDK 升级不再需要重新打包应用**；WS 断线重连后自动比对版本+构建时间，变了就重载 SDK 并重建连接，**软电话更新后页面免刷新**。引导器提供 `ensurePhone` / `load` / `connect` / `setLaunchUri` / `launchFromGesture` 五个 API，负责探测/拉起软电话（`sip://` 协议）、按 `version|buildTime` 指纹加载 SDK、断线后按用户手势兜底重新拉起。**断线后把控制交回引导器**：引导器会关闭 SDK 的 `autoReconnect`，改由自己在 `disconnected` 里重新走「探测 `/api/status` → 扫描端口 → 拉起 `sip://`」并重连，软电话退出后不再对死端口反复重连。**`connect()` 同步返回稳定的门面（facade）**：不是 SDK 实例——方法/属性始终转发到当前实例、事件订阅登记在门面上并在换实例时自动重挂，`close()/destroy()` 停止整个引导；业务代码只写一次、热更新无感，与直接引 SDK 的写法一致（`await sdk.ready` 等首次连上）。**内置网页控制台同样改经引导器加载 SDK**（`web/index.html` 改为引入 bootstrap，`web/js/store.js` 把 `SipPhoneBootstrap.connect` 返回的稳定**门面**当单例，热更新后界面自动换到新实例；连上后从配置派生 `sip://` 经 `setLaunchUri` 交给引导器，软电话退出也能自动拉起）。**加载/热更新都有日志**：`[bootstrap] 已加载 SDK v… build=…`、`检测到新构建（旧 → 新），重新加载 SDK`、`SDK 已热更新：v… build=…`，便于确认页面加载的是哪一版 SDK。
+- **SDK 引导器（bootstrap）独立出来，支持动态加载 SDK**（`web/sdk/sip-phone-bootstrap.js` / `.d.ts`，方案见 `docs/sdk-bootstrap.md`）：应用只打包这份极小的引导器，真正的 SDK 每次从本机软电话动态加载（`http://127.0.0.1:<端口>/sdk/sip-phone-sdk.js?v=<version>|<buildTime>`），**SDK 升级不再需要重新打包应用**；WS 断线重连后自动比对版本+构建时间，变了就重载 SDK 并重建连接，**软电话更新后页面免刷新**。引导器提供 `ensurePhone` / `load` / `connect` / `setLaunchUri` / `launchFromGesture` 五个 API，负责探测/拉起软电话（`sip://` 协议）、按 `version|buildTime` 指纹加载 SDK、断线后按用户手势兜底重新拉起。**断线后把控制交回引导器**：引导器会关闭 SDK 的 `autoReconnect`，改由自己在 `disconnected` 里重新走「探测 `/api/status` → 扫描端口 → 必要时拉起 `sip://`（**一次断线只拉一次**）」并重连，软电话退出后不再对死端口反复重连。**`connect()` 同步返回稳定的门面（facade）**：不是 SDK 实例——方法/属性始终转发到当前实例、事件订阅登记在门面上并在换实例时自动重挂，`close()/destroy()` 停止整个引导；业务代码只写一次、热更新无感，与直接引 SDK 的写法一致（`await sdk.ready` 等首次连上）。**内置网页控制台同样改经引导器加载 SDK**（`web/index.html` 改为引入 bootstrap，`web/js/store.js` 把 `SipPhoneBootstrap.connect` 返回的稳定**门面**当单例，热更新后界面自动换到新实例；连上后从配置派生 `sip://` 经 `setLaunchUri` 交给引导器，软电话退出也能自动拉起）。**加载/热更新都有日志**：`[bootstrap] 已加载 SDK v… build=…`、`检测到新构建（旧 → 新），重新加载 SDK`、`SDK 已热更新：v… build=…`，便于确认页面加载的是哪一版 SDK。
 - **软电话新增 `GET /api/status`**：返回 `version` / `buildTime` / `os` / `arch`，供引导器探测软电话是否运行、并生成 SDK 加载指纹。
 - **`sip://` 拉起新增 `listen` 与查询参数形式的账号密码**：`?listen=<端口>` 指定本地网页端口（引导器先探明空闲端口再拉起，软电话以此作为 WS 端口起始值，拉起后只需等这个确定端口，不再扫端口）；账号/密码可经 `?account=&password=` 传递（浏览器会拦截含 `user:pass@` 的 URL），userinfo 形式仍然支持、优先。诊断页生成的拉起链接与引导器拉起均改用参数形式。
 - **SDK 新增 `getBuildInfo()`**：返回 `{version, buildTime}`，用于观察当前加载的是哪一版 SDK；`system.getState` 的返回值同步新增 `buildTime` 字段。
+- **多实例升级联动**：任一实例安装更新（替换可执行文件）后，会把「新版本已就位」写进主配置目录的共享标记 `restart-all.json`（版本、新可执行文件的 sha256、写入方槽位、写入时间）；其它实例每 2 秒轮询该标记，发现**自己跑的还是旧镜像**且**当前没有进行中的通话**时自动重启到新版本（升级自身的实例同样等通话结束，沿用既有逻辑）。判定结合「标记晚于本进程启动」与「可执行文件指纹」，重启后的新进程不会再被同一条标记触发（不会循环重启）；升级触发的重启在网页端表现为关闭码 4409、`reason=update`，引导器原端口重连。见 `internal/multiinstance` 与 `updater.Options.OnInstalled`
+
+### 变更
+
+- **SDK 引导器：一次断线只尝试拉起一次**：拉起失败（浏览器以「需要用户手势」拦截、或软电话没起来）后，后台重试只做 `/api/status` 探测与端口扫描，**不再反复触发 `sip://` 系统确认框**；连上后重置标志位，下一次断线可以再尝试拉起一次。用户点击「重新拉起」（`launchFromGesture()`）属于显式操作，不受该限制。
 
 ### 修复
 

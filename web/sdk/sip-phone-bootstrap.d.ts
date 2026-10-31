@@ -138,7 +138,7 @@ declare namespace SipPhoneBootstrap {
     httpUrl?: string;
     /** sip:// 协议地址：软电话未运行时用它拉起（留空则只能探测，无法拉起） */
     sipUri?: string;
-    /** 自动拉起被浏览器以「需要用户手势」拒绝、或拉起后未就绪时回调（后台重试期间可能多次回调） */
+    /** 自动拉起被浏览器以「需要用户手势」拒绝、或拉起后未就绪时回调（一次断线只尝试拉起一次，因此最多回调一次） */
     onLaunchBlocked?: (info: LaunchBlockedInfo) => void;
   }
 
