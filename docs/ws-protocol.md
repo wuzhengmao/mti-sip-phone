@@ -1,6 +1,6 @@
 # 本地 WebSocket 控制协议
 
-> 适用版本：1.0.15。网页通过本机 WebSocket 连接 SIP 软电话，实现拨号、接听、挂断等控制，并接收振铃、挂断等事件。
+> 适用版本：1.0.21。网页通过本机 WebSocket 连接 SIP 软电话，实现拨号、接听、挂断等控制，并接收振铃、挂断等事件。
 >
 > 本文档面向网页前端开发者；JS SDK 已封装本协议，通常无需直接读写报文。
 
@@ -102,7 +102,7 @@
 | `system.setAutoStart` | `{ "enabled": true }` | `{ "enabled": true }` | 开/关开机自启（立即注册/移除系统项）。沙箱实例（`-instance N`）不支持，返回 `config_unavailable` |
 | `system.setUnregisterOnDisconnect` | `{ "enabled": true }` | `{ "enabled": true }` | **WS 断开自动取消注册**（REQ-WS-020）：应用级开关，默认关、不持久化（SDK 的 `unregisterOnDisconnect` 参数每次连上后下发，最后一次设置生效）。开启后，**所有** WS 连接断开并超过 3 秒仍未回来 → 自动取消 SIP 注册（`system.setAccount` 的 enabled 语义，等同关闭「启用账户」）；**呼叫/振铃/通话中**自动**排队**，等话务结束再注销；等待期间有连接回来（重连）→ **取消**排队任务，并恢复已被自动取消的注册（重新注册）。页面刷新/瞬时断网因 3 秒延迟窗口不触发 |
 | `system.restart` | `{}` | `{ "restarting": true }` | 重启软电话程序。⚠️ **先回响应再重启**：resolve 之后进程随时退出、WS 断开 |
-| `system.checkUpdateNow` | `{}` | `{ "skipped": false, "upToDate": true, "latestVersion": "", "notified": false, "reason": "", "text": "已是最新版本", "currentVersion": "1.0.15" }` | 立即检查一次更新站点（不等下一个周期，20 秒超时） |
+| `system.checkUpdateNow` | `{}` | `{ "skipped": false, "upToDate": true, "latestVersion": "", "notified": false, "reason": "", "text": "已是最新版本", "currentVersion": "1.0.21" }` | 立即检查一次更新站点（不等下一个周期，20 秒超时） |
 | `update.status` | `{}` | 更新状态对象（同 `system.update` 事件负载） | 查询更新状态（页面一般用事件，这里供初始化） |
 | `update.start` | `{}` | 更新状态对象 | **开始下载**已告知的新版本（REQ-UPD-020，进度走 `system.update` 事件） |
 | `update.cancel` | `{}` | 更新状态对象 | 取消下载 |
@@ -236,7 +236,7 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 
 ```json
 {
-  "version": "1.0.15",
+  "version": "1.0.21",
   "os": "windows",
   "arch": "amd64",
   "account": {
@@ -288,7 +288,7 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `call.ringing` | `{ "callId", "call", "earlyMedia" }` | 呼出已振铃（180/183）；`earlyMedia: true` 表示本次振铃带**早期媒体**（183+SDP，回铃音由对端下发，软电话不再放本地回铃音） |
 | `call.established` | `{ "callId", "call" }` | 通话建立 |
 | `call.terminated` | `{ "callId", "call", "reason", "missed" }` | 通话结束；reason：`local_hangup`（本端挂断）/ `remote_hangup`（对端挂断）/ `remote_cancel`（振铃中收到 CANCEL）/ `rejected`（本端拒接）。**`missed: true` = 未接来电**（呼入、从未接通、且非本端当场处理——本端拒接/振铃中挂断不算），桌面端据此弹系统通知（REQ-UI-010） |
-| `call.failed` | `{ "callId", "call", "reason", "missed", "ctiManaged" }` | 呼叫失败；`reason` 是**SIP 信令给出的原因原文**（如 `486 Busy Here`、`404 Not Found`、`408 Request Timeout`、`SDP 协商失败: …`），可直接展示给用户（网页控制台显示为「呼叫失败：<reason>」）；`missed` 含义同上。**`ctiManaged=true`** 表示这通电话在 CTI 接管中（收到过 `CALL_RINGING`）：SIP 原因**不要提示**，CTI 随后下发的 `CALL_FAILED` 会经 `cti.failed` 给出统一中文消息（避免两条失败提示） |
+| `call.failed` | `{ "callId", "call", "reason", "missed", "ctiManaged" }` | 呼叫失败；`reason` 是**SIP 信令给出的原因原文**（如 `486 Busy Here`、`404 Not Found`、`408 Request Timeout`、`SDP 协商失败: …`），可直接展示给用户（网页控制台显示为「呼叫失败：`<reason>`」）；`missed` 含义同上。**`ctiManaged=true`** 表示这通电话在 CTI 接管中（收到过 `CALL_RINGING`）：SIP 原因**不要提示**，CTI 随后下发的 `CALL_FAILED` 会经 `cti.failed` 给出统一中文消息（避免两条失败提示） |
 | `call.muted` | `{ "callId", "muted" }` | 保持（静音）状态变化 |
 | `call.audio` | `{ "callId", "call" }` | 麦克风/扬声器开关与音量变化（`call.micMuted` / `call.speakerMuted` / `call.micGain` / `call.speakerVolume`，REQ-UI-023 / REQ-MEDIA-006）。**连续调节（桌面滚轮、网页拖滑块）时事件会被合并**：最多 150ms 一条（首次立即发、最后一次必发）——页面不要按"一条事件 = 一步"来计数 |
 | `call.video` | `{ "callId", "call" }` | 视频状态变化（协商成功/开关切换/拿到对端分辨率）；状态见 `call.video` |

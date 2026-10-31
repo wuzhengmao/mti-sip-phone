@@ -428,7 +428,7 @@ sub.transforms();
 | `call.ringing` | 呼出振铃（180/183） | `earlyMedia: true` = 对端已下发回铃音 |
 | `call.established` | 通话建立 | `{callId, call}` |
 | `call.terminated` | 通话结束 | `reason`: `local_hangup`/`remote_hangup`/`remote_cancel`/`rejected`；`missed: true` = 未接来电 |
-| `call.failed` | 呼叫失败 | `reason` 是 SIP 信令的原因原文（如 `486 Busy Here`、`408 Request Timeout`、`SDP 协商失败: …`），可直接展示；网页控制台显示「呼叫失败：<reason>」。`ctiManaged=true`（CTI 接管，收到过 `CALL_RINGING`）时**不要**显示 SIP 原因——`cti.failed` 会给出统一中文消息 |
+| `call.failed` | 呼叫失败 | `reason` 是 SIP 信令的原因原文（如 `486 Busy Here`、`408 Request Timeout`、`SDP 协商失败: …`），可直接展示；网页控制台显示「呼叫失败：`<reason>`」。`ctiManaged=true`（CTI 接管，收到过 `CALL_RINGING`）时**不要**显示 SIP 原因——`cti.failed` 会给出统一中文消息 |
 | `call.muted` | 保持状态变化 | `{callId, muted}` |
 | `call.audio` | 麦克风/扬声器/音量变化 | `call.micMuted` / `speakerMuted` / `micGain` / `speakerVolume`；**事件合并，最多 150ms 一条** |
 | `call.video` | 视频状态变化 | `call.video`: `{negotiated, enabled, previewOn, sending, width, height}` |
