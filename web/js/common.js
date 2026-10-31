@@ -197,7 +197,9 @@ window.SipApp = window.SipApp || {};
    */
   function isOfflineErr(err) {
     const m = errText(err);
-    return m.indexOf('尚未连接软电话') >= 0 || m.indexOf('连接已断开') >= 0;
+    // 「SDK 实例已销毁」= 热更新换实例时被中断的请求，等同一次断线，不该弹错误
+    return m.indexOf('尚未连接软电话') >= 0 || m.indexOf('连接已断开') >= 0 ||
+      m.indexOf('SDK 实例已销毁') >= 0;
   }
 
   /** 请求失败的统一处理：离线类只写控制台，其余弹 toast。 */

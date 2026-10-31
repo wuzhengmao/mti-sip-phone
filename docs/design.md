@@ -175,6 +175,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
   - **设备枚举异步回包**（`audio.devices` / `video.devices`）：枚举可能阻塞数秒，服务端放独立 goroutine 做完再回，配 `enumGuard` 单飞 + 2 秒缓存 + 3 秒超时。写路径本来就有 `wmu` 串行化、SDK 按 id 配对响应，所以异步/乱序是安全的。
   - **会终止进程的动作先回响应**（`system.restart`、`update.apply`）：先动手的话响应发不出去，页面只看到连接断开。
 
+- **`/api/status`**（引导器用）：返回版本/构建时间/平台，供 SDK 引导器探测软电话是否运行、生成 SDK 加载指纹并做热更新判断；`/sdk/*` 继续提供内嵌的 `sip-phone-sdk.js` 与 `sip-phone-bootstrap.js`（一律 no-cache）。
 ### 4.8 `internal/ui`（Fyne 界面，仅完整版）
 
 > 该包**只在完整版构建里编译**（`-tags noui` 时整包不参与，no-ui 版因此不链接 fyne/GLFW/OpenGL）。
@@ -256,6 +257,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 | 网页视频订阅 | `internal/wsapi/video.go` + `web/sdk/sip-phone-sdk.js` |
 | 网页控制台（五个页面） | `web/index.html`（外壳，单页 + hash 路由；顶栏应用名「MTI 软电话」）+ `web/css/app.css` + `web/img/*`（与桌面同一套话务图标）+ `web/js/{common,icons,store,callbar,callui,dialpad,app}.js` + `web/js/views/{call,history,contacts,settings,diag}.js`（改完**重建二进制 + 重启**才生效——都是内嵌资源；新增文件要同步 `internal/wsapi/server.go` 的白名单） |
 | JS SDK | `web/sdk/sip-phone-sdk.{js,d.ts}`（同样内嵌，改完要重建） |
+| SDK 引导器 | `web/sdk/sip-phone-bootstrap.{js,d.ts}`（内嵌，经 `/sdk/*` 提供；应用只打包它，SDK 动态加载并按 `version\|buildTime` 热更新，见 **`docs/sdk-bootstrap.md`**）。拉起走 `sip://`（`?listen=&account=&password=`），断线由引导器接管重连；`GET /api/status` 供其探测 |
 | 仅托盘无 UI 版（托盘行为/图标） | `cmd/sip-phone/gui_noui.go` + `internal/tray/*` + `internal/variant/*`（构建标签 `noui`） |
 | 构建脚本 / 交叉编译 | `build.bat`、`build.sh`（两者都按 full / noui 两个变体各跑一遍目标）、`scripts/build-*-lib.*`（先读 CLAUDE.md 构建章节） |
 | 一键发布到更新站点 | `scripts/release.sh`（**默认两个应用一起发**）+ `release/release.conf`（完整版）/ `release/release-no-ui.conf`（无 UI 版），`--only no-ui` 只发一个（见 auto-update.md） |

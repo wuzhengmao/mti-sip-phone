@@ -14,6 +14,8 @@ window.SipApp.views = window.SipApp.views || {};
   const store = App.store;
   const sdk = store.sdk;
 
+  // 实际订阅状态（只用于按钮/统计的显示；订阅的跨重连/跨热更新恢复由引导器门面负责，
+  // 见 docs/sdk-bootstrap.md 与 web/sdk/sip-phone-bootstrap.js 的 restoreVideo）。
   let videoSubscribed = false;
   let timerHandle = null;
   let establishedAt = 0;
@@ -141,7 +143,8 @@ window.SipApp.views = window.SipApp.views || {};
   }
 
   function refreshTransformButtons() {
-    const tx = sdk.videoTransforms() || {};
+    // SDK 经引导器异步加载，mount 早期可能还没就绪：没拿到实例就按默认（未旋转/未镜像）显示
+    const tx = (sdk.videoTransforms && sdk.videoTransforms()) || {};
     const P = App.icons.PATH;
     const r = tx.remote || {}, l = tx.local || {};
     App.icons.buttonState($('btnRotRemote'), (r.rotation || 0) !== 0, P.rotate, P.rotate);
@@ -451,6 +454,8 @@ window.SipApp.views = window.SipApp.views || {};
         if (c && c.video && c.video.negotiated) applyNoUIVideoMode();
       });
       store.on('callEnded', function (info) {
+        // 视频订阅是**连接级**的（与有没有通话无关）：通话结束**不**清除订阅，
+        // 下一通视频电话的画面会自动进来（用户口径：打完一通视频电话不应变成未订阅）。
         resetCall();
         noticeCallEnded(info);
       });
@@ -469,8 +474,19 @@ window.SipApp.views = window.SipApp.views || {};
       store.on('agent', function () {
         if (store.state.call) renderActions(store.state.call);
       });
-      store.on('connected', applyNoUIVideoMode);
+      // 重连（含 SDK 热更新换了新实例）后：**订阅本身由引导器门面自动恢复**，
+      // 这里只把按钮/统计同步成实际状态（门面暴露 videoSubscribed）。
+      store.on('connected', function () {
+        applyNoUIVideoMode();
+        if (sdk.videoSubscribed) {
+          setVideoSubState(true);
+          setTransformButtonsEnabled(true);
+          refreshTransformButtons();
+          resetStats();
+        }
+      });
       store.on('disconnected', function () {
+        // 断线时按钮先回到"未订阅"；重连后由门面恢复订阅、connected 里再同步回来
         videoSubscribed = false;
         autoSubscribed = false;
         setVideoSubState(false);
@@ -478,10 +494,10 @@ window.SipApp.views = window.SipApp.views || {};
         resetStats();
       });
       store.on('autoAnswer', function (on) { $('chkAutoAnswer').checked = on; });
-      sdk.on('video.transform', refreshTransformButtons);
+      store.on('transform', refreshTransformButtons);
       // CTI 话务失败（协议 §16.2/§16.3）：CALL_FAILED 的 refuse/cancel/takeover
       // 与 CONSULT_FAILED 的 refuse/cancel——软电话已把原因翻成中文，直接提示。
-      sdk.on('cti.failed', function (data) {
+      store.on('cti.failed', function (data) {
         if (!data || !data.message) return;
         App.ui.toast(data.message, data.kind === 'call' ? 'err' : '');
       });

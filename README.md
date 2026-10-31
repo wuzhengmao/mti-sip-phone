@@ -8,7 +8,7 @@
 - 用户使用手册：[docs/user-manual.md](docs/user-manual.md)（面向最终用户：安装、配置、使用、故障排查）
 - SDK 开发指南：[docs/sdk-guide.md](docs/sdk-guide.md)（面向前端：网页集成、API、避坑）
 - 变更记录：[changelog.md](changelog.md)
-- 需求文档：[docs/requirements.md](requirements.md)
+- 需求文档：[docs/requirements.md](docs/requirements.md)
 - WS 协议：[docs/ws-protocol.md](docs/ws-protocol.md)
 - 自动更新与更新站点接入：[docs/auto-update.md](docs/auto-update.md)
 
@@ -175,6 +175,23 @@ macOS 的平台差异（详见 [CLAUDE.md](CLAUDE.md) 的「macOS（darwin）」
 
 ## 网页接入示例
 
+推荐用**引导器**加载（SDK 每次从软电话动态加载，软电话更新后页面免刷新，见
+[docs/sdk-bootstrap.md](docs/sdk-bootstrap.md)）：
+
+```html
+<script src="http://127.0.0.1:8765/sdk/sip-phone-bootstrap.js"></script>
+<script>
+  // 返回稳定的门面（不是 SDK 实例）：热更新换实例后自动切换，业务代码不用改
+  const sdk = SipPhoneBootstrap.connect({
+    onClient: (c, meta) => console.log('SDK', meta.version, meta.buildTime),  // 可选
+  });
+  sdk.on('call.incoming', () => sdk.answer());   // 只订阅一次
+  sdk.ready.then(() => sdk.dial('1001'));        // 首次连接成功后拨号
+</script>
+```
+
+也可以直接引 SDK（不热更新）：
+
 ```html
 <script src="http://127.0.0.1:8765/sdk/sip-phone-sdk.js"></script>
 <script>
@@ -184,8 +201,7 @@ macOS 的平台差异（详见 [CLAUDE.md](CLAUDE.md) 的「macOS（darwin）」
       sdk.answer();
     }
   });
-  await sdk.connect();
-  await sdk.dial('1001');
+  sdk.connect().then(() => sdk.dial('1001'));
 </script>
 ```
 

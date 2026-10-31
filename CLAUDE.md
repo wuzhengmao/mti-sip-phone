@@ -251,7 +251,8 @@ internal/
               媒体加密 SRTP（srtp.go，REQ-MEDIA-009）
   media/g722/  G.722 纯 Go 算法（QMF + 双子带自适应 ADPCM；golden 向量在 testdata/）
   audio/      音频设备：malgo 后端（全双工采集/播放、设备枚举/选择、提示音）
-  wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳、网页视频订阅 video.go）
+  wsapi/      本地 WS 控制服务（方法分发、事件推送、心跳、网页视频订阅 video.go；
+              HTTP 侧另有 /api/status（引导器探测）与 /sdk/*（内嵌 SDK/引导器））
   updater/    自动更新：前端经 WS 告知新版本 → 用户确认后下载（sha256/
               可执行魔数校验）→ 替换当前可执行文件（.old 备份）→ 重启；
               向总线发布 system.update 事件（macOS 替换后重做 ad-hoc 签名，
@@ -304,6 +305,11 @@ web/          网页控制台（**内嵌进二进制**，改完必须重新构�
   img/        与桌面 UI 同一套的话务 PNG 图标（静态白名单里有 img/*.png）
   sdk/        JS SDK（sip-phone-sdk.js + .d.ts，无 token；更新既有强制推送
               notifyUpdate，也能触发下载/安装（update.*），查询在软电话侧）
+              + 引导器（sip-phone-bootstrap.js + .d.ts，SipPhoneBootstrap）：
+              应用只打包引导器，SDK 每次从 `/sdk/sip-phone-sdk.js?v=<version>|<buildTime>`
+              动态加载；断线/软电话退出由引导器接管（探测 /api/status → 扫描端口 →
+              拉起 sip:// → 退避重试），连上后比对指纹热更新（destroy 旧实例 + onClient
+              回调新实例）。方案见 docs/sdk-bootstrap.md
 release/      发布到更新站点的配置与元数据：release.conf + app.json（完整版）、
               release-no-ui.conf + app-no-ui.json（仅托盘无 UI 版；发布脚本默认两个应用一起发，
               --only no-ui / --no-ui 只发这一个）、
@@ -594,6 +600,20 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
 - **通信录的 ★ 是自绘 SVG 图标，不要用文字 "★"**：Fyne 的主题图标集里没有星形，默认字体的回退链在精简的 Linux 环境不保证有 U+2605（会渲染成方框）。`IconStar` 与顶栏入口 `IconContacts` 都在 `icons.go`，用 `markAfterLayout`（已支持任意个标记）跟在名称后面。
 - **Windows 原生文件对话框的 CLSID 别抄网上的**：`CLSID_FileSaveDialog` 是 **{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}**（网上常见的 `C0A651F5-…` 在本机注册表里不存在，`CoCreateInstance` 返回 `REGDB_E_CLASSNOTREG` 0x80040154，表现为"点了导出什么都不发生"）。保存/打开都用 `IID_IFileDialog` 取接口即可（`IFileSaveDialog` 由它派生，基础方法槽位一致：Show(3)/SetFileTypes(4)/SetOptions(9)/SetFileName(15)/SetTitle(17)/GetResult(20)/SetDefaultExtension(22)），取消要与不可用分开（`HRESULT_FROM_WIN32(ERROR_CANCELLED)`）。验证方法：起一个 goroutine 调对话框，主 goroutine `FindWindowW` 按标题找窗口再 `WM_CLOSE` 关掉（见会话内的一次性验证程序）。
 - **`coder/websocket` 单条消息默认读上限 32KB**（`read.go` 的 `defaultReadLimit`）：通信录导入是一整份 CSV，超限会**直接断开连接、没有任何业务错误**。服务端在 `Accept` 后 `conn.SetReadLimit(4<<20)` 放开（仅回环监听，没有滥用面）。 不过**网页的一键导入导出走的是 HTTP**（`GET /api/contacts.csv`、`POST /api/contacts/import`），完全绕开这个限制；WS 的那两个方法保留给需要走 WS 的客户端。
+- **SDK 用引导器动态加载（1.0.21）**：`web/sdk/sip-phone-bootstrap.js` 是稳定入口，SDK 每次从软电话动态加载并按
+  `version|buildTime` 指纹热更新。**连接的建立/重连归引导器**（它把 SDK 的 `autoReconnect` 关掉，自己按
+  指数退避循环「探测 `/api/status` → 扫描端口 → 拉起 `sip://` → 等待」）；拉起前先探空闲端口并用 `?listen=`
+  指定，账号/密码走查询参数（`?account=&password=`，浏览器会拦截 `user:pass@`）。**`connect()` 同步返回稳定的
+  门面（不是 SDK 实例）**：方法/属性转发到当前实例、事件订阅登记在门面上并在换实例时自动重挂；旧实例由
+  SDK 的 `destroy()` 销毁（清事件/未请求/心跳/视频渲染器），`onClient(facade, meta)` 只是可选观察点。**视频订阅也由门面保管**：`subscribeVideo` 成功后记住参数、
+  热更新换实例时自动重订，对外暴露 `videoSubscribed`；同一实例的重连由 SDK 自己恢复（`_restoreVideoSubscription`）。软电话侧 `GET /api/status`
+  提供版本/构建时间；`sip://` 拉起支持 `?listen=`、`?account=`、`?password=`。
+  **首次连接失败时 `ready` 只 reject 一次、引导器仍转入后台重试**（软电话起来后补上 SDK 加载与实例创建，
+  之后靠 `connected` 事件）；**地址解析一律用 `new URL`**（IPv6/wss 不会误判端口），端口扫描沿用 `httpBase`
+  的主机；门面在实例未就绪时 `set` 的属性先缓存、实例建好后套用，`close()` 会结束挂起的 `ready`。
+  **重启/安装更新用 WS 关闭帧通知**：`wsapi.Server.CloseAllWithReason` 以关闭码 **4409**（`reason` =
+  `restart`/`update`）关闭所有连接——浏览器只在 1000 与 3000–4999 暴露 `CloseEvent.reason`，所以不用 1001；
+  SDK 把 `code/reason` 放进 `disconnected` 负载，引导器据此只做原端口重连（不扫描/不拉起），连上后照常热更新。
 - **网页控制台是「单页外壳 + hash 路由」**（`web/index.html` + `web/js/views/*`，`#/call`
   `#/history` `#/contacts` `#/settings` `#/diag`；导航只有这五项，**在线座席列表在拨号对话框的
   页签里、不单独设导航入口**，当前页用下划线高亮）：**不要改回多个独立 HTML 页面**——视频订阅是

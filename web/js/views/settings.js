@@ -339,7 +339,7 @@ window.SipApp.views = window.SipApp.views || {};
       });
 
       // 音频后端就绪 → 刷新设备列表（无 UI 版没有桌面界面，靠这条事件）
-      sdk.on('audio.ready', function () { loadAudioDevices(); });
+      store.on('audio.ready', function () { loadAudioDevices(); });
       store.on('config', function () { if (!$('view-settings').hidden) loadConfig(); });
 
       // mount 只绑事件：那时 WS 还没连上，发请求必然以"尚未连接软电话"失败

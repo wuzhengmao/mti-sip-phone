@@ -190,7 +190,14 @@ func main() {
 	// WS 端口 +1 写回配置，并与旧进程重复注册。
 	// exePath 在上方自安装步骤已取到（协议/自启注册、自动更新与重启共用）。
 	var restartRequested atomic.Bool
+	// notifyRestarting 在真正退出前用 WS **关闭帧**告诉网页端「我是主动重启」，
+	// 引导器据此只做原端口重连、不走拉起逻辑（详见 internal/wsapi 的 CloseAllWithReason）。
+	// WS 服务创建后赋值；未赋值（如极早期失败路径）时静默跳过。
+	var notifyRestarting func(string)
 	restart := func() error {
+		if notifyRestarting != nil {
+			notifyRestarting("restart")
+		}
 		restartRequested.Store(true)
 		// Unix 侧先起看门狗兜底：正常退出时它只是多起一个实例（会被
 		// 单实例锁拦住并自行退出），若退出收尾卡住则由它强杀旧进程并拉起
@@ -279,8 +286,14 @@ func main() {
 	upd := updater.New(updater.Options{
 		Bus:     bus,
 		ExePath: exePath,
-		Restart: restart,
-		IsBusy:  app.HasActiveCall,
+		// 安装更新后的重启：关闭帧原因标成 update（网页端可区分，行为相同）
+		Restart: func() error {
+			if notifyRestarting != nil {
+				notifyRestarting("update")
+			}
+			return restart()
+		},
+		IsBusy: app.HasActiveCall,
 	})
 	upd.Cleanup()
 	app.SetUpdater(upd)
@@ -367,12 +380,22 @@ func main() {
 
 	// 7. 本地 WS 控制服务。
 	// WS 端口可配置（默认 8765），被占用时自动 +1 选择空闲端口并保存。
-	if wsPort := wsapi.FindFreeWSPort(cfg.WS.Port, cfg.WS.AllowRemote); wsPort != cfg.WS.Port {
-		logx.Logger().Info("WS 端口被占用，自动选择空闲端口", "port", wsPort)
+	// sip:// 引导器拉起时可能带 ?listen=<端口>：以它作为**起始端口**（引导器已
+	// 探明它空闲，拉起后就等这个端口），被占用时仍走原有的 +1 回退并保存。
+	wsStart := cfg.WS.Port
+	if sipURL != "" {
+		if acc, err := protocol.ParseSipURL(sipURL); err == nil && acc.Listen > 0 {
+			wsStart = acc.Listen
+		}
+	}
+	if wsPort := wsapi.FindFreeWSPort(wsStart, cfg.WS.AllowRemote); wsPort != cfg.WS.Port {
+		logx.Logger().Info("WS 端口被占用，自动选择空闲端口", "port", wsPort, "起始", wsStart)
 		cfg.WS.Port = wsPort
 		_ = cfg.Save(cfgPath)
 	}
 	srv := wsapi.New(app)
+	// 重启/安装更新前用它把「即将重启」写进 WS 关闭帧（浏览器的 CloseEvent 能读到 code+reason）
+	notifyRestarting = func(reason string) { srv.CloseAllWithReason(reason) }
 	go func() {
 		if err := srv.ListenAndServe(ctx, cfg.WS.Port, cfg.WS.AllowRemote); err != nil {
 			logx.Logger().Error("WS 服务异常退出", "err", err)
@@ -480,7 +503,7 @@ func handleLaunchArgs(app *core.App, cfg *config.Config, args []string, onDone f
 			logx.Logger().Warn("sip:// / sips:// 链接解析失败", "url", raw, "err", err)
 			continue
 		}
-		logx.Logger().Info("协议拉起", "url", raw, "server", acc.Server, "account", acc.Account, "transport", acc.Transport)
+		logx.Logger().Info("协议拉起", "url", logx.MaskSecrets(raw), "server", acc.Server, "account", acc.Account, "transport", acc.Transport)
 
 		// 更新账户配置并触发注册
 		newAcc := cfg.Account
@@ -492,7 +515,12 @@ func handleLaunchArgs(app *core.App, cfg *config.Config, args []string, onDone f
 		newAcc.Transport = acc.Transport
 		newAcc.Account = acc.Account
 		newAcc.AuthUser = acc.Account
-		newAcc.Password = acc.Password
+		// 链接里**没带密码就不要动已保存的密码**：引导器拉起用的是不含明文密码的
+		// 地址（页面拿不到密码，也不该下发），本机配置里已有密码；照抄空值会把
+		// 内存里的密码清掉，注册直接 401 失败（真机踩过）。
+		if acc.Password != "" {
+			newAcc.Password = acc.Password
+		}
 		if err := app.UpdateAccount(newAcc); err != nil {
 			logx.Logger().Error("应用 sip:// 配置失败", "err", err)
 			continue

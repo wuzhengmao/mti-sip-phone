@@ -12,11 +12,14 @@
 | 鉴权 | 无（连接即可用），安全性由「仅监听回环地址 + 拒绝非回环连接」保证 |
 | 安全 | 服务仅绑定 127.0.0.1，且拒绝非回环来源连接 |
 | 心跳 | 客户端 60 秒内无消息会被断开；可定期发送任意非请求消息保活 |
+| 重启关闭码 | 软电话**被动重启/安装更新**前，会用关闭码 **4409**（私有段 4000–4999）关闭所有 WS 连接，`reason` 为 `restart`（手动重启）或 `update`（安装更新）。浏览器 `CloseEvent` 只在 1000 与 3000–4999 时暴露 reason，所以不用 1001；客户端收到后可判断"是应用主动重启，稍等原端口重连即可"（引导器就是这么做的） |
 
 软电话同时提供 HTTP 服务：
 
 - `GET http://127.0.0.1:8765/` —— **网页控制台**（开箱即用的控制界面：通话 / 通话记录 / 通信录 / 配置 / 诊断五个页面）
 - `GET http://127.0.0.1:8765/sdk/sip-phone-sdk.js` —— JS SDK
+- `GET http://127.0.0.1:8765/sdk/sip-phone-bootstrap.js` —— **SDK 引导器**（应用只打包它，SDK 动态加载并热更新，见 [sdk-bootstrap.md](sdk-bootstrap.md)）
+- `GET http://127.0.0.1:8765/api/status` —— 版本/构建时间/平台（引导器探测用，见下）
 - `GET /css/app.css`、`GET /js/*.js` —— 控制台的样式与脚本（白名单提供，一律 `no-cache`）
 - `/index.html`、`/history`、`/contacts`、`/settings`、`/diag`、`/test.html` 都返回控制台（hash 路由 `#/call`、`#/history`、`#/contacts`、`#/settings`、`#/diag`）
 
@@ -206,6 +209,12 @@ SDK 的 `downloadContacts()` / `importContactsFromFile()` 走这两个 **HTTP** 
 | `POST` | `/api/contacts/import` | 导入：**请求体就是 CSV 文本**（`Content-Type: text/csv`），返回 `{ "added", "updated", "skipped", "total" }`，失败返回 503 + `{"error": "..."}`；请求体上限 8MB |
 
 两个端点与 WS 一致：**只接受本机回环来源**，无需鉴权；导入的合并语义（按号码去重、常用标志只增不减）与 `contact.import` 完全相同。
+
+另有一个状态端点，供 SDK 引导器 `sip-phone-bootstrap.js` 探测软电话是否运行、并按版本+构建时间生成 SDK 加载指纹（见 [sdk-bootstrap.md](sdk-bootstrap.md)）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/status` | 返回 `{ "version", "buildTime", "os", "arch" }`（`buildTime` 为 ISO 8601 构建时间，未注入时为空）；跨域可访问，`Cache-Control: no-cache` |
 
 ### contact.import 说明
 

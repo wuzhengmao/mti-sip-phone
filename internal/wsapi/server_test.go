@@ -3,6 +3,7 @@ package wsapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -73,9 +74,11 @@ func (s *stubTel) lastCTI() (string, map[string]any) {
 	return s.ctiAction, s.ctiParams
 }
 
-func (s *stubTel) SendHeartbeat(string, bool, string, string, bool, bool, time.Duration) error { return nil }
-func (s *stubTel) Register(ctx context.Context, acc config.Account) error          { return nil }
-func (s *stubTel) Unregister(ctx context.Context) error                            { return nil }
+func (s *stubTel) SendHeartbeat(string, bool, string, string, bool, bool, time.Duration) error {
+	return nil
+}
+func (s *stubTel) Register(ctx context.Context, acc config.Account) error { return nil }
+func (s *stubTel) Unregister(ctx context.Context) error                   { return nil }
 func (s *stubTel) Dial(ctx context.Context, target string) (string, error) {
 	id := "stub-1"
 	go func() {
@@ -708,6 +711,44 @@ func TestWebRoutes(t *testing.T) {
 			if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, c.ct) {
 				t.Fatalf("%s 的 Content-Type 应为 %s*，实际 %q", c.path, c.ct, ct)
 			}
+		}
+	}
+}
+
+// TestCloseAllWithReason 重启前用关闭帧告知网页端：CloseEvent 的 code/reason
+// 能读到（引导器据此只做原端口重连，不走拉起逻辑）。
+func TestCloseAllWithReason(t *testing.T) {
+	cfg := config.Default()
+	bus := core.NewBus()
+	app := core.New(cfg, nil, bus)
+	tel := &stubTel{app: app}
+	app.SetTel(tel)
+	app.Start(context.Background())
+	srv := New(app)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	conn := dialWS(t, ts.URL)
+	waitEvent(t, conn, "system.state")
+
+	srv.CloseAllWithReason("restart")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		_, _, err := conn.Read(ctx)
+		if err != nil {
+			var ce websocket.CloseError
+			if !errors.As(err, &ce) {
+				t.Fatalf("应以关闭帧结束，实际 %v", err)
+			}
+			if ce.Code != CloseCodeRestart {
+				t.Fatalf("关闭码应为 %d，实际 %d", CloseCodeRestart, ce.Code)
+			}
+			if ce.Reason != "restart" {
+				t.Fatalf("关闭原因应为 restart，实际 %q", ce.Reason)
+			}
+			return
 		}
 	}
 }

@@ -163,14 +163,19 @@
           // 具体错误信息在 onclose 中统一处理
         };
         ws.onmessage = (ev) => this._onMessage(ev.data);
-        ws.onclose = () => {
+        ws.onclose = (ev) => {
           this._stopHeartbeat();
           this._connected = false;
           this._ws = null;
           // 未完成的请求全部失败
           this._pending.forEach((p) => p.reject(new Error('连接已断开')));
           this._pending.clear();
-          this._emit('disconnected', {});
+          // 带上关闭码/原因：软电话重启前会用 4409 + reason（restart/update）关闭连接，
+          // 引导器据此判断「是主动重启，只需原端口重连」，而不是当成软电话退出。
+          this._emit('disconnected', {
+            code: ev && typeof ev.code === 'number' ? ev.code : 0,
+            reason: (ev && ev.reason) || '',
+          });
           // 首次连接失败（从未成功连接过）且配置了 sipUri：
           // 自动通过系统协议拉起软电话（仅此一次）
           if (!this._closed && !this._everConnected && !this._launchAttempted && this.sipUri) {
@@ -192,6 +197,29 @@
         this._ws = null;
       }
       this._connected = false;
+    }
+
+    /**
+     * **销毁实例**（引导器热更新换新 SDK 时调用）：close() 之外再清掉
+     * 事件订阅、未完成请求、心跳定时器与视频渲染器（停掉 canvas 的 MediaStream
+     * track、断开 <video>）。此后旧实例不再持有任何回调，可被回收；
+     * 新实例由引导器重新 onClient 交给应用。
+     */
+    destroy() {
+      this.close();
+      this._stopHeartbeat();
+      this._pending.forEach(function (p) { p.reject(new Error('SDK 实例已销毁')); });
+      this._pending.clear();
+      // 清掉全部事件订阅（含引导器与页面注册的）
+      this._handlers.clear();
+      // 视频渲染器：停 track、解绑 <video>、清画布
+      Object.keys(this._renderers || {}).forEach((ch) => {
+        try { this._renderers[ch].destroy(); } catch (e) { /* 忽略 */ }
+      });
+      this._renderers = {};
+      this._subOpts = null;
+      this._videoSubActive = false;
+      this._closed = true;
     }
 
     /**
@@ -512,12 +540,23 @@
 
     /**
      * 查询软电话当前状态（注册状态、通话列表等）。
-     * 返回值含 version / os / arch（前端据此到业务平台查询对应架构的
+     * 返回值含 version / buildTime / os / arch（前端据此到业务平台查询对应架构的
      * 最新版本，见 notifyUpdate）与 autoAnswer（自动接听开关当前状态）。
      * @returns {Promise<Object>}
      */
     getState() {
       return this._request('system.getState', {});
+    }
+
+    /**
+     * 当前加载的 SDK 所对应的软电话版本与构建时间（`{version, buildTime}`），
+     * 用于直观判断页面是否已热更新到最新构建（bootstrap 断线重连后会自动重载 SDK）。
+     * @returns {Promise<{version: string, buildTime: string}>}
+     */
+    getBuildInfo() {
+      return this.getState().then(function (st) {
+        return { version: st.version, buildTime: st.buildTime || '' };
+      });
     }
 
     /**
@@ -1411,8 +1450,10 @@
     _bindVideoChannel(channel, co, top) {
       const onStats = co.onStats || top.onStats || null;
       const old = this._renderers[channel];
-      if (old && old.el !== co.el) {
-        old.destroy();
+      // 重新订阅（断线重连 / 热更新后）时元素相同也要销毁旧渲染器：
+      // 它持有 canvas 的 MediaStream track，留着会白跑一条流。
+      if (old) {
+        try { old.destroy(); } catch (e) { /* 忽略 */ }
       }
       const r = new VideoRenderer(co.el, {
         fps: co.fps || top.fps,
@@ -1689,7 +1730,8 @@
 
   /**
    * parseSipUri 解析 sip:// 或 sips:// 链接的注册信息（与软电话侧
-   * internal/protocol.ParseSipURL 同一口径）：账号/密码取 userinfo，
+   * internal/protocol.ParseSipURL 同一口径）：账号/密码取 userinfo（缺省再取
+   * ?account=/?password=——浏览器会拦截含 user:pass@ 的 URL，网页拉起用参数形式），
    * 服务器取 host，端口缺省 5060（sips 为 5061），传输 sips:// 前缀即 tls
    * （优先于 ?transport=），否则取 ?transport=、再缺省 udp。
    * 返回 null 表示不是合法的 sip/sips 链接。
@@ -1717,8 +1759,8 @@
     const acc = {
       host: u.hostname,
       port: u.port ? Number(u.port) : (u.protocol === 'sips:' ? 5061 : 5060),
-      account: safeDecode(u.username || ''),
-      password: safeDecode(u.password || ''),
+      account: safeDecode(u.username || '') || (u.searchParams.get('account') || ''),
+      password: safeDecode(u.password || '') || (u.searchParams.get('password') || ''),
       transport: u.protocol === 'sips:' ? 'tls' : (u.searchParams.get('transport') || 'udp').toLowerCase()
     };
     if (!acc.account) {

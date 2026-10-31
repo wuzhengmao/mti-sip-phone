@@ -228,8 +228,7 @@ window.SipApp = window.SipApp || {};
       refreshTop();
     });
 
-    // 连接软电话（无 token 鉴权，仅回环）
-    store.connect();
+    // 连接由 store 里的引导器（SipPhoneBootstrap）自动发起，无需这里再手动 connect
   }
 
   if (document.readyState === 'loading') {

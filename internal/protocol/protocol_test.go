@@ -2,6 +2,36 @@ package protocol
 
 import "testing"
 
+// TestParseSipURLCredentialsAndListen 账号/密码可走查询参数（浏览器会拦截含
+// user:pass@ 的子资源 URL，引导器拉起时改用 ?account=&password=），listen 指定
+// 本地 WS 端口。userinfo 优先于查询参数。
+func TestParseSipURLCredentialsAndListen(t *testing.T) {
+	cases := []struct {
+		raw           string
+		account, pass string
+		listen        int
+	}{
+		{"sip://10.0.0.1:5060?account=2001&password=p%40ss&listen=8765", "2001", "p@ss", 8765},
+		{"sip://2001:pwd@10.0.0.1:5060?account=other&password=other", "2001", "pwd", 0}, // userinfo 优先
+		{"sip://2001@10.0.0.1:5060?password=x&listen=0", "2001", "x", 0},                // listen=0 忽略
+		{"sip://10.0.0.1:5060?account=2001&listen=99999", "2001", "", 0},                // listen 越界忽略
+	}
+	for _, c := range cases {
+		acc, err := ParseSipURL(c.raw)
+		if err != nil {
+			t.Fatalf("%s 解析失败: %v", c.raw, err)
+		}
+		if acc.Account != c.account || acc.Password != c.pass || acc.Listen != c.listen {
+			t.Fatalf("%s 应为 account=%q password=%q listen=%d，实际 %q/%q/%d",
+				c.raw, c.account, c.pass, c.listen, acc.Account, acc.Password, acc.Listen)
+		}
+	}
+	// 两边都没账号 → 明确报错
+	if _, err := ParseSipURL("sip://10.0.0.1:5060"); err == nil {
+		t.Fatal("缺账号应报错")
+	}
+}
+
 // TestParseSipURLInstance sip:// 的 instance 查询参数（多实例沙箱槽位，
 // REQ-NFR-007）：缺省/0 = 主实例；1–99 合法；越界或非数字忽略（按主实例走）。
 func TestParseSipURLInstance(t *testing.T) {
@@ -70,7 +100,7 @@ func TestParseSipURLUpdateSite(t *testing.T) {
 		{"sip://1001:pwd@10.0.0.1:5060?transport=tcp&instance=9&updatesite=https://update.wuzm219.cn", "https://update.wuzm219.cn"},
 		{"sip://1001:pwd@10.0.0.1:5060?updatesite=https%3A%2F%2Fupdate.wuzm219.cn%2Fsub", "https://update.wuzm219.cn/sub"},
 		{"sip://1001:pwd@10.0.0.1:5060?updatesite=%20https://update.wuzm219.cn%20", "https://update.wuzm219.cn"},
-		{"sip://1001:pwd@10.0.0.1:5060?updatesite=%20%20", ""},   // 纯空格 → 视为省略
+		{"sip://1001:pwd@10.0.0.1:5060?updatesite=%20%20", ""},         // 纯空格 → 视为省略
 		{"sip://1001:pwd@10.0.0.1:5060?updatesite=ftp://x", "ftp://x"}, // 非法 scheme 透传（应用层拒绝）
 		{"sips://2999:pwd@10.168.4.40?updatesite=https://update.wuzm219.cn", "https://update.wuzm219.cn"},
 	}
