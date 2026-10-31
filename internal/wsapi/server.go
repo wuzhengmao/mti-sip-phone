@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -60,6 +62,9 @@ type Server struct {
 	// "只监听回环 + 拒绝非回环"的既有安全边界。
 	// ⚠️ 放开后没有鉴权，见 config.WSConfig.AllowRemote 的说明。
 	allowRemote atomic.Bool
+	// conns 当前所有 WS 连接（重启前用指定关闭码/原因逐个关闭，见 CloseAllWithReason）
+	connMu sync.Mutex
+	conns  map[*websocket.Conn]struct{}
 }
 
 // RemoteAllowed 当前是否允许远程连接（配置值，供界面/日志展示）。
@@ -70,7 +75,57 @@ func (s *Server) Port() int { return int(s.port.Load()) }
 
 // New 创建服务。视频中枢同时注册为 core.App 的视频帧附加订阅者。
 func New(app *core.App) *Server {
-	return &Server{app: app, video: newVideoHub(app), unreg: newUnregGuard(app)}
+	return &Server{
+		app: app, video: newVideoHub(app), unreg: newUnregGuard(app),
+		conns: make(map[*websocket.Conn]struct{}),
+	}
+}
+
+// CloseCodeRestart 重启/安装更新前关闭 WS 连接时用的关闭码。
+// 取私有段 4000–4999：**浏览器的 CloseEvent 只在 1000 与 3000–4999 时暴露 reason**
+//（1001 Going Away 的 reason 会被清空），引导器据此判断"是应用主动重启，
+// 只需原端口重连，不必走拉起逻辑"。
+const CloseCodeRestart = websocket.StatusCode(4409)
+
+// CloseAllWithReason 用指定关闭码与原因关闭所有 WS 连接（重启前调用）。
+// 原因走 close 帧，比再发一条事件更可靠（不会和进程退出抢时间）。
+func (s *Server) CloseAllWithReason(reason string) {
+	s.connMu.Lock()
+	conns := make([]*websocket.Conn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.connMu.Unlock()
+	// 并发关闭 + 最多等 800ms：Close 会等对端回 echo（最长 5 秒），串行等待会把
+	// 重启拖慢；关闭帧在等待之前就已写出，浏览器能拿到 code/reason。
+	var wg sync.WaitGroup
+	for _, c := range conns {
+		wg.Add(1)
+		go func(c *websocket.Conn) {
+			defer wg.Done()
+			_ = c.Close(CloseCodeRestart, reason)
+		}(c)
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(800 * time.Millisecond):
+	}
+	logx.Logger().Info("已通知网页端即将重启（WS 关闭帧）", "conns", len(conns), "reason", reason)
+}
+
+// addConn / removeConn 维护连接集合（serveConn 调用）。
+func (s *Server) addConn(c *websocket.Conn) {
+	s.connMu.Lock()
+	s.conns[c] = struct{}{}
+	s.connMu.Unlock()
+}
+
+func (s *Server) removeConn(c *websocket.Conn) {
+	s.connMu.Lock()
+	delete(s.conns, c)
+	s.connMu.Unlock()
 }
 
 // Handler 返回 HTTP 处理器（供测试与内嵌使用）。
@@ -79,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/sdk/", s.handleStatic)
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/contacts.csv", s.handleContactsExport)
 	mux.HandleFunc("/api/contacts/import", s.handleContactsImport)
 	mux.HandleFunc("/api/contacts", s.handleContactsJSON) // JSON 的 REST 接口（GET 导出 / POST 导入）
@@ -184,6 +240,25 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serveAsset(w, "sdk/"+name)
+}
+
+// handleStatus 状态接口（GET /api/status）：返回版本 / 构建时间 / 平台，供 SDK 引导器
+//（web/sdk/sip-phone-bootstrap.js）探测软电话是否运行、并按 version|buildTime 生成
+// SDK 加载指纹（动态加载 + 断线重连后热更新）。与静态资源一致不校验来源：本服务默认
+// 只绑回环，放开远程时这里也不含敏感信息。
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"version":   core.Version,
+		"buildTime": core.BuildTime,
+		"os":        runtime.GOOS,
+		"arch":      runtime.GOARCH,
+	})
 }
 
 // serveAsset 输出一份内嵌资源。

@@ -415,11 +415,13 @@
       <div class="card">
         <h2>链接说明</h2>
         <p class="hint-text">
-          · 明文信令：<code>sip://账号:密码@服务器:端口</code><br>
+          · 明文信令：<code>sip://服务器:端口?account=账号&amp;password=密码</code>（也可写成 <code>sip://账号:密码@服务器:端口</code>）<br>
           · TCP 信令：<code>sip://…?transport=tcp</code><br>
-          · TLS 信令：<code>sips://账号:密码@服务器:端口</code>（默认端口 5061）<br>
+          · TLS 信令：<code>sips://服务器:端口?account=…</code>（默认端口 5061）<br>
           · 沙箱实例：<code>sip://…?instance=2</code>（该实例没在跑就用它的独立数据目录启动）<br>
+          · 指定网页端口：<code>sip://…?listen=8765</code>（引导器拉起时用，拉起后只等这个端口）<br>
           · 更新站点：<code>sip://…?updatesite=https%3A%2F%2F…</code>（按当前配置自动附加，省略 = 不改）<br>
+          账号/密码走查询参数是为了避开浏览器对 <code>user:pass@</code> 形式的拦截。
           链接里含明文密码，只适合内部系统使用。
         </p>
       </div>
@@ -467,7 +469,7 @@
 
 <div id="toast"></div>
 
-<script src="/sdk/sip-phone-sdk.js"></script>
+<script src="/sdk/sip-phone-bootstrap.js"></script>
 <script src="js/common.js"></script>
 <script src="js/icons.js"></script>
 <script src="js/store.js"></script>

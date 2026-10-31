@@ -56,7 +56,7 @@ window.SipApp.views = window.SipApp.views || {};
       });
 
       // 事件日志：默认不回显视频帧（30fps 会把日志刷爆）
-      sdk.on('*', function (m) {
+      store.on('sdkEvent', function (m) {
         if (m.event === 'video.frame' && !$('chkLogFrames').checked) return;
         addLog(m.event, JSON.stringify(m.data));
       });
@@ -111,7 +111,8 @@ window.SipApp.views = window.SipApp.views || {};
 
   /**
    * 用当前的输入框内容生成链接并显示。
-   * 密码为空时链接里**不带** `:密码@`（`sip://账号@服务器`，解析出来就是空密码）。
+   * 账号/密码统一走查询参数（`?account=&password=`），避免浏览器拦截含
+   * user:pass@ 的 URL；密码为空时省略 password 参数（解析出来就是空密码）。
    */
   function generateURI() {
     const server = $('uriServer').value.trim();
@@ -121,9 +122,11 @@ window.SipApp.views = window.SipApp.views || {};
     if (!server || !account) { App.ui.toast('请输入服务器与账号', 'err'); return; }
     let host = server;
     if (host.indexOf(':') < 0) host += (transport === 'tls' ? ':5061' : ':5060');
-    let uri = (transport === 'tls' ? 'sips://' : 'sip://') + account +
-      (password ? ':' + encodeURIComponent(password) : '') + '@' + host;
-    const params = [];
+    // 账号/密码走查询参数（不用 user:pass@）：浏览器会拦截含内嵌凭据的 URL
+    //（拉起时的 iframe 子资源、部分版本的地址栏导航都会拦）。
+    let uri = (transport === 'tls' ? 'sips://' : 'sip://') + host;
+    const params = ['account=' + encodeURIComponent(account)];
+    if (password) params.push('password=' + encodeURIComponent(password));
     if (transport === 'tcp') params.push('transport=tcp');
     const slot = parseInt($('uriInstance').value, 10);
     if (slot > 0) {

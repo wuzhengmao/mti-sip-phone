@@ -58,6 +58,16 @@ declare class SipPhoneSDK {
   /** 订阅坐席状态变化（REQ-ACC-028）：负载 `SipAgentState`。 */
   on(event: 'cti.agent', fn: (data: SipAgentState) => void): this;
 
+  /** 订阅连接建立（SDK 本地事件）。 */
+  on(event: 'connected', fn: () => void): this;
+
+  /**
+   * 订阅连接断开（SDK 本地事件）。
+   * `code = 4409` 表示软电话**主动重启/安装更新**（`reason` = `restart` / `update`）——
+   * 用引导器时它会据此只做原端口重连，业务代码一般不用处理。
+   */
+  on(event: 'disconnected', fn: (data: { code: number; reason: string }) => void): this;
+
   /**
    * 订阅事件；'*' 订阅全部。
    * 事件名：call.incoming / call.ringing / call.dialing / call.established /
@@ -71,7 +81,8 @@ declare class SipPhoneSDK {
    *         video.frame（订阅视频后逐帧推送）/
    *         register.state / system.state / system.ready / system.update /
    *         system.updateConfig / system.autoAnswer /
-   *         connected / disconnected（SDK 本地事件）
+   *         connected / disconnected（SDK 本地事件；disconnected 负载 {code, reason}，
+   *         4409 = 软电话主动重启/安装更新）
    * 注：SDK 本地事件（connected / disconnected）不会派发给 '*' 订阅者。
    */
   on(event: string, fn: (data: any) => void): this;
@@ -255,6 +266,8 @@ declare class SipPhoneSDK {
   /** 查询状态（注册状态、通话列表、版本与平台、更新状态、自动接听开关） */
   getState(): Promise<{
     version: string;
+    /** 构建时间（ISO 8601，未注入时为空；SDK 动态加载指纹用） */
+    buildTime?: string;
     os: string;
     arch: string;
     autoAnswer: boolean;
@@ -291,6 +304,9 @@ declare class SipPhoneSDK {
     }>;
     update?: SipUpdateStatus;
   }>;
+
+  /** 当前加载的 SDK 所对应的软电话版本与构建时间（`{version, buildTime}`） */
+  getBuildInfo(): Promise<{ version: string; buildTime: string }>;
 
   /**
    * **强制推送**更新（SDK 唯一的更新相关能力）：把指定版本告知软电话，

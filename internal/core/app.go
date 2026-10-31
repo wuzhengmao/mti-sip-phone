@@ -85,6 +85,7 @@ type State struct {
 	Version  string        `json:"version"`
 	OS       string        `json:"os"`   // 编译目标平台（如 windows），前端据此查询对应产物
 	Arch     string        `json:"arch"` // 编译目标架构（如 amd64）
+	BuildTime string       `json:"buildTime,omitempty"` // 构建时间（ISO 8601，SDK 动态加载指纹用，未注入时为空）
 	Register RegisterInfo  `json:"register"`
 	Calls    []Call        `json:"calls"`
 	Update   *UpdateStatus `json:"update,omitempty"` // 更新状态（无更新时省略）
@@ -323,6 +324,7 @@ func (a *App) State() State {
 		Version:      Version,
 		OS:           runtime.GOOS,
 		Arch:         runtime.GOARCH,
+		BuildTime:    BuildTime,
 		Register:     a.reg,
 		Calls:        make([]Call, 0, len(a.callOrder)),
 		Update:       upd,

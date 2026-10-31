@@ -50,6 +50,9 @@ type Account struct {
 	// **本实例**的更新配置（只改 URL 字段）；空 = 不修改。合法性（http/https）
 	// 由 core.SetUpdateConfig 校验，解析层只透传。
 	UpdateSite string
+	// Listen 本地 WS 监听端口（查询参数 listen，缺省 0 = 用配置端口）：引导器
+	// 拉起时指定，避免「端口被占用自动 +1」与「扫描端口」的不确定。
+	Listen int
 }
 
 // ParseSipURL 解析 sip:// / sips:// URI：
@@ -57,8 +60,12 @@ type Account struct {
 //	sip://account:password@host:port?transport=tcp
 //	sips://account:password@host:port        ⇒ transport=tls（默认端口 5061）
 //	sip://account@host?updatesite=https://…  ⇒ 更新站点（省略 = 不改配置）
+//	sip://host?account=2001&password=xxx     ⇒ 账号/密码走查询参数（浏览器会
+//	                                            拦截含 user:pass@ 的子资源 URL，
+//	                                            网页拉起时需要这种形式）
 //
-// 账号与密码支持 URL 编码。
+// 账号与密码支持 URL 编码。查询参数形式的 account/password 只在 userinfo 里
+// 没有对应值时生效（userinfo 优先）。
 func ParseSipURL(raw string) (*Account, error) {
 	lower := strings.ToLower(raw)
 	sips := strings.HasPrefix(lower, SchemeSips+"://")
@@ -72,6 +79,7 @@ func ParseSipURL(raw string) (*Account, error) {
 	if u.Hostname() == "" {
 		return nil, fmt.Errorf("缺少服务器地址")
 	}
+	q := u.Query()
 	acc := &Account{
 		Server:  u.Hostname(),
 		Port:    5060,
@@ -85,30 +93,44 @@ func ParseSipURL(raw string) (*Account, error) {
 	if pwd, ok := u.User.Password(); ok {
 		acc.Password = pwd
 	}
+	// 浏览器会拦截含 user:pass@ 的子资源 URL（Chrome "embedded credentials"），
+	// 网页拉起时改用查询参数传账号/密码；userinfo 优先，缺了才取参数。
+	if acc.Account == "" {
+		acc.Account = strings.TrimSpace(q.Get("account"))
+	}
+	if acc.Password == "" {
+		acc.Password = q.Get("password")
+	}
 	if port := u.Port(); port != "" {
 		if p, err := strconv.Atoi(port); err == nil && p > 0 && p < 65536 {
 			acc.Port = p
 		}
 	}
-	if tr := u.Query().Get("transport"); tr != "" && !sips {
+	if tr := q.Get("transport"); tr != "" && !sips {
 		acc.Transport = config.NormalizeTransport(tr)
 	}
 	if acc.Transport == "" {
 		acc.Transport = config.TransportUDP
 	}
 	if acc.Account == "" {
-		return nil, fmt.Errorf("缺少账号（格式应为 sip://账号:密码@服务器:端口）")
+		return nil, fmt.Errorf("缺少账号（格式应为 sip://账号:密码@服务器:端口，或用 ?account=&password= 传）")
 	}
 	// 多实例（沙箱槽位）：sip://账号:密码@服务器:端口?instance=2
 	// 缺省/0 = 主实例；槽位 ≥1 时由本进程使用独立数据目录启动（见 config.InstanceDir）。
-	if inst := u.Query().Get("instance"); inst != "" {
+	if inst := q.Get("instance"); inst != "" {
 		if n, err := strconv.Atoi(inst); err == nil && n > 0 && n <= 99 {
 			acc.Instance = n
 		}
 	}
+	// 本地 WS 监听端口（查询参数 listen）：引导器拉起时指定，避免端口不确定。
+	if ls := q.Get("listen"); ls != "" {
+		if n, err := strconv.Atoi(ls); err == nil && n > 0 && n < 65536 {
+			acc.Listen = n
+		}
+	}
 	// 更新站点（查询参数 updatesite）：sip://账号@服务器?updatesite=https://…
 	// 省略/空 = 不改配置；scheme 是否合法由 SetUpdateConfig 校验（此处只透传）。
-	acc.UpdateSite = strings.TrimSpace(u.Query().Get("updatesite"))
+	acc.UpdateSite = strings.TrimSpace(q.Get("updatesite"))
 	return acc, nil
 }
 

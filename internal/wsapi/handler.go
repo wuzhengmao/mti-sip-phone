@@ -33,6 +33,9 @@ func (s *Server) serveConn(ctx context.Context, conn *websocket.Conn) {
 	defer cancel()
 
 	c := &wsConn{id: s.video.nextID.Add(1), conn: conn, ctx: connCtx}
+	// 登记连接：重启前 CloseAllWithReason 要按这条连接逐个发关闭帧
+	s.addConn(conn)
+	defer s.removeConn(conn)
 	// 连接断开：注销视频订阅（并通知核心层恢复视频窗口显示）
 	defer s.video.Unsubscribe(c)
 	// 「WS 断开自动取消注册」（REQ-WS-020）：登记/注销连接计数。

@@ -19,13 +19,92 @@ SDK（`sip-phone-sdk.js`，无依赖）把本机运行的 **mti-sip-phone 软电
 
 ## 2. 快速上手（5 分钟）
 
-SDK 由软电话自身提供，**不需要在页面里放一份**：
+SDK 由软电话自身提供，**不需要把整份 SDK 打进页面**。推荐用**引导器**（bootstrap）加载：
+应用只放一份极小的 `sip-phone-bootstrap.js`，SDK 每次从软电话动态加载，软电话更新后
+**页面免刷新自动换新 SDK**（原理与更多用法见 [sdk-bootstrap.md](sdk-bootstrap.md)）。
+
+```html
+<!-- 引导器：从软电话自身下载（也可以打进你的应用包） -->
+<script src="http://127.0.0.1:8765/sdk/sip-phone-bootstrap.js"></script>
+<script>
+  // 同步返回稳定的**门面**（不是 SDK 实例）：方法/属性始终指向当前实例，
+  // 热更新换实例后自动切换，业务代码不用改；事件只订阅一次。
+  const sdk = SipPhoneBootstrap.connect({
+    onClient: (client, meta) => console.log('SDK 已加载', meta),  // 可选
+  });
+  sdk.on('call.incoming', () => sdk.answer());
+</script>
+```
+
+如果不需要热更新，也可以直接引 SDK（简单场景）：
 
 ```html
 <script src="http://127.0.0.1:8765/sdk/sip-phone-sdk.js"></script>
+<script>
+  const sdk = new SipPhoneSDK({ url: 'ws://127.0.0.1:8765/ws' });
+  sdk.connect();
+</script>
 ```
 
-最小可用页面：
+最小可用页面（**引导器版**，推荐）：
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<body>
+  <button id="dial">呼叫 1001</button>
+  <button id="hangup" disabled>挂断</button>
+  <button id="relaunch" hidden>重新拉起软电话</button>
+  <p id="status">未连接</p>
+
+  <script src="http://127.0.0.1:8765/sdk/sip-phone-bootstrap.js"></script>
+  <script>
+    // 同步返回稳定的门面（不是 SDK 实例）：下面所有调用都经它转发到当前实例，
+    // SDK 热更新换实例后自动切换，业务代码不需要改。
+    const sdk = SipPhoneBootstrap.connect({
+      url: 'ws://127.0.0.1:8765/ws',              // 可选，默认就是它
+      sipUri: 'sip://2999@10.168.4.40:15060',     // 可选：软电话没在跑时用它拉起
+      onClient: (client, meta) => console.log('SDK 已加载', meta.version, meta.buildTime),
+      // 断线后的自动拉起可能被浏览器拦下（外部协议需要用户手势）：出个按钮让用户点
+      onLaunchBlocked: () => { relaunch.hidden = false; },
+    });
+
+    // 事件只订阅一次：门面会在每个新实例上自动重挂
+    sdk.on('connected',    () => status.textContent = '已连接软电话');
+    sdk.on('disconnected', () => status.textContent = '已断开');
+
+    sdk.on('register.state', (s) => {
+      status.textContent = '注册状态：' + s.state;   // registered / registering / failed / unregistered
+    });
+
+    // 来电：这里先自动接听演示；实际产品应展示接听/拒接按钮
+    sdk.on('call.incoming', () => {
+      sdk.answer().catch((e) => console.error('接听失败', e.message));
+    });
+
+    sdk.on('call.established', (data) => {
+      hangup.disabled = false;
+      status.textContent = '通话中：' + data.call.remote;
+    });
+
+    sdk.on('call.terminated', () => {
+      hangup.disabled = true;
+      status.textContent = '通话结束';
+    });
+
+    dial.onclick = () => sdk.dial('1001');
+    hangup.onclick = () => sdk.hangup();
+
+    relaunch.onclick = () => {
+      relaunch.hidden = true;
+      SipPhoneBootstrap.launchFromGesture();   // 点击本身携带用户手势
+    };
+  </script>
+</body>
+</html>
+```
+
+最小可用页面（**直接引 SDK 版**，不需要热更新时用）：
 
 ```html
 <!DOCTYPE html>
@@ -70,9 +149,11 @@ SDK 由软电话自身提供，**不需要在页面里放一份**：
 </html>
 ```
 
-三件事记住就够起步：**`connect()` 必须显式调用**（构造函数不会自动连）、
-**通话类操作不用传 `callId`**（软电话是**单通话**设计，自己知道当前通话，不在通话会返回
-`call_not_found`；`dial` 仍返回 `{callId}` 供显示）、**事件用 `on('call.xxx', fn)` 订阅**。
+三件事记住就够起步：**`connect()`**（引导器版由引导器内部完成，需要等首次连上就 `await sdk.ready`——
+首次失败会 reject，但引导器仍会在后台重试，连上时照常触发 `connected`；
+直接引 SDK 时必须自己 `await sdk.connect()`）、**通话类操作不用传 `callId`**（软电话是**单通话**设计，
+自己知道当前通话，不在通话会返回 `call_not_found`；`dial` 仍返回 `{callId}` 供显示）、
+**事件用 `on('call.xxx', fn)` 订阅**。
 
 ## 3. 连接与生命周期
 
@@ -108,6 +189,19 @@ await sdk.connect();
 - **断线行为**：连接断开时所有未完成的请求会 reject（`连接已断开`）；订阅过的事件在重连后
   依然有效；**视频订阅会被 SDK 自动恢复**（记住最近一次的订阅参数）。
 - **`close()`**：主动断开且不再重连（页面卸载时可调）。
+- **`destroy()`**：销毁实例——`close()` 之外再清事件订阅、未完成请求、心跳与视频渲染器
+  （停掉 canvas 的 MediaStream、解绑 `<video>`）。引导器热更新换新 SDK 时会对旧实例调用它。
+- **用引导器时**（`SipPhoneBootstrap.connect`）：**它返回的是稳定的门面，不是 SDK 实例**；
+  **连接的建立/重连由引导器负责**（SDK 的 `autoReconnect` 被关掉，软电话退出后由引导器探测/拉起
+  并按指数退避重连，不会对着死端口反复重试）。热更新换实例时门面自动切换，并**自动重挂已登记的
+  事件订阅**——所以业务代码只写一次即可，也接触不到 SDK 实例。需要知道"第一次什么时候连上"用
+  `await sdk.ready`；`sdk.close()` / `sdk.destroy()` 会停止引导（不再重连/拉起）。
+  **`ready` 首次失败会 reject 一次，但引导器不放弃**：它会继续在后台探测/拉起（用户手动启动软电话、
+  或点「重新拉起」按钮后都能自动连上），之后的状态以 `connected` / `disconnected` 事件为准。
+  软电话**重启/安装更新**时连接会以关闭码 **4409** 断开，引导器只做原端口重连（不扫描/不拉起），
+  连上后自动按指纹热更新 SDK——页面无需刷新。
+  **视频订阅也由门面保管**：`sdk.subscribeVideo(...)` 成功后门面记住参数，热更新换实例后自动重订
+  （同一实例的断线重连由 SDK 内部恢复）；`sdk.videoSubscribed` 可查当前是否在订阅，取消订阅会清掉记录。
 - **心跳**：SDK 每 25 秒自动发一条空消息，避免被软电话读超时断开（读超时 180s，已给
   Chrome 后台节流留足余量）。自己实现 WS 客户端时也必须做这件事。
 
@@ -182,7 +276,8 @@ await sdk.connect();
 
 | 方法 | 说明 |
 | --- | --- |
-| `getState()` | 状态快照：版本/平台、注册状态、通话列表（含音频/视频/通信录字段）、更新状态、自动接听开关、`noUI`（是否仅托盘无 UI 版）、`instance`（实例槽位）、`agentMode`（坐席模式，none=不在线） |
+| `getState()` | 状态快照：版本/构建时间/平台、注册状态、通话列表（含音频/视频/通信录字段）、更新状态、自动接听开关、`noUI`（是否仅托盘无 UI 版）、`instance`（实例槽位）、`agentMode`（坐席模式，none=不在线） |
+| `getBuildInfo()` | 当前加载的 SDK 对应的软电话版本与构建时间（`{version, buildTime}`），用于观察是否已热更新到最新构建 |
 | `getCallPanel()` | 查询当前通话面板快照（`call.panel` 负载 `SipCallPanelState`），两个 panel 为 null 表示无通话 |
 | `setAutoAnswer(enabled)` | 自动接听开关（与软电话界面按钮**共用一份状态**，变更广播 `system.autoAnswer`） |
 | `register()` | **登录账号**（REQ-ACC-024）：启用账户并立即注册；结果经 `register.state` 事件回显。与托盘菜单「登录账号」一致 |
@@ -325,7 +420,7 @@ sub.transforms();
 
 | 事件 | 何时来 | 负载要点 |
 | --- | --- | --- |
-| `connected` / `disconnected` | SDK 本地事件（**不派发给 `*`**） | — |
+| `connected` / `disconnected` | SDK 本地事件（**不派发给 `*`**） | `disconnected` 负载 `{code, reason}`：软电话**重启/安装更新**前会用关闭码 **4409** 关闭连接（`reason` = `restart`/`update`），其余为浏览器/网络的关闭码（如 `1006`）。用引导器时这些都由它处理，应用只需刷新自己的连接状态 |
 | `system.state` | 每次连接建立时 | 与 `getState()` 相同（含 `video` 旋转/镜像、`autoAnswer`） |
 | `register.state` | 注册状态变化 | `{state, account, reason}`；`state`: `registered`/`registering`/`failed`/`unregistered` |
 | `call.dialing` | 呼出已发起 | `{callId, call}` |
@@ -377,8 +472,9 @@ Call-Info display-name，显示名称时优先于通信录）、`consult?`（本
 
 1. **构造函数不会自动连接。** 忘了 `await sdk.connect()`，所有方法都会 reject
    `尚未连接软电话`。连接通常比想象中快，但**不要在 connect 之前发请求**。
-2. **`callId` 不能猜。** 只在 `data.callId`（事件）和 `dial()` 的返回值里有。接听必须用
-   `call.incoming` 里那一个；拿错 ID 会得到 `call_not_found`。
+2. **通话类方法不用传 `callId`。** 软电话是**单通话**设计，`answer()` / `hangup()` 等自己
+   定位当前通话，不在通话会返回 `call_not_found`；`callId` 只在 `data.callId`（事件）和
+   `dial()` 的返回值里，供展示/日志用。
 3. **端口不一定是 8765。** 软电话的 WS 端口被占用时会**自动 +1 并保存配置**（8775…），
    页面硬编码 8765 就会连不上。稳妥做法：`url` 由部署配置注入，或以软电话配置页
    显示的端口为准；默认安装且 8765 未被占用时用默认值即可（SDK 的默认值就是它）。
@@ -405,6 +501,15 @@ Call-Info display-name，显示名称时优先于通信录）、`consult?`（本
     此时改用 WS 侧的 `exportContacts()` / `importContacts(csv)`。
 15. **`on('*')` 收不到 `connected` / `disconnected`**（SDK 本地事件单独派发），需要单独订阅。
 16. **一个页面一轮通话足够用**：软电话是单通话设计，别做"多人同时拨号"的界面。
+17. **用引导器时拿到的不是 SDK 实例**：`SipPhoneBootstrap.connect()` 返回的是稳定门面，方法/属性
+    都经它转发；**不要**再去 `onClient` 里拿实例长期缓存（它只是观察点）。视频订阅由门面保管并自动
+    恢复，不用自己在 `connected` 里重订。
+18. **拉起软电话需要用户手势**：浏览器只允许用户点击后（约 5 秒内）触发外部协议；断线回调里的
+    自动拉起会被**静默拒绝**。接 `onLaunchBlocked` 出个「重新拉起」按钮、点击时调
+    `SipPhoneBootstrap.launchFromGesture()`。**首次连接失败（`ready` reject）不等于结束**——
+    引导器会继续在后台探测/拉起，之后连上照样触发 `connected`。
+19. **控制台/页面的静态资源与 SDK 都内嵌在软电话里**：改了 `web/**` 必须**重建二进制 + 重启**才生效；
+    排查"怎么改都不生效"时先确认跑的是不是新构建（`bootstrap` 的日志会打印 `build=` 时间）。
 
 ## 9. 调试建议
 
@@ -420,8 +525,12 @@ Call-Info display-name，显示名称时优先于通信录）、`consult?`（本
 ## 10. 附：SDK 与软电话的版本关系
 
 SDK 随软电话一起发布（内嵌在二进制里，`GET /sdk/sip-phone-sdk.js`），**版本永远与软电话一致**——
-不存在单独升级 SDK 的问题。升级软电话后刷新页面即可拿到新 SDK；若页面缓存了旧 SDK，
-加查询串（`?v=版本号`）或用 `cache: 'no-store'` 的方式引入。
+不存在单独升级 SDK 的问题。两种加载方式：
+
+- **引导器（推荐）**：页面只打包 `sip-phone-bootstrap.js`，SDK 每次从软电话动态加载；软电话升级后
+  **无需刷新页面**，重连时按 `version|buildTime` 指纹自动加载新 SDK（见 [sdk-bootstrap.md](sdk-bootstrap.md)）。
+- **直接引 SDK**：升级软电话后刷新页面即可拿到新 SDK；若页面缓存了旧 SDK，加查询串（`?v=版本号`）
+  或用 `cache: 'no-store'` 的方式引入。
 
 需要更底层的控制（自己实现 WS 客户端、其他语言接入）时，看 [ws-protocol.md](ws-protocol.md)——
 报文格式、方法、事件、错误码与本文一一对应。
