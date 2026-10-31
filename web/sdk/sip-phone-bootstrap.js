@@ -221,6 +221,13 @@
   //（应用在拿到配置后告知；断线重连用它拉起软电话）。
   var currentSipUri = null;
 
+  // 本轮断线是否已经尝试过拉起：**一次断线只拉一次**。拉起失败（被浏览器拦、
+  // 软电话没起来）后不再反复拉起，只做探测/扫描重连（指数退避）——反复拉起会
+  // 反复弹系统确认框、刷日志，且没有用户手势时本来就会被拒绝。
+  // 连上（connected）后重置，下一次断线可以再尝试一次；launchFromGesture 是
+  // 用户的显式操作，也算一次尝试（同样会置位）。
+  var launchAttempted = false;
+
   // 当前是否有用户手势激活（Chrome 115+ 提供 navigator.userActivation）。
   // 返回 true/false；浏览器不支持时返回 null（未知）。
   // 外部协议拉起要求 transient activation，isActive=false 时拉起必定被浏览器拒绝，
@@ -258,6 +265,7 @@
   // onLaunchBlocked 让应用提供一个按钮、由用户点击再拉起。
   function launchPhone(sipUri) {
     lastLaunchUri = sipUri;
+    launchAttempted = true; // 本轮已拉起过：失败后不再重复拉起（见模块顶部说明）
     // 先打一条日志，方便判定到底有没有真的去拉起（被拦与否看浏览器后续告警）
     if (typeof console !== 'undefined') console.log('[bootstrap] 尝试拉起软电话：' + maskUri(sipUri));
     triggerLaunch(sipUri);
@@ -268,6 +276,7 @@
   // 浏览器会对没有用户手势的拉起直接拒绝，所以自动拉起失败后必须走这条路径。
   function launchFromGesture() {
     if (!lastLaunchUri) return false;
+    launchAttempted = true; // 用户显式操作同样算一次尝试
     triggerLaunch(lastLaunchUri);
     return true;
   }
@@ -310,8 +319,9 @@
 
   // 内部实现：确保软电话在 httpBase（或附近端口）运行，返回 { httpBase, version, buildTime }。
   // url 只用于确定扫描起始端口；拉起用 sipUri（可空，空则无法拉起只报错）。
+  // allowLaunch=false 时**只探测/扫描、不拉起**（本轮已经尝试过拉起，见 launchAttempted）。
   // onBlocked 在「拉起后超时仍未起来」时回调——reason 按当时的用户手势判定。
-  function _ensurePhone(wsUrl, httpBase, sipUri, onBlocked) {
+  function _ensurePhone(wsUrl, httpBase, sipUri, onBlocked, allowLaunch) {
     var startPort = portOf(wsUrl);
     var host = hostOf(httpBase);
     // 1. 先直接试当前 httpBase（软电话可能已在该端口运行）
@@ -322,8 +332,10 @@
       // 2. 不可达：扫描端口，找已运行的软电话（同一台机器上的相邻端口）
       return scanPorts(startPort, host).then(function (found) {
         if (found) return found;
-        // 3. 没找到软电话：**总是尝试拉起**（不管有没有用户手势——无手势时浏览器
-        //    会静默拒绝，靠下面的超时判定）。
+        // 3. 没找到软电话：本轮还没拉过才尝试拉起（一次断线只拉一次；失败后只重连）。
+        if (allowLaunch === false) {
+          throw new Error('软电话未运行（本轮已尝试过拉起，只做探测重连）');
+        }
         //    先探测一个空闲端口经 ?listen= 告诉软电话绑它，拉起后只等这个已知端口，
         //    不再扫端口；账号/密码挪进查询参数，避开浏览器的 user:pass@ 拦截。
         if (!sipUri) throw new Error('软电话未运行且未提供 sipUri，无法拉起');
@@ -555,6 +567,7 @@
       currentClient.on('connected', function () {
         if (gen !== clientGen) return;
         restartPending = false; // 连上了说明重启已完成
+        launchAttempted = false; // 连上即重置：下一次断线可以再尝试拉起一次
         if (!stopped) maybeReload();
       });
       // 热更新换实例后恢复视频订阅（同一实例的重连由 SDK 自己恢复，见 restoreVideo）
@@ -680,9 +693,10 @@
       attempt();
     }
 
-    // 断线后把控制交回 bootstrap：循环「探测 / 扫描 / 拉起」，失败按退避重试。
-    // 每轮走 _ensurePhone（探测 → 扫描 → 拉起 → 等待），软电话回来后重连；
-    // 一轮失败（拉起超时）则退避后重试，不再固定间隔反复刷。
+    // 断线后把控制交回 bootstrap：循环「探测 / 扫描（首次还会拉起）」，失败按退避重试。
+    // 每轮走 _ensurePhone（探测 → 扫描 → 必要时拉起 → 等待）：**一次断线只拉起一次**，
+    // 拉起失败后后续轮次只做探测/扫描（手动启动软电话也能被发现并连上）；
+    // 连上后 launchAttempted 重置，下一次断线再尝试拉起一次。
     function scheduleReconnect() {
       if (reconnecting || stopped) return;
       reconnecting = true;
@@ -691,7 +705,7 @@
       function attempt() {
         if (stopped) { reconnecting = false; return Promise.resolve(); }
         // 扫描起点用**当前**的 ws 地址（端口可能已被上一次拉起改过），httpBase 也一样
-        return _ensurePhone(currentWsUrl, httpBase, currentSipUri, options.onLaunchBlocked).then(function (meta) {
+        return _ensurePhone(currentWsUrl, httpBase, currentSipUri, options.onLaunchBlocked, !launchAttempted).then(function (meta) {
           httpBase = meta.httpBase;
           currentWsUrl = wsUrlWithPort(wsUrl, portOf(httpBase));
           log('软电话已就绪（' + httpBase + '），重连并检查 SDK 构建');
@@ -715,7 +729,7 @@
       attempt();
     }
 
-    _ensurePhone(wsUrl, httpBase, currentSipUri, options.onLaunchBlocked).then(function (meta) {
+    _ensurePhone(wsUrl, httpBase, currentSipUri, options.onLaunchBlocked, !launchAttempted).then(function (meta) {
       if (stopped) return; // 加载期间已被 close()：不再建实例
       return loadAndCreate(meta).then(function (created) {
         if (created) readyResolve(facade);

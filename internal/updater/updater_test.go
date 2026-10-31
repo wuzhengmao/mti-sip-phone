@@ -165,8 +165,16 @@ func TestDownloadReplaceAndRestart(t *testing.T) {
 	defer srv.Close()
 
 	restarted := make(chan struct{}, 1)
+	installed := make(chan struct{}, 1)
+	var installedSawNew bool
 	u := newTestUpdater(t, Options{
 		ExePath: exe,
+		OnInstalled: func(info core.UpdateInfo) {
+			// 回调时新文件必须已经就位（多实例通知依赖这个时机）
+			got, _ := os.ReadFile(exe)
+			installedSawNew = bytes.Equal(got, newBin) && info.Version == "9.9.9"
+			installed <- struct{}{}
+		},
 		Restart: func() error { restarted <- struct{}{}; return nil },
 	})
 	info := core.UpdateInfo{Version: "9.9.9", URL: srv.URL + "/app.exe", SHA256: sha256Hex(newBin)}
@@ -181,6 +189,14 @@ func TestDownloadReplaceAndRestart(t *testing.T) {
 	case <-restarted:
 	case <-time.After(10 * time.Second):
 		t.Fatalf("等待重启回调超时：%+v", u.Status())
+	}
+	select {
+	case <-installed:
+	case <-time.After(time.Second):
+		t.Fatal("未收到 OnInstalled 回调")
+	}
+	if !installedSawNew {
+		t.Error("OnInstalled 回调时应已替换为新文件且带版本号")
 	}
 
 	got, err := os.ReadFile(exe)

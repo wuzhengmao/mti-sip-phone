@@ -31,6 +31,7 @@ import (
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
 	"mti-sip-phone/internal/macurl"
+	"mti-sip-phone/internal/multiinstance"
 	"mti-sip-phone/internal/protocol"
 	"mti-sip-phone/internal/selfinstall"
 	"mti-sip-phone/internal/single"
@@ -63,6 +64,8 @@ func main() {
 		fmt.Printf("mti-sip-phone %s (%s)\n", core.Version, core.Platform())
 		return
 	}
+	// 多实例协作用：早于这个时刻写入的「重启标记」属于上一次运行，不再触发重启。
+	startedAt := time.Now()
 
 	// macOS 的 sip:// 链接走苹果事件（点击链接时系统不给命令行参数）：处理器
 	// 要尽早装上，否则"点链接冷启动"的那一次会漏掉。其余平台为空操作。
@@ -194,9 +197,11 @@ func main() {
 	// 引导器据此只做原端口重连、不走拉起逻辑（详见 internal/wsapi 的 CloseAllWithReason）。
 	// WS 服务创建后赋值；未赋值（如极早期失败路径）时静默跳过。
 	var notifyRestarting func(string)
-	restart := func() error {
+	// restartWith 请求重启：reason 会进 WS 关闭帧（restart = 手动重启，
+	// update = 安装更新——本实例自己升级或其它实例通知）。
+	restartWith := func(reason string) error {
 		if notifyRestarting != nil {
-			notifyRestarting("restart")
+			notifyRestarting(reason)
 		}
 		restartRequested.Store(true)
 		// Unix 侧先起看门狗兜底：正常退出时它只是多起一个实例（会被
@@ -206,6 +211,7 @@ func main() {
 		stop()
 		return nil
 	}
+	restart := func() error { return restartWith("restart") }
 
 	logx.Logger().Info("mti-sip-phone 启动",
 		"version", core.Version, "config", cfgPath, "instance", slot)
@@ -255,6 +261,33 @@ func main() {
 	}
 	app.SetSIPTraceController(sip.SetTraceEnabled)
 
+	// 多实例协作：其它实例安装更新后会写共享标记（见 updater.OnInstalled）；
+	// 本实例轮询到「新版本已就位、但自己跑的还是旧镜像」时，等**没有进行中的
+	// 通话**再重启，避免打断话务。指纹取启动时的 exe——重启后的新进程与标记
+	// 一致，不会再被同一条标记触发。
+	if exePath != "" {
+		go func() {
+			fp, err := multiinstance.FileSHA256(exePath)
+			if err != nil {
+				logx.Logger().Warn("计算本实例可执行文件指纹失败，改按版本号判断升级标记", "err", err)
+			}
+			multiinstance.Watch(ctx, multiinstance.WatchOptions{
+				OwnSlot:        slot,
+				OwnFingerprint: fp,
+				OwnVersion:     core.Version,
+				StartedAt:      startedAt,
+				IsBusy:         app.HasActiveCall,
+				OnStale: func(m multiinstance.Marker) {
+					logx.Logger().Info("其它实例已升级，本实例空闲后重启",
+						"version", m.Version, "sourceSlot", m.SourceSlot, "instance", slot)
+					if err := restartWith("update"); err != nil {
+						logx.Logger().Warn("请求重启失败", "err", err)
+					}
+				},
+			})
+		}()
+	}
+
 	// 通话记录（REQ-CALL-007）：本地 SQLite（纯 Go 驱动，不影响交叉编译）。
 	// 打不开只降级为"本次运行不记录"，不阻断启动。Close 幂等，退出收尾与
 	// defer 都会调（见下方 spawnNewProcessIfRequested 之前那次）。
@@ -288,10 +321,19 @@ func main() {
 		ExePath: exePath,
 		// 安装更新后的重启：关闭帧原因标成 update（网页端可区分，行为相同）
 		Restart: func() error {
-			if notifyRestarting != nil {
-				notifyRestarting("update")
+			return restartWith("update")
+		},
+		// 多实例：可执行文件替换成功后写共享标记，其它实例轮询到后会在空闲时重启。
+		// 必须在本进程重启之前写（见 updater.applyNow 的调用时机）。
+		OnInstalled: func(info core.UpdateInfo) {
+			if exePath == "" {
+				return
 			}
-			return restart()
+			if err := multiinstance.RequestRestart(exePath, slot, info.Version); err != nil {
+				logx.Logger().Warn("写入多实例重启标记失败，其它实例不会自动重启", "err", err)
+				return
+			}
+			logx.Logger().Info("已通知其它实例：升级后空闲时一并重启", "version", info.Version, "instance", slot)
 		},
 		IsBusy: app.HasActiveCall,
 	})
