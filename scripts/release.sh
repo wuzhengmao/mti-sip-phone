@@ -225,7 +225,10 @@ GH_BODY="$(mktemp)"
 CI_WORKDIR=""
 cleanup_gh() {
     rm -f "$GH_BODY"
-    [ -n "$CI_WORKDIR" ] && rm -rf "$CI_WORKDIR"
+    if [ -n "$CI_WORKDIR" ]; then
+        rm -rf "$CI_WORKDIR"
+    fi
+    return 0 # EXIT trap 的最后一个命令状态会覆盖脚本退出码（--no-build 时 CI_WORKDIR 为空）
 }
 trap cleanup_gh EXIT
 
