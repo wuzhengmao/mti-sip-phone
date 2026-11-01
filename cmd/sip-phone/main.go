@@ -37,6 +37,7 @@ import (
 	"mti-sip-phone/internal/single"
 	"mti-sip-phone/internal/sip"
 	"mti-sip-phone/internal/updater"
+	"mti-sip-phone/internal/variant"
 	"mti-sip-phone/internal/wsapi"
 )
 
@@ -336,6 +337,9 @@ func main() {
 			logx.Logger().Info("已通知其它实例：升级后空闲时一并重启", "version", info.Version, "instance", slot)
 		},
 		IsBusy: app.HasActiveCall,
+		// 无 UI 版通常不会开着控制台，没人工可点：查到新版本就自动下载，下载完
+		// 自动安装，有通话时 applyNow 会挂起等待（通话结束后再替换并重启）。
+		AutoUpdate: variant.NoUI,
 	})
 	upd.Cleanup()
 	app.SetUpdater(upd)
