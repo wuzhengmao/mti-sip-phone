@@ -78,7 +78,10 @@ jobs:
           path: |
             third_party/video
             third_party/audio
-          key: third-party-v1-${{ runner.os }}-${{ hashFiles('scripts/build-video-libs.sh', 'scripts/build-audio-libs.sh', 'docker/Dockerfile', 'docker/build.sh') }}
+          key: third-party-v1-${{ runner.os }}-${{ hashFiles('scripts/build-video-libs.sh', 'scripts/build-audio-libs.sh', 'docker/Dockerfile') }}
+          # 主键因脚本变动而失效时，复用最近一份同前缀缓存（库本身没变就不用重编）
+          restore-keys: |
+            third-party-v1-${{ runner.os }}-
 
       - name: 拉构建镜像
         run: docker pull wuzm219/msp-builder:latest
