@@ -77,11 +77,21 @@ esac
 # 其实完好）。只有显式 --build-image / --go 或镜像不存在时才 rebuild。
 # ⚠️ 跳过依赖 `image inspect`，但它在 wslc 下会卡死（60 秒无响应），所以这个
 # "跳过"只在 docker CLI 下生效；wslc 仍走原来的每次 build。
-if [ "$MODE" != image ] && [ "$FORCE_IMAGE" != 1 ] && [ "$CLI" = docker ] \
-    && docker image inspect "$IMAGE" >/dev/null 2>&1; then
-    echo "== 使用本地镜像 $IMAGE（跳过 rebuild；--build-image / --go 可强制重建）=="
-else
-    echo "== 校验/构建镜像 $IMAGE（命中缓存时几秒；CLI=$CLI）=="
+NEED_BUILD=1
+if [ "$MODE" != image ] && [ "$FORCE_IMAGE" != 1 ] && [ "$CLI" = docker ]; then
+    if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+        echo "== 使用本地镜像 $IMAGE（跳过 rebuild；--build-image / --go 可强制重建）=="
+        NEED_BUILD=0
+    elif "$CLI" pull "$IMAGE"; then
+        # CI 等全新环境直接拉现成镜像（构建镜像本身很慢），拉不到才退回本地构建
+        echo "== 已拉取镜像 $IMAGE =="
+        NEED_BUILD=0
+    else
+        echo "== 拉取镜像失败，改为本地构建 $IMAGE =="
+    fi
+fi
+if [ "$NEED_BUILD" = 1 ]; then
+    echo "== 构建镜像 $IMAGE（命中缓存时几秒；CLI=$CLI）=="
     "$CLI" build --progress=plain --build-arg "GO_VERSION=$GO_VERSION" -t "$IMAGE" "$BUILD_CTX"
 fi
 if [ "$MODE" = image ]; then

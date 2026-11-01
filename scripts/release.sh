@@ -16,6 +16,8 @@ fi
 #   ./scripts/release.sh --title "体验优化版" --mandatory
 #   ./scripts/release.sh --no-darwin      # 只发 Windows/Linux（默认会同时经 GitHub Actions
 #                                         # 编 macOS：与本地容器编译并行，跑完自动下载回来）
+#   ./scripts/release.sh --ci             # 整条发布交给 GitHub Actions：容器编 10 个 + macOS +
+#                                         # 直接上传站点（本地只等结果，不编译/不下载/不上传）
 #
 # 配置：release/release.conf（站点地址 / 应用 ID / 上传令牌 / 可选站点证书），
 #       同名环境变量可覆盖（UPDATE_SITE / APP_ID / UPLOAD_TOKEN / CA_CERT /
@@ -59,7 +61,9 @@ usage() {
   ./scripts/release.sh --only no-ui     # 只发「仅托盘无 UI 版」（默认：完整版 + 无 UI 版一起发）
   ./scripts/release.sh --title "体验优化版" --mandatory
   ./scripts/release.sh --no-darwin      # 只发 Windows/Linux（不带时默认同时编 macOS）
-选项：--pre / --dry-run / --no-build / --only <full|no-ui> / -v <版本> / --title <标题> / --channel <通道> / --mandatory
+  ./scripts/release.sh --ci             # 整条发布交给 GitHub Actions：容器编 10 个 + macOS +
+                                        # 直接上传站点（本地只等待结果，不编译/不下载/不上传）
+选项：--pre / --dry-run / --no-build / --ci / --only <full|no-ui> / -v <版本> / --title <标题> / --channel <通道> / --mandatory
       --no-darwin                       关闭 macOS 产物（默认开启：经 GitHub Actions 编 darwin）
       macOS 产物不需要设 GH_TOKEN：默认取 git 凭据助手的令牌
                                         （可选 GH_REPO / GH_REF 覆盖默认仓库与分支）
@@ -83,12 +87,14 @@ CHANNEL=""
 MANDATORY=0
 ONLY="" # 只发某个应用（full / no-ui）；留空 = 两个都发
 DARWIN_CI=1 # 默认就触发 GitHub Actions 编 macOS 产物；--no-darwin 关掉
+CI_ONLY=0   # --ci：整个发布都交给 GitHub Actions（容器 + macOS + 上传），本地不做任何构建
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --pre) PRE=1 ;;
         --dry-run) DRY=1 ;;
         --no-build) DO_BUILD=0 ;;
+        --ci) CI_ONLY=1; DARWIN_CI=1 ;;
         --only) ONLY="${2:-}"; shift ;;
         --no-ui) ONLY="no-ui" ;; # 等价于 --only no-ui（向后兼容）
         -v|--version) VERSION="${2:-}"; shift ;;
@@ -102,6 +108,9 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+if [ "$CI_ONLY" = 1 ]; then
+    DARWIN_CI=1 # --ci 与 --no-darwin 互斥，CI 全量发布需要 Actions
+fi
 
 # ---------- 配置 ----------
 
@@ -259,6 +268,11 @@ gh_api() {
     GH_CODE="$code"
 }
 
+# json_str：转义 workflow_dispatch 输入里的反斜杠与双引号（单行）。
+json_str() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
 # dispatch_darwin_ci 触发 workflow_dispatch：正式版传 release=true（构建不带 -rc）。
 dispatch_darwin_ci() {
     local ref="$GH_REF" release_input remote_sha
@@ -284,9 +298,31 @@ dispatch_darwin_ci() {
     else
         echo "提示：读不到远端 $ref 的最新提交（HTTP $GH_CODE），继续尝试触发。" >&2
     fi
-    echo "触发 GitHub Actions：$GH_REPO / $GH_WORKFLOW @ $ref（正式版=$release_input）…"
+    local suffix=""
+    [ "$CI_ONLY" = 1 ] && suffix="，CI 全量发布"
+    echo "触发 GitHub Actions：$GH_REPO / $GH_WORKFLOW @ $ref（正式版=$release_input$suffix）…"
+    local inputs="{\"release\":\"$release_input\""
+    if [ "$CI_ONLY" = 1 ]; then
+        # --ci 时把发布选项一并交给 workflow（publish job 用它们调用 release.sh）；
+        # --ci --dry-run = 只在 CI 里构建验证，不上传。
+        local j_only j_title j_channel j_mandatory j_publish
+        j_only="$(json_str "$ONLY")"
+        [ -z "$j_only" ] && j_only=all # workflow 的 only 是 choice（all/full/no-ui），空值会被拒
+        j_title="$(json_str "$TITLE_GIVEN")"
+        j_channel="$(json_str "$CHANNEL")"
+        j_mandatory=false
+        [ "$MANDATORY" = 1 ] && j_mandatory=true
+        j_publish=true
+        [ "$DRY" = 1 ] && j_publish=false
+        inputs="$inputs,\"publish\":\"$j_publish\",\"only\":\"$j_only\",\"title\":\"$j_title\""
+        inputs="$inputs,\"channel\":\"$j_channel\",\"mandatory\":\"$j_mandatory\""
+    else
+        # 本地发布：Windows/Linux 由本机容器编，Actions 只编 macOS（不必等 linux job）
+        inputs="$inputs,\"build_linux\":\"false\""
+    fi
+    inputs="$inputs}"
     gh_api POST "/repos/$GH_REPO/actions/workflows/$GH_WORKFLOW/dispatches" \
-        "{\"ref\":\"$ref\",\"inputs\":{\"release\":\"$release_input\"}}"
+        "{\"ref\":\"$ref\",\"inputs\":$inputs}"
     if [ "$GH_CODE" != 204 ]; then
         echo "触发失败（HTTP $GH_CODE）：" >&2
         cat "$GH_BODY" >&2
@@ -436,6 +472,78 @@ collect_darwin_ci() {
     cp -f "$no_dmg" "$ROOT/dist/macos-dmg-no-ui.dmg"
     echo "已收进 dist/：darwin 裸二进制 ×4、DMG ×2（已另存 dist/macos-dmg-{full,no-ui}.dmg）"
 }
+
+# wait_ci_run_only 只等 Actions 跑完并打印结果（--ci 用）：
+# 构建与上传都在 CI 里完成，本地不下载产物。
+wait_ci_run_only() {
+    local i run_id="" run_sha="" run_status="" conclusion=""
+    echo "等待 GitHub Actions 全量构建 + 上传（首轮要编第三方库，可能较久）…"
+    if [ -n "${GH_RUN_ID:-}" ]; then
+        run_id="$GH_RUN_ID"
+        echo "复用已有运行 ID：$run_id（GH_RUN_ID）"
+    else
+        for i in $(seq 1 120); do
+            gh_api GET "/repos/$GH_REPO/actions/runs?event=workflow_dispatch&branch=$CI_REF&per_page=5"
+            run_id=""
+            run_sha=""
+            if [ "$GH_CODE" = 200 ]; then
+                run_id="$(sed -n 's/^ *"id": \([0-9]\+\),[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+                run_sha="$(sed -n 's/^ *"head_sha": "\([0-9a-f]\{40\}\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+            fi
+            if [ -n "$run_id" ] && [ "$run_sha" = "$CI_SHA" ]; then
+                break
+            fi
+            if [ "$i" = 1 ] || [ $((i % 3)) = 0 ]; then
+                echo "  排队中…已等 $((i * 10)) 秒（找到运行后会打印运行 ID）"
+            fi
+            sleep 10
+        done
+    fi
+    if [ -z "${GH_RUN_ID:-}" ] && { [ -z "$run_id" ] || [ "$run_sha" != "$CI_SHA" ]; }; then
+        echo "没找到 $CI_SHA 的 GitHub Actions 运行（检查 $GH_REPO 的 Actions 页面）" >&2
+        exit 1
+    fi
+    echo "运行 ID：$run_id${CI_SHA:+（$CI_SHA）}"
+    echo "  查看：https://github.com/$GH_REPO/actions/runs/$run_id"
+
+    run_status=""
+    # 每 15 秒查一次，最多等 6 小时（首轮编第三方静态库可能 1–3 小时）
+    for i in $(seq 1 1440); do
+        gh_api GET "/repos/$GH_REPO/actions/runs/$run_id"
+        local st
+        st="$(sed -n 's/^ *"status": "\([a-z_]*\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+        if [ "$st" != "$run_status" ] && [ -n "$st" ]; then
+            run_status="$st"
+            case "$run_status" in
+                queued) echo "  等待 runner（queued）…" ;;
+                in_progress) echo "  构建中（in_progress）…" ;;
+                completed) echo "  已结束（completed）" ;;
+            esac
+        fi
+        if [ "$run_status" = completed ]; then
+            conclusion="$(sed -n 's/^ *"conclusion": "\([a-z_]*\)",[[:space:]]*$/\1/p' "$GH_BODY" | head -1)"
+            break
+        fi
+        if [ $((i % 20)) = 0 ]; then
+            echo "  ……仍是 ${run_status:-unknown}，已等 $((i * 15 / 60)) 分钟"
+        fi
+        sleep 15
+    done
+    if [ "$run_status" != completed ] || [ "$conclusion" != success ]; then
+        echo "GitHub Actions 未成功（status=$run_status conclusion=${conclusion:-无}）" >&2
+        echo "  查看：https://github.com/$GH_REPO/actions/runs/$run_id" >&2
+        exit 1
+    fi
+    echo "CI 全量发布完成：https://github.com/$GH_REPO/actions/runs/$run_id"
+}
+
+# --ci：整条发布都在 GitHub Actions 里做（容器编 10 个 + macOS + 打包上传），
+# 触发后只等结果，本地不编译、不下载、不上传。
+if [ "$CI_ONLY" = 1 ]; then
+    dispatch_darwin_ci
+    wait_ci_run_only
+    exit 0
+fi
 
 # ---------- 编译 ----------
 
