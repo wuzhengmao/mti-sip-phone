@@ -211,6 +211,66 @@ func TestDownloadReplaceAndRestart(t *testing.T) {
 	}
 }
 
+// TestAutoUpdateDownloadsAndRestarts 无 UI 版：收到新版本后自动下载并安装，
+// 不需要人工点「下载」（下载完成后自动进入重启链路）。
+func TestAutoUpdateDownloadsAndRestarts(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "app.exe")
+	writeFile(t, exe, []byte("OLD-BINARY"))
+
+	newBin := fakeExecutable()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(newBin)
+	}))
+	defer srv.Close()
+
+	restarted := make(chan struct{}, 1)
+	u := newTestUpdater(t, Options{
+		ExePath:    exe,
+		AutoUpdate: true,
+		Restart:    func() error { restarted <- struct{}{}; return nil },
+	})
+	info := core.UpdateInfo{Version: "9.9.9", URL: srv.URL + "/app.exe", SHA256: sha256Hex(newBin)}
+	if err := u.Notify(info); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+
+	select {
+	case <-restarted:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("自动更新未完成：%+v", u.Status())
+	}
+	got, err := os.ReadFile(exe)
+	if err != nil || !bytes.Equal(got, newBin) {
+		t.Errorf("可执行文件未被替换（err=%v）", err)
+	}
+}
+
+// TestAutoUpdateFailureAllowsRetry 自动下载失败后，同一版本再次通知时允许重试
+//（去重键相同，靠 phase=failed 放行）。
+func TestAutoUpdateFailureAllowsRetry(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "app.exe")
+	writeFile(t, exe, []byte("OLD-BINARY"))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	u := newTestUpdater(t, Options{ExePath: exe, AutoUpdate: true})
+	info := core.UpdateInfo{Version: "9.9.9", URL: srv.URL + "/app.exe"}
+	if err := u.Notify(info); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	waitFor(t, "自动下载失败", func() bool { return u.Status().Phase == core.UpdateFailed })
+
+	// 失败后再次通知同一版本：不应报「更新进行中」，可以重新开始下载。
+	if err := u.Notify(info); err != nil {
+		t.Fatalf("失败后重新通知应被接受: %v", err)
+	}
+}
+
 func TestDownloadFailures(t *testing.T) {
 	newBin := fakeExecutable()
 	cases := []struct {

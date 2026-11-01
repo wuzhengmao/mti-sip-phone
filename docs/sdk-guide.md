@@ -341,6 +341,10 @@ await sdk.checkUpdateNow();   // 立即检查站点（不用等下一个周期�
 ⚠️ 两点务必写进你的 UI：**必须由用户点击**（不要自动调用）；`applyUpdate()` 成功后
 进程会替换自身并重启，**页面连接随即断开**。
 
+> **仅托盘无 UI 版例外**（REQ-UPD-027）：无 UI 版通常不开控制台，软电话**自己**会下载并安装
+> 新版本，有通话时等通话结束再重启。页面对这种实例不需要（也不应该）自动调用
+> `startUpdate()` / `applyUpdate()`，`system.update` 事件照常推送进度。
+
 ### 5.9 CTI 坐席与话务（REQ-ACC-026 / REQ-ACC-034 / REQ-ACC-035）
 
 坐席相关能力只在**坐席模式**（CTI 推过 `MSP_EVENT_AGENT_ONLINE`）下可用；非坐席模式调用

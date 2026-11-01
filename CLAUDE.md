@@ -1085,6 +1085,9 @@ Windows 宿主上 i686 工具链通常不在 PATH 里，两个脚本都按 `buil
   os/arch 塞回 `UpdateInfo`**（站点给的是 `x64/x86`，`Notify` 按 `GOARCH` 严格比对会拒绝）；
   ④ 去重键是「版本|sha256」，改配置时清空。网页侧：`system.setUpdateConfig`（字段可选）
   写配置、`system.notifyUpdate` 强制推送，SDK **不再查询站点**（`notifyUpdate` 恒带 force）。
+  **仅托盘无 UI 版自动升级（REQ-UPD-027）**：`variant.NoUI` 时 `updater.Options.AutoUpdate=true`——
+  `Notify` 后自动 `Download`，下载完沿用既有链路自动 `Apply`（`IsBusy` 有振铃/通话时挂起，空闲后
+  替换重启）；下载失败时下一轮站点检查会重新通知（去重键相同但 `phase=failed` 放行），完整版不变。
 - **`call.audio` 事件必须合并发布**（`internal/core/audio.go` 的 `audioPublisher`）：
   滚轮/拖滑块一秒能触发十几下，逐条广播会把事件总线（容量 64、满即丢）刷爆、把
   通话状态事件挤掉，也会把网页日志刷屏。合并口径 =「首次立即发 + 窗口内最多补发

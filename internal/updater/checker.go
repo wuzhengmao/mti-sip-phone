@@ -210,8 +210,14 @@ func (u *Updater) querySite(ctx context.Context, site core.SiteConfigSnapshot) (
 	dup := key == u.lastNotified
 	u.checkMu.Unlock()
 	if dup {
-		res.Reason = "already_notified"
-		return res, nil
+		// 无 UI 版自动升级：上一次下载/安装失败时要允许下一轮检查重新通知，
+		// 否则失败一次就永远不会重试（站点内容没变，去重键也相同）。
+		if u.opts.AutoUpdate && u.Status().Phase == core.UpdateFailed {
+			logx.Logger().Info("上次自动更新失败，重新尝试", "version", p.LatestVersion)
+		} else {
+			res.Reason = "already_notified"
+			return res, nil
+		}
 	}
 
 	err = u.Notify(core.UpdateInfo{

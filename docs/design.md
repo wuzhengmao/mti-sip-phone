@@ -166,6 +166,7 @@ sip.Phone ──(EventSink)──► core.App ──(Bus.Publish)──► core.
 - **关键文件**：`updater.go`（状态机 idle/available/downloading/ready/failed）、`download.go`、`replace.go`、`version.go`（版本比较，含预发布语义）。
 - **关系**：由 `core.Updater` 接口暴露给 WS/UI；重启动作最终由 `cmd` 实现。软电话**自己不查更新服务器**（查询在网页 SDK 侧）。
 - **多实例联动（REQ-UPD-026）**：替换成功后、重启之前调用 `Options.OnInstalled`，由 `internal/multiinstance` 把「新版本已就位」写进主配置目录的共享标记 `restart-all.json`；各实例的轮询器（`multiinstance.Watch`）据此判断自己在跑旧镜像时，等**没有进行中的通话**再重启。判定用「来源槽位 + 标记时间晚于进程启动 + 可执行文件 sha256」，重启后的新进程不会被同一条标记循环触发。
+- **无 UI 版自动升级（REQ-UPD-027）**：`Options.AutoUpdate`（`variant.NoUI` 时开启）——`Notify` 后自动下载，下载完成沿用既有链路自动安装；`Apply` 的 `IsBusy` 检查保证**有振铃/通话时挂起，空闲后替换重启**。下载失败时站点检查（同去重键）在 `phase=failed` 下放行重试。
 
 ### 4.7 `internal/wsapi`（本地控制服务）
 

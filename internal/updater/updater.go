@@ -32,6 +32,7 @@ type Options struct {
 	Restart     func() error          // 替换成功后调用：请求进程重启（由 cmd 实现）
 	OnInstalled func(core.UpdateInfo) // 替换成功、重启之前调用（多实例通知等）；可为 nil
 	IsBusy      func() bool           // 是否有进行中的通话（nil = 不等待）
+	AutoUpdate  bool                  // 收到新版本后自动下载（下载完自动安装，通话结束才重启）；仅无 UI 版启用
 	HTTPClient  *http.Client          // 测试注入；nil 用默认客户端
 	Timeout     time.Duration
 }
@@ -134,6 +135,16 @@ func (u *Updater) Notify(info core.UpdateInfo) error {
 	logx.Logger().Info("收到新版本通知", "version", info.Version, "host", st.Host,
 		"current", core.Version, "强制推送", info.Force)
 	u.publish(st)
+	// 无 UI 版通常不会开着控制台，没人可点「下载」：收到新版本就直接开始下载。
+	// 下载完成后 runDownload 会自动调用 Apply（通话中挂起，空闲后替换并重启）。
+	if u.opts.AutoUpdate {
+		go func(version string) {
+			logx.Logger().Info("无 UI 版自动下载更新", "version", version)
+			if err := u.Download(); err != nil {
+				logx.Logger().Warn("自动下载更新失败（下次检查会重试）", "version", version, "err", err)
+			}
+		}(info.Version)
+	}
 	return nil
 }
 
