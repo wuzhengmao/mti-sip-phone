@@ -26,6 +26,12 @@
     padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.04);
   }
   .card h2 { font-size: 15px; margin-bottom: 12px; }
+  /* 顶栏「发现新版本」徽章点击后的可见反馈（卡片可能已经在视野里） */
+  @keyframes cardFlash {
+    0%, 100% { box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+    50% { box-shadow: 0 0 0 3px rgba(217,119,6,.45); }
+  }
+  .card.flash { animation: cardFlash 1.2s ease-in-out 2; }
   .badge {
     display: inline-block; padding: 2px 10px; border-radius: 999px;
     font-size: 12px; background: #eef0f3; color: var(--gray);

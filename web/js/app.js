@@ -151,6 +151,18 @@ window.SipApp = window.SipApp || {};
     el.textContent = text;
     el.className = cls;
     el.hidden = false;
+    el.title = phase === 'available' ? '点击定位到更新卡片并开始下载'
+      : phase === 'ready' ? '点击定位到更新卡片并安装'
+        : '点击查看更新进度';
+  }
+
+  /** 更新卡片的短暂高亮：即使卡片已经在视野里，点击徽章也有可见反馈。 */
+  function flashCard(card) {
+    if (!card) return;
+    card.classList.remove('flash');
+    void card.offsetWidth; // 重新触发动画
+    card.classList.add('flash');
+    setTimeout(function () { card.classList.remove('flash'); }, 2600);
   }
 
   function init() {
@@ -160,12 +172,27 @@ window.SipApp = window.SipApp || {};
       a.addEventListener('click', function () { /* hashchange 负责切换 */ });
     });
     window.addEventListener('hashchange', route);
-    // 点徽章：href 负责切到 #/call，再把那张更新卡片滚到视野中间
-    $('updBadge').addEventListener('click', function () {
+    // 点徽章：切到通话页 → 滚到更新卡片 → 高亮；「发现新版本」时直接开始下载
+    //（这次点击就是明确的用户意图，下载仍可在卡片上取消；安装/重启仍需再点一次）。
+    $('updBadge').addEventListener('click', function (ev) {
+      ev.preventDefault();
+      if (location.hash !== '#/call') location.hash = '#/call';
       setTimeout(function () {
         const card = $('cardUpdate');
-        if (card && !card.hidden && card.scrollIntoView) {
-          card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        if (!card || card.hidden) {
+          App.ui.toast('暂未获取到更新详情，请稍后重试');
+          return;
+        }
+        if (card.scrollIntoView) card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        flashCard(card);
+        const st = store.state.update;
+        if (st && st.phase === 'available') {
+          const ver = (st.info && st.info.version) || '';
+          store.sdk.startUpdate().then(function () {
+            App.ui.toast('开始下载更新' + (ver ? ' v' + ver : ''), 'ok');
+          }).catch(function (e) {
+            if (!App.util.isOfflineErr(e)) App.ui.errToast('开始下载失败', e);
+          });
         }
       }, 80);
     });
