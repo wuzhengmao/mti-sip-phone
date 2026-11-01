@@ -109,10 +109,9 @@ run_in_container() {
         -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
         -e SIP_PHONE_GLFW_X11=1 \
         -e SIP_PHONE_RELEASE \
-        -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
         -w /src \
         "$IMAGE" \
-        bash -c "$1; ec=\$?; chown -R \$HOST_UID:\$HOST_GID /src/dist /src/third_party 2>/dev/null || true; exit \$ec"
+        bash -c "git config --global --add safe.directory /src 2>/dev/null || true; $1; ec=\$?; chown -R \$HOST_UID:\$HOST_GID /src/dist /src/third_party 2>/dev/null || true; exit \$ec"
 }
 
 case "$MODE" in
