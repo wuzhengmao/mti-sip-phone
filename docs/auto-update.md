@@ -385,13 +385,22 @@ var r struct {
 ### 5.2 发布脚本（`scripts/release.sh`）
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 只编译打包（1.0.15-rc），不上传
+./scripts/release.sh --pre --dry-run   # 只编译打包（1.0.21-rc），不上传
 ./scripts/release.sh --pre             # 预发布：上传并标记为预发布
 ./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译并上传
 ./scripts/release.sh --only no-ui      # 只发「仅托盘无 UI 版」（默认两个应用一起发）
+./scripts/release.sh --ci              # 整条发布交给 GitHub Actions：容器编 10 个 + macOS +
+                                       # 直接上传站点（本地只等结果，不编译/不下载/不上传）
 # Windows 用 scripts/release.bat（同样的参数，内部走 git-bash）
 # 其他选项：-v <版本> / --title / --channel / --mandatory / --no-build
 ```
+
+> **`--ci` 模式**：`workflow_dispatch` 触发 `.github/workflows/build.yml`（输入
+> `release`/`publish=true` 及发布选项），三个 job 分别做「ubuntu 容器编 Windows/Linux 10 个 →
+> macOS 编 darwin → publish 收齐产物后直接上传站点」。第三方静态库（视频/Opus/AEC）用
+> Actions 缓存：首次运行编一次（可能 1–3 小时），之后直接恢复。工作流**只手动/脚本驱动**，
+> 不在 push/PR 上自动跑。旧的两段式（本地容器 + Actions 编 macOS 后下载回来上传）仍可用，
+> 两种方式互不影响。
 
 **默认一次发两个应用**（本仓库的完整版与仅托盘无 UI 版）：编译只跑一遍（构建脚本本来就两个
 变体一起出），然后按变体逐个走下面 1–9 步——完整版用 `release/release.conf` + `release/app.json`，

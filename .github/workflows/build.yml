@@ -1,40 +1,48 @@
 name: 构建
 
-# macOS 产物只能在 macOS 上编译（Fyne/OpenGL 与 miniaudio 都要 CGO + Apple SDK），
-# 本仓库的开发机以 Windows 为主，所以用 GitHub Actions 的 macOS runner 做
-# 「编译 + 单测 + universal DMG 打包」的验证。Windows/Linux 产物仍走各自的构建机。
+# 两条使用方式：
+#   1) **本地发布（默认）**：scripts/release.sh 在本机容器编 10 个产物，同时触发本工作流
+#      编 macOS，跑完下载回来统一打包上传（本文件的 macos job 只负责构建与上传 artifact）。
+#   2) **CI 全量发布**：手动 Run workflow 时把 publish 选 true（或 scripts/release.sh --ci），
+#      ubuntu 容器编 Windows/Linux、macos 编 darwin，最后一个 publish job 直接打包上传到
+#      更新站点——本地不需要再下载/重新打包。
+#
+# **不随 push/PR 自动跑**：只在手动或脚本（workflow_dispatch）驱动时执行
+#（macOS runner 10 倍计费，日常改动不需要每次都编 macOS）。
 
 on:
-  # 只在收口分支 master 与 PR 上自动跑，并且只看会**影响 macOS 构建**的路径
-  # （私有仓库的 macOS runner 是 10 倍计费）。dev 上日常推送不再自动构建：
-  # 需要验证就在 Actions 页面手动 Run workflow，发版时 scripts/release.sh
-  # --darwin-ci 会自己 workflow_dispatch，不依赖这里的触发器。
-  push:
-    branches: [master]
-    paths:
-      - 'internal/**'
-      - 'cmd/**'
-      - 'web/**'
-      - 'go.mod'
-      - 'go.sum'
-      - 'build.sh'
-      - 'scripts/package-macos.sh'
-      - '.github/workflows/build.yml'
-  pull_request:
-    paths:
-      - 'internal/**'
-      - 'cmd/**'
-      - 'web/**'
-      - 'go.mod'
-      - 'go.sum'
-      - 'build.sh'
-      - 'scripts/package-macos.sh'
-      - '.github/workflows/build.yml'
-  # 发布时由 scripts/release.sh --darwin-ci 触发（release=true → SIP_PHONE_RELEASE=1）
   workflow_dispatch:
     inputs:
       release:
         description: 按正式版构建（SIP_PHONE_RELEASE=1，版本号不带 -rc）
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+      publish:
+        description: 构建完成后直接上传到更新站点（需要仓库里的发布令牌）
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+      build_linux:
+        description: 构建 Windows/Linux 10 个产物（本地发布只编 macOS 时选 false）
+        type: choice
+        options: ["true", "false"]
+        default: "true"
+      only:
+        description: 只发某个应用（all = 完整版 + 无 UI 版一起发）
+        type: choice
+        options: ["all", "full", "no-ui"]
+        default: "all"
+      title:
+        description: 发布标题（留空 = <APP_ID> <版本>）
+        type: string
+        default: ""
+      channel:
+        description: 发布通道（留空 = 站点默认）
+        type: string
+        default: ""
+      mandatory:
+        description: 强制更新
         type: choice
         options: ["false", "true"]
         default: "false"
@@ -44,6 +52,114 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Windows/Linux 的 10 个产物：与本地发布同一条容器链路（docker/build.sh）
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Windows/Linux 产物（容器）
+    # 本地发布（release.sh 默认流程）只编 macOS，Windows/Linux 由本机容器出；
+    # 只有 CI 全量发布（--ci / publish=true）才在这里编那 10 个。
+    if: ${{ inputs.build_linux == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      # 空值 = 开发版（版本带 -rc）；"1" = 正式版（docker/build.sh 用 -e 透传进容器）
+      SIP_PHONE_RELEASE: ${{ inputs.release == 'true' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 第三方静态库（视频/Opus/AEC）在仓库里不入库，首次运行要编一次（较久），
+      # 之后从缓存恢复，不再重复编译。版本相关的脚本变了才失效。
+      # restore/save 分开：构建失败也把已经编好的库存下来（缓存键不变就不用重来）。
+      - name: 恢复第三方静态库缓存
+        id: thirdparty
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            third_party/video
+            third_party/audio
+          key: third-party-v1-${{ runner.os }}-${{ hashFiles('scripts/build-video-libs.sh', 'scripts/build-audio-libs.sh', 'docker/Dockerfile', 'docker/build.sh') }}
+
+      - name: 拉构建镜像
+        run: docker pull wuzm219/msp-builder:latest
+
+      - name: 编译（缺第三方库时先补编，结果会写入缓存）
+        run: |
+          set -euo pipefail
+          chmod +x docker/build.sh
+          need=0
+          for t in windows-amd64 windows-386 linux-amd64 linux-arm64; do
+            for lib in libavcodec.a libavutil.a libswscale.a libvpx.a libopenh264.a; do
+              [ -f "third_party/video/$t/lib/$lib" ] || need=1
+            done
+            [ -f "third_party/audio/$t/lib/libopus.a" ] || need=1
+          done
+          if [ "$need" = 1 ]; then
+            echo "第三方静态库缺失（首次运行或缓存失效），先编译（较久，完成后续运行走缓存）"
+            ./docker/build.sh --libs
+          fi
+          ./docker/build.sh
+
+      - name: 检查第三方库是否齐全（半成品不进缓存）
+        id: thirdparty-check
+        if: always() && steps.thirdparty.outputs.cache-hit != 'true'
+        run: |
+          ok=true
+          for t in windows-amd64 windows-386 linux-amd64 linux-arm64; do
+            for lib in libavcodec.a libavutil.a libswscale.a libvpx.a libopenh264.a; do
+              [ -f "third_party/video/$t/lib/$lib" ] || ok=false
+            done
+            [ -f "third_party/audio/$t/lib/libopus.a" ] || ok=false
+          done
+          echo "complete=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: 保存第三方静态库缓存
+        if: always() && steps.thirdparty-check.outputs.complete == 'true' && steps.thirdparty.outputs.cache-primary-key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            third_party/video
+            third_party/audio
+          key: ${{ steps.thirdparty.outputs.cache-primary-key }}
+
+      - name: 校验 10 个产物齐全
+        run: |
+          set -e
+          for f in \
+            dist/sip-phone-windows-amd64.exe \
+            dist/sip-phone-windows-386.exe \
+            dist/sip-phone-windows-arm64.exe \
+            dist/sip-phone-linux-amd64 \
+            dist/sip-phone-linux-arm64 \
+            dist/sip-phone-no-ui-windows-amd64.exe \
+            dist/sip-phone-no-ui-windows-386.exe \
+            dist/sip-phone-no-ui-windows-arm64.exe \
+            dist/sip-phone-no-ui-linux-amd64 \
+            dist/sip-phone-no-ui-linux-arm64; do
+            [ -f "$f" ] || { echo "::error::缺少 $f"; exit 1; }
+          done
+          ls -lh dist/ | head -30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: |
+            dist/sip-phone-windows-amd64.exe
+            dist/sip-phone-windows-386.exe
+            dist/sip-phone-windows-arm64.exe
+            dist/sip-phone-linux-amd64
+            dist/sip-phone-linux-arm64
+            dist/sip-phone-no-ui-windows-amd64.exe
+            dist/sip-phone-no-ui-windows-386.exe
+            dist/sip-phone-no-ui-windows-arm64.exe
+            dist/sip-phone-no-ui-linux-amd64
+            dist/sip-phone-no-ui-linux-arm64
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # macOS：两个架构的裸二进制 + universal DMG
+  # ---------------------------------------------------------------------------
   macos:
     name: macOS universal DMG
     # macos-15 = Apple Silicon（arm64）。build.sh 会用 clang -arch 同时编出
@@ -52,7 +168,6 @@ jobs:
     # 也不用 macos-latest（会随 GitHub 滚动升级，构建环境不可预期）。
     runs-on: macos-15
     timeout-minutes: 40
-    # 空值 = 开发版（版本带 -rc）；"1" = 正式版。build.sh / package-macos.sh 都认它。
     env:
       SIP_PHONE_RELEASE: ${{ inputs.release == 'true' && '1' || '' }}
     steps:
@@ -211,3 +326,64 @@ jobs:
             /tmp/bare.log
           if-no-files-found: ignore
           retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # 一次上传：把前两个 job 的产物收齐，打包并上传到更新站点
+  # ---------------------------------------------------------------------------
+  publish:
+    name: 打包并上传到更新站点
+    needs: [linux, macos]
+    if: ${{ inputs.publish == 'true' && inputs.build_linux == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-binaries
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: darwin-binaries
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/macos-dmg
+
+      - name: 打包并上传（release.sh --no-build）
+        env:
+          INPUT_RELEASE: ${{ inputs.release }}
+          INPUT_ONLY: ${{ inputs.only }}
+          INPUT_TITLE: ${{ inputs.title }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_MANDATORY: ${{ inputs.mandatory }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/release.sh
+          # DMG 文件名带版本号，换成 release.sh 认的稳定名（与本地 --darwin-ci 的收集口径一致）
+          cp "$(ls dist/macos-dmg/MTI-SIP-Phone-full-*.dmg | head -1)"  dist/macos-dmg-full.dmg
+          cp "$(ls dist/macos-dmg/MTI-SIP-Phone-no-ui-*.dmg | head -1)" dist/macos-dmg-no-ui.dmg
+          chmod 755 dist/sip-phone-* || true
+          # 站点是「同名版本整体替换」：上传前必须确认产物齐全，否则会用残缺版本覆盖线上
+          for f in \
+            dist/sip-phone-windows-amd64.exe dist/sip-phone-windows-386.exe \
+            dist/sip-phone-windows-arm64.exe dist/sip-phone-linux-amd64 dist/sip-phone-linux-arm64 \
+            dist/sip-phone-no-ui-windows-amd64.exe dist/sip-phone-no-ui-windows-386.exe \
+            dist/sip-phone-no-ui-windows-arm64.exe dist/sip-phone-no-ui-linux-amd64 \
+            dist/sip-phone-no-ui-linux-arm64 \
+            dist/sip-phone-darwin-amd64 dist/sip-phone-darwin-arm64 \
+            dist/sip-phone-no-ui-darwin-amd64 dist/sip-phone-no-ui-darwin-arm64 \
+            dist/macos-dmg-full.dmg dist/macos-dmg-no-ui.dmg; do
+            [ -f "$f" ] || { echo "::error::缺少产物 $f"; exit 1; }
+          done
+          args=(--no-build --no-darwin)
+          [ "$INPUT_RELEASE" != "true" ] && args+=(--pre)
+          [ -n "$INPUT_ONLY" ] && [ "$INPUT_ONLY" != "all" ] && args+=(--only "$INPUT_ONLY")
+          [ -n "$INPUT_TITLE" ] && args+=(--title "$INPUT_TITLE")
+          [ -n "$INPUT_CHANNEL" ] && args+=(--channel "$INPUT_CHANNEL")
+          [ "$INPUT_MANDATORY" = "true" ] && args+=(--mandatory)
+          ./scripts/release.sh "${args[@]}"

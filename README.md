@@ -70,9 +70,8 @@ build.bat
 ./scripts/package-macos.sh --arch universal
 #   dist/macos/MTI软电话.app（完整版）、MTI软电话-无UI版.app、MTI-SIP-Phone-*-darwin-universal.dmg
 #   universal = lipo 合并两架构后重新 ad-hoc 签名；DMG 拖进「应用程序」即安装
-# 也提供 GitHub Actions（.github/workflows/build.yml）：push 到 master 或 PR 且
-# 改动涉及代码/构建脚本时自动跑；dev 上要验证在 Actions 页面手动 Run workflow；
-# 发版时 release.sh 会自己触发（默认），不依赖 push。
+# 也提供 GitHub Actions（.github/workflows/build.yml）：**只手动/脚本驱动**，
+# 不在 push/PR 上自动跑；在 Actions 页面手动 Run workflow，发版时 release.sh 会自己触发。
 
 # 手动构建（Windows 需将 MinGW 的 gcc 加入 PATH，或用 CC 指定）
 go build -ldflags "-s -w -H=windowsgui" -o dist/sip-phone.exe ./cmd/sip-phone  # 无控制台
@@ -98,10 +97,11 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
 （Windows 用 `scripts\release.bat`，内部走 git-bash）：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.13-rc），不上传
-./scripts/release.sh --pre             # 预发布：上传 1.0.13-rc（站点标记为预发布）
-./scripts/release.sh                   # 正式版：以 1.0.13 编译并上传
+./scripts/release.sh --pre --dry-run   # 先试跑：编译 + 打包（版本 1.0.21-rc），不上传
+./scripts/release.sh --pre             # 预发布：上传 1.0.21-rc（站点标记为预发布）
+./scripts/release.sh                   # 正式版：以 1.0.21 编译并上传
 ./scripts/release.sh --no-darwin       # 只发 Windows/Linux（默认会同时经 Actions 编 macOS）
+./scripts/release.sh --ci              # 整条发布交给 GitHub Actions（容器 10 个 + macOS + 直接上传）
 ```
 
 - **macOS 产物**（默认开启，`--no-darwin` 关闭）：默认使用 git 凭据助手里 github.com 的令牌（能 `git push`
@@ -110,6 +110,11 @@ dist/sip-phone-console.exe -headless    # 无界面模式（仅 WS 服务，供�
   编译**并行**，跑完自动下载两个架构的裸二进制与 universal DMG，一起打包上传。发布物新增
   `mti-sip-phone-macos-x64` / `-arm64`（裸 Mach-O，自动更新用）与
   `mti-sip-phone-macos-universal.dmg`（首次安装包）。
+
+- **全在 CI 发布（`--ci`，或手动 Run workflow 时把 `publish` 选 true）**：ubuntu job 用
+  `docker/build.sh` 编 Windows/Linux 10 个（第三方静态库首次编一次后走 Actions 缓存），
+  macOS job 编 darwin，`publish` job 收齐两边产物后**直接打包上传站点**——本地不需要再下载
+  和重新打包。发布选项（`--pre/--only/--title/--channel/--mandatory`）会作为 workflow 输入透传。
 
 - 站点地址 / 应用 ID / 上传令牌（可选站点证书）在 `release/release.conf`，环境变量可覆盖。
   站点启用 TLS 时地址要直接写 `https://主机:端口`（HTTP 端口只会 301 跳转，POST 跟随跳转

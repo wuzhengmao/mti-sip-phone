@@ -118,10 +118,12 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 `/docs/upload`、`/docs/api`）。本仓库侧的发布入口：
 
 ```bash
-./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.15-rc），不上传
+./scripts/release.sh --pre --dry-run   # 预发布：只编译打包（版本 1.0.21-rc），不上传
 ./scripts/release.sh --pre             # 预发布：真实上传（站点标记为预发布）
-./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.15
+./scripts/release.sh                   # 正式版：SIP_PHONE_RELEASE=1 编译，版本 1.0.21
 ./scripts/release.sh --only no-ui      # 只发无 UI 版（默认：完整版 + 无 UI 版**一起发**）
+./scripts/release.sh --ci              # **整条发布交给 GitHub Actions**：容器编 10 个 + macOS +
+                                       # 直接上传站点（本地只等结果，不编译/不下载/不上传）
 # Windows 用 scripts/release.bat（同样的参数，内部走 git-bash）
 ```
 
@@ -144,6 +146,13 @@ dist/sip-phone-console.exe -headless   # 无界面模式（仅 WS 服务，供�
 （裸 Mach-O、`kind=portable`，自动更新下载的就是它——**不做 universal**，按 GOARCH
 分架构更小）与 `mti-sip-phone-macos-universal.dmg`（`kind=installer`，首次安装用）；
 `release.json` 的 `kind` 按产物逐条输出（其余平台仍是 portable）。
+
+**CI 全量发布（`release.sh --ci`，或手动 Run workflow 时 `publish=true`）**：工作流拆成三个
+job——`linux`（ubuntu + `docker/build.sh` 编 10 个；第三方静态库走 `actions/cache`，首次运行
+编一次、之后直接恢复）、`macos`（darwin 两个架构 + universal DMG）、`publish`（下载两边
+artifact，用 `release.sh --no-build --no-darwin` 一次性打包上传）——**本地不再需要把 macOS
+产物下载回来重新打包**。`--pre/--only/--title/--channel/--mandatory` 会作为 workflow 输入透传；
+工作流**只手动/脚本驱动**（不在 push/PR 上自动跑）。
 
 - 配置在 `release/release.conf`：`UPDATE_SITE`（当前 `https://update.wuzm219.cn`）/ `APP_ID`
   （mti-sip-phone）/ `UPLOAD_TOKEN`（由站点 `UPLOAD_SECRET` 按应用 ID 推导）/ 可选的
@@ -453,10 +462,8 @@ macOS 与 Windows/Linux 的三处结构性差异，改相关代码前必读：
   `lsregister` 收录、LaunchAgent 生成，再 `open "sip://…"` 断言日志出现
   「收到苹果事件的 sip:// 链接」）→ 上传 artifact（含冒烟截图与日志）。
   **Windows 开发机上 `go vet`/`go build` 看不见 darwin 专有文件**，改完必须让 CI 跑一遍。
-  **触发策略**：只有 push 到 `master` 或 PR，且改动落在 `internal/**`、`cmd/**`、
-  `web/**`、`go.mod`、`go.sum`、`build.sh`、`scripts/package-macos.sh`、
-  `.github/workflows/build.yml` 时才自动跑（私仓 macOS 分钟 10 倍计费，dev 上
-  日常推送到此为止）；dev 上要验证就去 Actions 页面手动 **Run workflow**；
+  **触发策略**：**只手动/脚本驱动，不在 push/PR 上自动跑**（私仓 macOS 分钟 10 倍计费，
+  日常推送不需要每次都编 macOS）。要验证就在 Actions 页面手动 **Run workflow**；
   发版时 `release.sh --darwin-ci` 会自己 `workflow_dispatch`，**不依赖 push 触发**。
 - **cgo 文件里的注释组与前导块之间必须空一行**：cgo 把 `import "C"` 前面
   **连续不断**的注释组整体当前导块喂给 C 编译器——文件级 `//` 说明（中文）若
