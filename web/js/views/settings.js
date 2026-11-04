@@ -18,6 +18,34 @@ window.SipApp.views = window.SipApp.views || {};
   let devices = { mics: [], speakers: [], ready: false, preprocessSupported: false };
   let cameras = { cameras: [], cameraSupported: false };
 
+  // 备用服务器（多注册，REQ-ACC-038）：每行 host[:端口][;域名]。
+  function slavesToText(slaves) {
+    return (slaves || []).map(function (s) {
+      let line = s.server || '';
+      if (s.port) line += ':' + s.port;
+      if (s.domain) line += ';' + s.domain;
+      return line;
+    }).join('\n');
+  }
+
+  function slavesFromText(text) {
+    const out = [];
+    String(text || '').split('\n').forEach(function (line) {
+      line = line.trim();
+      if (!line) return;
+      let domain = '';
+      const i = line.indexOf(';');
+      if (i >= 0) { domain = line.slice(i + 1).trim(); line = line.slice(0, i).trim(); }
+      if (!line) return;
+      const host = line.split(':')[0];
+      const portStr = line.split(':')[1];
+      const port = portStr ? (parseInt(portStr, 10) || 0) : 0;
+      if (!host) return;
+      out.push({ server: host, port: port, domain: domain });
+    });
+    return out;
+  }
+
   const TRANSPORTS = [
     { value: 'udp', label: 'udp（默认）' },
     { value: 'tcp', label: 'tcp' },
@@ -85,6 +113,8 @@ window.SipApp.views = window.SipApp.views || {};
     $('accClearPassword').checked = false;
     $('accExpires').value = a.expires || 300;
     $('accDomain').value = a.domain || '';
+    $('accSlaves').value = slavesToText(a.slaves);
+    $('accPreferPrimary').checked = !!a.preferPrimary;
     $('accPublicIP').value = a.publicIP || '';
     $('accProxy').value = a.proxy || '';
     $('accStunServer').value = a.stunServer || '';
@@ -183,6 +213,8 @@ window.SipApp.views = window.SipApp.views || {};
       displayName: $('accDisplayName').value.trim(),
       expires: parseInt($('accExpires').value, 10) || 300,
       domain: $('accDomain').value.trim(),
+      slaves: slavesFromText($('accSlaves').value),
+      preferPrimary: $('accPreferPrimary').checked,
       publicIP: $('accPublicIP').value.trim(),
       proxy: $('accProxy').value.trim(),
       stunServer: $('accStunServer').value.trim(),

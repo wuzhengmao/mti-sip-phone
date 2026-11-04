@@ -561,6 +561,11 @@ func handleLaunchArgs(app *core.App, cfg *config.Config, args []string, onDone f
 		newAcc.Transport = acc.Transport
 		newAcc.Account = acc.Account
 		newAcc.AuthUser = acc.Account
+		// 备用 SIP 服务器（查询参数 slave，可重复）：整份替换。链接没带 slave
+		// 参数就清掉已保存的备用列表（sip:// 拉起是整份覆盖账户语义）。
+		newAcc.Slaves = acc.Slaves
+		// 优先使用主节点（查询参数 preferprimary）：整份覆盖。
+		newAcc.PreferPrimary = acc.PreferPrimary
 		// 链接里**没带密码就不要动已保存的密码**：引导器拉起用的是不含明文密码的
 		// 地址（页面拿不到密码，也不该下发），本机配置里已有密码；照抄空值会把
 		// 内存里的密码清掉，注册直接 401 失败（真机踩过）。

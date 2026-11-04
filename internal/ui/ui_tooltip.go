@@ -46,6 +46,85 @@ const (
 	tooltipFont = 12
 )
 
+// serverTipRow 服务器注册状态的一行（悬浮提示用，REQ-ACC-038）。
+type serverTipRow struct {
+	server string // 展示的服务器地址
+	ok     bool   // 是否已注册
+}
+
+// serverTipRows 彩色多行服务器状态：每行「服务器 + 绿√/红×」。注册状态悬浮
+// 提示专用（普通备注仍走单色文本），行数 = 注册目标数（主账户 + 备用服务器）。
+type serverTipRows struct {
+	widget.BaseWidget
+	rows []serverTipRow
+}
+
+func newServerTipRows() *serverTipRows {
+	w := &serverTipRows{}
+	w.ExtendBaseWidget(w)
+	return w
+}
+
+func (w *serverTipRows) setRows(rows []serverTipRow) {
+	w.rows = rows
+	w.Refresh()
+}
+
+func (w *serverTipRows) CreateRenderer() fyne.WidgetRenderer {
+	return &serverTipRowsRenderer{w: w}
+}
+
+type serverTipRowsRenderer struct {
+	w     *serverTipRows
+	lines []fyne.CanvasObject
+}
+
+func (r *serverTipRowsRenderer) build() {
+	r.lines = make([]fyne.CanvasObject, 0, len(r.w.rows))
+	for _, row := range r.w.rows {
+		mark := " √"
+		col := dotColors["registered"]
+		if !row.ok {
+			mark = " ×"
+			col = dotColors["failed"]
+		}
+		srvTxt := newThemedText(row.server, tooltipFont, false)
+		markTxt := newPlainText(mark, tooltipFont, col, true)
+		r.lines = append(r.lines, container.NewHBox(srvTxt, markTxt))
+	}
+}
+
+func (r *serverTipRowsRenderer) Layout(size fyne.Size) {
+	y := float32(0)
+	for _, line := range r.lines {
+		m := line.MinSize()
+		line.Resize(fyne.NewSize(m.Width, m.Height))
+		line.Move(fyne.NewPos(0, y))
+		y += m.Height
+	}
+}
+
+func (r *serverTipRowsRenderer) MinSize() fyne.Size {
+	var w, h float32
+	for _, line := range r.lines {
+		m := line.MinSize()
+		w = fyne.Max(w, m.Width)
+		h += m.Height
+	}
+	return fyne.NewSize(w, h)
+}
+
+func (r *serverTipRowsRenderer) Refresh() {
+	r.build()
+	for _, line := range r.lines {
+		line.Refresh()
+	}
+}
+
+func (r *serverTipRowsRenderer) Objects() []fyne.CanvasObject { return r.lines }
+
+func (r *serverTipRowsRenderer) Destroy() { r.lines = nil }
+
 // tooltipLayer 悬浮提示图层：铺满所在容器，平时隐藏，show 时在指定位置画一块
 // 圆角底色 + 一行文本。
 type tooltipLayer struct {
@@ -53,6 +132,7 @@ type tooltipLayer struct {
 
 	bg    *canvas.Rectangle
 	label *plainText
+	rich  *serverTipRows // 彩色多行内容（服务器注册状态，REQ-ACC-038）；显示时 label 隐藏
 	box   *fyne.Container
 
 	shown bool
@@ -77,7 +157,9 @@ func newTooltipLayer() *tooltipLayer {
 	l.bg = canvas.NewRectangle(tooltipBgColor())
 	l.bg.CornerRadius = 4
 	l.label = newThemedText("", tooltipFont, false)
-	l.box = container.New(tooltipBoxLayout{l}, l.bg, l.label)
+	l.rich = newServerTipRows()
+	l.rich.Hide()
+	l.box = container.New(tooltipBoxLayout{l}, l.bg, l.label, l.rich)
 	l.box.Hide()
 	l.ExtendBaseWidget(l)
 	return l
@@ -106,8 +188,30 @@ func (l *tooltipLayer) showAt(text string, absPos fyne.Position) {
 	l.bg.FillColor = tooltipBgColor()
 	l.bg.CornerRadius = 4
 	l.absPos = absPos
+	l.rich.Hide()
+	l.label.Show()
 	l.label.SetText(text)
 	l.shownText = text
+	l.shown = true
+	l.box.Show()
+	l.relayout()
+}
+
+// showServerRows 以彩色多行提示展示服务器注册状态（REQ-ACC-038）：每行
+// 「服务器 绿√/红×」。rows 为空时收起。
+func (l *tooltipLayer) showServerRows(rows []serverTipRow, absPos fyne.Position) {
+	if len(rows) == 0 {
+		l.hide()
+		return
+	}
+	l.bar = false
+	l.bg.FillColor = tooltipBgColor()
+	l.bg.CornerRadius = 4
+	l.absPos = absPos
+	l.rich.setRows(rows)
+	l.rich.Show()
+	l.label.Hide()
+	l.shownText = ""
 	l.shown = true
 	l.box.Show()
 	l.relayout()
@@ -159,9 +263,12 @@ func (l *tooltipLayer) relayout() {
 			l.box.Resize(size)
 		}
 	}
-	tooltipBoxLayout{l}.Layout([]fyne.CanvasObject{l.bg, l.label}, size)
+	tooltipBoxLayout{l}.Layout([]fyne.CanvasObject{l.bg, l.label, l.rich}, size)
 	l.bg.Refresh()
 	l.label.Refresh()
+	if l.rich.Visible() {
+		l.rich.Refresh()
+	}
 	l.box.Refresh()
 	l.Refresh()
 	canvas.Refresh(l)
@@ -225,13 +332,28 @@ func (lay tooltipBoxLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 	}
 	l.pos = l.absPos.Subtract(origin).Add(fyne.NewPos(tooltipOffsetX, tooltipOffsetY))
 
-	tw := l.label.fullWidth()
-	if tw > tooltipMaxW {
-		tw = tooltipMaxW
+	// 内容：彩色多行（服务器注册状态）或单行文本。
+	var (
+		content fyne.CanvasObject
+		cw, ch  float32
+	)
+	if l.rich.Visible() {
+		m := l.rich.MinSize()
+		content = l.rich
+		cw, ch = m.Width, m.Height
+		if cw > tooltipMaxW {
+			cw = tooltipMaxW
+		}
+	} else {
+		content = label
+		cw = l.label.fullWidth()
+		if cw > tooltipMaxW {
+			cw = tooltipMaxW
+		}
+		ch = l.label.MinSize().Height
 	}
-	th := l.label.MinSize().Height
-	w := tw + 2*tooltipPadX
-	h := th + 2*tooltipPadY
+	w := cw + 2*tooltipPadX
+	h := ch + 2*tooltipPadY
 
 	x, y := l.pos.X, l.pos.Y
 	if x+w > size.Width-2 {
@@ -249,8 +371,8 @@ func (lay tooltipBoxLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
 
 	bg.Resize(fyne.NewSize(w, h))
 	bg.Move(fyne.NewPos(x, y))
-	label.Resize(fyne.NewSize(tw, th))
-	label.Move(fyne.NewPos(x+tooltipPadX, y+tooltipPadY))
+	content.Resize(fyne.NewSize(cw, ch))
+	content.Move(fyne.NewPos(x+tooltipPadX, y+tooltipPadY))
 }
 
 // barLayout 「底部居中消息条」的布局（toast）：横向居中、贴窗口下缘留 6px。
@@ -289,6 +411,10 @@ type hoverNote struct {
 	text *plainText
 	tip  *tooltipLayer
 	note string
+
+	// rows 彩色多行提示（服务器注册状态，REQ-ACC-038）：非空时悬停优先显示它
+	//（绿√/红×），note 只作回退。
+	rows []serverTipRow
 
 	// clipOnly 备注自动取**完整文本**，且只有被截断（显示带 …）时才弹提示：
 	// 监听面板的号码/名称行用它（用户要求：被截断时悬停看全文）。
@@ -330,8 +456,17 @@ func (h *hoverNote) fullWidth() float32 { return h.text.fullWidth() }
 // SetNote 更新备注（同一控件复用于不同联系人时用）。
 func (h *hoverNote) SetNote(note string) { h.note = note }
 
+// SetRows 更新彩色多行提示内容（服务器注册状态，REQ-ACC-038）；nil/空 = 回退备注。
+func (h *hoverNote) SetRows(rows []serverTipRow) { h.rows = rows }
+
+// SetColor 更新文字颜色（注册状态文字要跟圆点颜色走）。
+func (h *hoverNote) SetColor(c color.Color) { h.text.SetColor(c) }
+
+// SetBold 更新字重。
+func (h *hoverNote) SetBold(bold bool) { h.text.SetBold(bold) }
+
 func (h *hoverNote) MouseIn(ev *desktop.MouseEvent) {
-	if h.tip == nil || h.note == "" {
+	if h.tip == nil || (h.note == "" && len(h.rows) == 0) {
 		return
 	}
 	// clipOnly：没被截断时不弹（完整内容已经看得见）
@@ -341,7 +476,13 @@ func (h *hoverNote) MouseIn(ev *desktop.MouseEvent) {
 	pos := ev.AbsolutePosition
 	h.stopTimer()
 	h.timer = time.AfterFunc(tooltipDelay, func() {
-		fyne.Do(func() { h.tip.show(h.note, pos) })
+		fyne.Do(func() {
+			if len(h.rows) > 0 {
+				h.tip.showServerRows(h.rows, pos)
+			} else {
+				h.tip.show(h.note, pos)
+			}
+		})
 	})
 }
 

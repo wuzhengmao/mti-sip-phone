@@ -104,6 +104,11 @@ type AccountSnapshot struct {
 	Account      string `json:"account"`
 	AuthUser     string `json:"authUser"`
 	DisplayName  string `json:"displayName"`
+	// Slaves 备用 SIP 服务器（多注册，REQ-ACC-038）：账号/密码共享主账户，
+	// 只有服务器地址/端口/SIP 域名单独指定。
+	Slaves []config.Slave `json:"slaves,omitempty"`
+	// PreferPrimary 优先使用主节点（默认 false）：主节点已注册时主动出站走主节点。
+	PreferPrimary bool `json:"preferPrimary"`
 	// PasswordSet 是否已设置密码（网页的密码框据此决定占位文案）
 	PasswordSet bool `json:"passwordSet"`
 }
@@ -174,6 +179,8 @@ func (a *App) ConfigSnapshot() ConfigSnapshot {
 			Account:      acc.Account,
 			AuthUser:     acc.AuthUser,
 			DisplayName:  acc.DisplayName,
+			Slaves:       append([]config.Slave(nil), acc.Slaves...),
+			PreferPrimary: acc.PreferPrimary,
 			PasswordSet:  acc.Password != "" || acc.PasswordEnc != "",
 		},
 		Audio: AudioSnapshot{
@@ -224,6 +231,10 @@ type AccountPatch struct {
 	Account      *string
 	AuthUser     *string
 	DisplayName  *string
+	// Slaves 非 nil 时整份替换备用服务器列表（REQ-ACC-038）；nil = 不改。
+	Slaves *[]config.Slave
+	// PreferPrimary 非 nil 时切换「优先使用主节点」；nil = 不改。
+	PreferPrimary *bool
 	// Password 非 nil 时改密码（空串 = 清空密码）；nil = 保持原密码
 	Password *string
 	// ClearPassword 显式清空密码（与 Password 二选一，ClearPassword 优先）
@@ -345,6 +356,13 @@ func (a *App) PatchAccount(p AccountPatch) (AccountSnapshot, error) {
 	}
 	if p.DisplayName != nil {
 		acc.DisplayName = strings.TrimSpace(*p.DisplayName)
+	}
+	if p.Slaves != nil {
+		acc.Slaves = *p.Slaves
+		acc.Slaves = acc.NormalizeSlaves() // 去空白、丢空、去重
+	}
+	if p.PreferPrimary != nil {
+		acc.PreferPrimary = *p.PreferPrimary
 	}
 	if p.ClearPassword {
 		acc.Password = ""

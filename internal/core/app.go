@@ -78,17 +78,28 @@ type RegisterInfo struct {
 	State   RegisterState `json:"state"`
 	Account string        `json:"account"`
 	Reason  string        `json:"reason"` // 失败原因
+	// Registrars 各注册目标（主账户 + 备用服务器）的注册状态（REQ-ACC-038）：
+	// 界面/网页据此悬浮显示「哪些服务器注册上了」。单服务器时只有一条。
+	Registrars []RegistrarStatus `json:"registrars,omitempty"`
+}
+
+// RegistrarStatus 单个注册目标的注册状态（REQ-ACC-038）。
+type RegistrarStatus struct {
+	Server string `json:"server"` // 展示用服务器地址（host，或 host:port 当端口非默认）
+	Domain string `json:"domain,omitempty"`
+	OK     bool   `json:"ok"`               // 是否已注册
+	Reason string `json:"reason,omitempty"` // 失败原因
 }
 
 // State 应用状态快照（供 WS 查询接口返回）。
 type State struct {
-	Version  string        `json:"version"`
-	OS       string        `json:"os"`   // 编译目标平台（如 windows），前端据此查询对应产物
-	Arch     string        `json:"arch"` // 编译目标架构（如 amd64）
-	BuildTime string       `json:"buildTime,omitempty"` // 构建时间（ISO 8601，SDK 动态加载指纹用，未注入时为空）
-	Register RegisterInfo  `json:"register"`
-	Calls    []Call        `json:"calls"`
-	Update   *UpdateStatus `json:"update,omitempty"` // 更新状态（无更新时省略）
+	Version   string        `json:"version"`
+	OS        string        `json:"os"`                  // 编译目标平台（如 windows），前端据此查询对应产物
+	Arch      string        `json:"arch"`                // 编译目标架构（如 amd64）
+	BuildTime string        `json:"buildTime,omitempty"` // 构建时间（ISO 8601，SDK 动态加载指纹用，未注入时为空）
+	Register  RegisterInfo  `json:"register"`
+	Calls     []Call        `json:"calls"`
+	Update    *UpdateStatus `json:"update,omitempty"` // 更新状态（无更新时省略）
 	// AutoAnswer 自动接听开关（桌面按钮与网页开关共用一份状态）
 	AutoAnswer bool `json:"autoAnswer"`
 	// Video 显示用的旋转/镜像（远端 + 本地回显），网页连上就能拿到并与桌面同步
@@ -263,7 +274,7 @@ func (a *App) UpdateAccount(acc config.Account) error {
 		// 登录态上，退出账号后不应再显示"座席已登录"（托盘菜单/网页徽章/
 		// SDK unregister/服务端 MSP_UNREGISTER/断线自动注销都走这里）。
 		a.setAgentOnline(false, "", AgentModeNone, false, false, false)
-		a.setRegister(RegUnregistered, "")
+		a.setRegister(RegUnregistered, "", nil)
 		a.bus.Publish("register.state", map[string]any{
 			"state":   string(RegUnregistered),
 			"account": acc.Account,
@@ -273,7 +284,7 @@ func (a *App) UpdateAccount(acc config.Account) error {
 	}
 	go func() {
 		if err := a.tel.Register(context.Background(), acc); err != nil {
-			a.setRegister(RegFailed, err.Error())
+			a.setRegister(RegFailed, err.Error(), nil)
 		}
 	}()
 	return nil
@@ -301,7 +312,7 @@ func (a *App) Start(ctx context.Context) {
 	if acc.Enabled && acc.Server != "" && acc.Account != "" {
 		go func() {
 			if err := a.tel.Register(ctx, acc); err != nil {
-				a.setRegister(RegFailed, err.Error())
+				a.setRegister(RegFailed, err.Error(), nil)
 			}
 		}()
 	}
@@ -337,7 +348,7 @@ func (a *App) State() State {
 		Instance:   a.instance,
 		// 官方更新站点（网页「使用主站点」按钮用，REQ-UPD-023）
 		UpdatePrimarySite: config.PrimaryUpdateSite,
-		AgentMode: a.AgentMode(),
+		AgentMode:         a.AgentMode(),
 	}
 	for _, id := range a.callOrder {
 		c := *a.calls[id]
@@ -939,12 +950,14 @@ func missedOnEnd(c *Call, reason string) bool {
 
 // OnRegisterState 注册状态变化。
 func (a *App) OnRegisterState(state RegisterState, reason string) {
-	a.setRegister(state, reason)
+	regs := a.registrarStates()
+	a.setRegister(state, reason, regs)
 	logx.Logger().Info("注册状态变化", "state", string(state), "reason", reason)
 	a.bus.Publish("register.state", map[string]any{
-		"state":   string(state),
-		"account": a.cfg.Account.Account,
-		"reason":  reason,
+		"state":      string(state),
+		"account":    a.cfg.Account.Account,
+		"reason":     reason,
+		"registrars": regs,
 	})
 }
 
@@ -1075,9 +1088,9 @@ func (a *App) ActiveCallID() string {
 // 内部工具
 // ---------------------------------------------------------------------------
 
-func (a *App) setRegister(state RegisterState, reason string) {
+func (a *App) setRegister(state RegisterState, reason string, regs []RegistrarStatus) {
 	a.mu.Lock()
-	a.reg = RegisterInfo{State: state, Account: a.cfg.Account.Account, Reason: reason}
+	a.reg = RegisterInfo{State: state, Account: a.cfg.Account.Account, Reason: reason, Registrars: regs}
 	a.mu.Unlock()
 
 	// CTI 心跳（协议 §10）：注册成功就开始周期发，注销就停。
@@ -1087,6 +1100,18 @@ func (a *App) setRegister(state RegisterState, reason string) {
 	case RegUnregistered:
 		a.stopHeartbeat()
 	}
+}
+
+// registrarStates 查询电话层各注册目标的注册状态（REQ-ACC-038）。电话层未实现
+// 该能力（非 SIP 后端）时返回 nil，界面据此隐藏「多服务器」悬浮信息。
+func (a *App) registrarStates() []RegistrarStatus {
+	if a.tel == nil {
+		return nil
+	}
+	if r, ok := a.tel.(interface{ RegistrarStates() []RegistrarStatus }); ok {
+		return r.RegistrarStates()
+	}
+	return nil
 }
 
 // HasActiveCall 是否存在进行中的通话（振铃或已接通）。

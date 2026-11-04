@@ -973,6 +973,10 @@ interface SipAccountSnapshot {
   account: string;
   authUser: string;
   displayName: string;
+  /** 备用 SIP 服务器（多注册，REQ-ACC-038）：账号/密码共享主账户 */
+  slaves: Array<{ server: string; port: number; domain: string }>;
+  /** 优先使用主节点（默认 false）：主节点注册上时主动请求都走主节点 */
+  preferPrimary: boolean;
   passwordSet: boolean;
 }
 

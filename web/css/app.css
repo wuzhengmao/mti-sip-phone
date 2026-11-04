@@ -40,6 +40,18 @@
   .badge.err { background: #fee2e2; color: var(--red); }
   .badge.warn { background: #fef3c7; color: var(--warn); }
   .badge.info { background: #dbeafe; color: var(--primary); }
+  /* 注册徽章悬停：各服务器注册状态（REQ-ACC-038），绿√/红× */
+  .badge-wrap { position: relative; display: inline-block; }
+  .badge-tip {
+    position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
+    min-width: max-content; padding: 6px 10px; border-radius: 6px;
+    background: #2e3238; color: #f5f5f5; font-size: 12px; line-height: 1.7;
+    box-shadow: 0 4px 12px rgba(0,0,0,.25); white-space: nowrap; display: none;
+  }
+  .badge-wrap:hover .badge-tip { display: block; }
+  .badge-tip.empty { display: none; }
+  .badge-tip .ok { color: var(--green); font-weight: 700; }
+  .badge-tip .bad { color: #ff6b6b; font-weight: 700; }
   /* 在线座席（REQ-ACC-035）：状态圆点 + 技能组 tag（其余技能组收进 more 的悬停提示） */
   .dot {
     display: inline-block; width: 9px; height: 9px; border-radius: 50%;
@@ -64,6 +76,11 @@
   input[type=text], input[type=number] {
     flex: 1; min-width: 120px; padding: 8px 10px; border: 1px solid var(--border);
     border-radius: 6px; font-size: 14px; outline: none;
+  }
+  textarea {
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 14px; outline: none; font-family: inherit; resize: vertical;
+    box-sizing: border-box;
   }
   input:focus { border-color: var(--primary); }
   button {
@@ -214,7 +231,7 @@ main { padding: 20px; }
 /* 字段堆叠：标签在上、控件在下（与桌面配置页同款） */
 .field { margin-bottom: 10px; }
 .field > label { display: block; font-size: 12px; color: var(--gray); margin-bottom: 4px; min-width: 0; }
-.field > input, .field > select { width: 100%; }
+.field > input, .field > select, .field > textarea { width: 100%; }
 .field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .field-row-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .hint-text { font-size: 12px; color: var(--gray); margin-top: 6px; line-height: 1.6; }
