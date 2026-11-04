@@ -87,7 +87,7 @@ type App struct {
 	onKeyTone func(key string)
 
 	regDot        *statusDot
-	regLabel      *plainText // 注册状态文字（颜色跟圆点一致；本机号码见窗口标题）
+	regLabel      *hoverNote // 注册状态文字（颜色跟圆点一致；悬停显示各服务器注册状态）
 	autoAnswerBtn *hoverIcon // 自动接听开关：图形按钮（icons/自动接听开启.png）
 	callBtn       *compactButton
 	settingsBtn   *widget.Button
@@ -128,6 +128,8 @@ type App struct {
 	accSRTP           *widget.Select
 	srtpNote          *widget.Label // 媒体加密（SDES-SRTP，REQ-MEDIA-009）说明
 	accDomain         *widget.Entry // SIP 域名（REQ-ACC-022，留空用服务器地址）
+	accSlaves         *widget.Entry // 备用 SIP 服务器（多注册，每行一个 host[:port][;域名]）
+	accPreferPrimary  *widget.Check // 优先使用主节点（REQ-ACC-038 修订）
 	accIPSelect       *widget.SelectEntry
 	accAccount        *widget.Entry
 	accAuthUser       *widget.Entry
@@ -188,6 +190,7 @@ type App struct {
 	callStartAt  time.Time
 	timerStop    chan struct{}
 	regState     string
+	regServers   []serverTipRow // 各服务器注册状态（REQ-ACC-038，悬停「已注册」显示）
 
 	// ---- CTI 话务控制（REQ-ACC-026 / REQ-ACC-029）----
 	// agentOnline 坐席模式（MSP_EVENT_AGENT_ONLINE/OFFLINE，REQ-ACC-028）：
@@ -611,8 +614,11 @@ func (a *App) buildDialPage() {
 	// 注册状态文字：与圆点同色、加粗、字号与「自动接听」按钮一致（用户要求）。
 	// 用自绘文本才能直接指定颜色（widget.Label 只有 Importance 几档主题色，
 	// 对不上圆点那四个自定颜色）。本机号码不在顶栏显示，见窗口标题。
-	a.regLabel = newPlainText(regText("unregistered"),
-		a.fyne.Settings().Theme().Size(theme.SizeNameText), dotColors["unregistered"], true)
+	// 悬停显示各服务器注册状态（REQ-ACC-038，绿√/红×），见 setRegLabel。
+	a.regLabel = newHoverNote(regText("unregistered"),
+		a.fyne.Settings().Theme().Size(theme.SizeNameText), "", a.mainTip)
+	a.regLabel.SetColor(dotColors["unregistered"])
+	a.regLabel.SetBold(true)
 	// 自动接听：**图形按钮**（icons/自动接听开启.png），文字走悬停提示（用户要求）。
 	// 图标比坐席/监听那排小图标大一号（用户要求：按钮太小），命中区随之放大。
 	iconSize := fyne.CurrentApp().Settings().Theme().Size(theme.SizeNameText) + 2
@@ -830,6 +836,15 @@ func (a *App) buildSettingsPage() {
 	a.accDomain = newFormEntry()
 	a.accDomain.SetPlaceHolder("可选，留空用 SIP 服务器地址")
 
+	// 备用 SIP 服务器（多注册，REQ-ACC-038）：每行一个，格式 host[:端口][;域名]。
+	// 账号/密码/传输与主账户一致，端口缺省沿用主账户端口，域名缺省 = 服务器地址。
+	a.accSlaves = widget.NewMultiLineEntry()
+	a.accSlaves.SetPlaceHolder("每行一个：服务器[:端口][;域名]\n如 10.168.4.41\n10.168.4.42:5061\n10.168.4.43;voip.example.com")
+
+	// 优先使用主节点（REQ-ACC-038 修订）：勾选后主动出站（新呼叫/心跳/CTI 指令）
+	// 只要主节点已注册就走主节点，仅主节点未注册时在备用节点里轮询。
+	a.accPreferPrimary = widget.NewCheck("优先使用主节点", nil)
+
 	// 声明 IP（REQ-ACC-023）：可输入的下拉（与主窗体拨号框同款）——候选是本机
 	// 可用网卡 IP（已滤掉回环与虚拟网卡，公网地址排在前面），也可以直接手填。
 	// **不填 = 自动**（STUN → 本机出口 IP）——标题 + 占位提示已说清，不再单独加说明行。
@@ -844,6 +859,8 @@ func (a *App) buildSettingsPage() {
 		formItem("SIP服务器", a.accServerAddr),
 		formItem("代理服务器", a.accProxy),
 		formItem("域名", a.accDomain),
+		formItem("备用服务器（多注册）", a.accSlaves),
+		a.accPreferPrimary,
 		formItem("传输", a.accTransport),
 		a.tlsVerifyCheck,
 		a.tlsNote,
@@ -1155,6 +1172,45 @@ func formItem(label string, obj fyne.CanvasObject) fyne.CanvasObject {
 		widget.NewLabel(label),
 		container.NewHScroll(obj),
 	)
+}
+
+// parseSlaves 解析备用服务器多行文本（每行一个 host[:端口][;域名]），
+// 空行与非法行跳过。端口缺省 0 = 沿用主账户端口；域名缺省空 = 用服务器地址。
+func parseSlaves(text string) []config.Slave {
+	var out []config.Slave
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var domain string
+		if i := strings.IndexByte(line, ';'); i >= 0 {
+			domain = config.NormalizeDomain(line[i+1:])
+			line = strings.TrimSpace(line[:i])
+		}
+		host, port := parseHostPort(line, 0)
+		if host == "" {
+			continue
+		}
+		out = append(out, config.Slave{Server: host, Port: port, Domain: domain})
+	}
+	return out
+}
+
+// formatSlaves 把备用服务器列表格式化成多行文本（parseSlaves 的逆操作）。
+func formatSlaves(slaves []config.Slave) string {
+	lines := make([]string, 0, len(slaves))
+	for _, s := range slaves {
+		line := s.Server
+		if s.Port > 0 {
+			line += ":" + strconv.Itoa(s.Port)
+		}
+		if s.Domain != "" {
+			line += ";" + s.Domain
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // updateTLSRow 传输方式联动（REQ-ACC-006）：只有「传输 = tls」时才显示
@@ -2077,6 +2133,11 @@ func (a *App) onEvent(ev core.Event) {
 				a.setRegState(state)
 				a.regDot.setState(state)
 				a.setRegLabel(state) // 顶栏显示状态文字（不再显示本机号码）
+				// 各服务器注册状态（REQ-ACC-038）：悬停「已注册」显示绿√/红×
+				a.regServers = registrarRows(data["registrars"])
+				if a.regLabel != nil {
+					a.regLabel.SetRows(a.regServers)
+				}
 				a.applyIconColors()
 				// 托盘菜单按注册状态切换「登录账号 / 退出账号」（REQ-ACC-024）
 				a.updateTrayMenu()
@@ -2437,6 +2498,42 @@ func regText(state string) string {
 	}
 }
 
+// registrarRows 把 register.state 事件里的「各服务器注册状态」转成悬浮提示行。
+// 数据既可能来自进程内总线（[]core.RegistrarStatus），也可能经 WS 回读（[]any），
+// 两种都收；解析不出时返回 nil（不显示多服务器悬浮）。
+func registrarRows(v any) []serverTipRow {
+	if v == nil {
+		return nil
+	}
+	switch list := v.(type) {
+	case []core.RegistrarStatus:
+		rows := make([]serverTipRow, 0, len(list))
+		for _, r := range list {
+			if r.Server == "" {
+				continue
+			}
+			rows = append(rows, serverTipRow{server: r.Server, ok: r.OK})
+		}
+		return rows
+	case []any:
+		rows := make([]serverTipRow, 0, len(list))
+		for _, e := range list {
+			m, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			srv, _ := m["server"].(string)
+			if srv == "" {
+				continue
+			}
+			okv, _ := m["ok"].(bool)
+			rows = append(rows, serverTipRow{server: srv, ok: okv})
+		}
+		return rows
+	}
+	return nil
+}
+
 // setRegLabel 更新顶栏的注册状态文字：颜色跟圆点一致（dotColors），加粗。
 func (a *App) setRegLabel(state string) {
 	if a.regLabel == nil {
@@ -2451,7 +2548,7 @@ func (a *App) setRegLabel(state string) {
 }
 
 // statusColor 注册状态文字/圆点的颜色：与圆点同色；**已注册时按坐席状态**
-//（置忙/离席黄、整理中蓝），让顶栏跟着坐席状态一起变（REQ-ACC-034）。
+// （置忙/离席黄、整理中蓝），让顶栏跟着坐席状态一起变（REQ-ACC-034）。
 func (a *App) statusColor(state string) color.Color {
 	if state == "registered" {
 		switch a.agentStatus() {
@@ -2628,6 +2725,8 @@ func (a *App) saveAccount() {
 		AuthUser:     a.accAuthUser.Text,
 		Password:     a.accPassword.Text,
 		DisplayName:  a.accDisplay.Text,
+		Slaves:       parseSlaves(a.accSlaves.Text),
+		PreferPrimary: a.accPreferPrimary.Checked,
 	}
 	if acc.Enabled && (acc.Server == "" || acc.Account == "") {
 		a.showInfo("提示", "启用账户需填写服务器与账号")
@@ -2671,6 +2770,8 @@ func (a *App) loadAccountIntoForm() {
 	a.updateTLSRow(acc.Transport)
 	a.accSRTP.SetSelected(srtpLabelOfValue(acc.SRTP))
 	a.accDomain.SetText(acc.Domain)
+	a.accSlaves.SetText(formatSlaves(acc.Slaves))
+	a.accPreferPrimary.SetChecked(acc.PreferPrimary)
 	// 声明 IP：直接回填（留空 = 自动）。值不在候选里也能显示——它就是可输入的
 	// 下拉，手填过的地址保存后要能原样回来
 	a.accIPSelect.SetText(config.NormalizePublicIP(acc.PublicIP))

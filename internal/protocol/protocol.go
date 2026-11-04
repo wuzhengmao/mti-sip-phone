@@ -12,6 +12,7 @@ package protocol
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -53,6 +54,12 @@ type Account struct {
 	// Listen 本地 WS 监听端口（查询参数 listen，缺省 0 = 用配置端口）：引导器
 	// 拉起时指定，避免「端口被占用自动 +1」与「扫描端口」的不确定。
 	Listen int
+	// Slaves 备用 SIP 服务器（查询参数 slave，可重复）：slave=host[:port]。
+	// 账号/密码/传输与主服务器一致，端口缺省用主服务器的端口。
+	Slaves []config.Slave
+	// PreferPrimary 优先使用主节点（查询参数 preferprimary=1）：主节点已注册时
+	// 主动出站一律走主节点，仅主节点未注册时才在备用节点里轮询。
+	PreferPrimary bool
 }
 
 // ParseSipURL 解析 sip:// / sips:// URI：
@@ -131,7 +138,33 @@ func ParseSipURL(raw string) (*Account, error) {
 	// 更新站点（查询参数 updatesite）：sip://账号@服务器?updatesite=https://…
 	// 省略/空 = 不改配置；scheme 是否合法由 SetUpdateConfig 校验（此处只透传）。
 	acc.UpdateSite = strings.TrimSpace(q.Get("updatesite"))
+	// 备用 SIP 服务器（查询参数 slave，可重复）：slave=host[:port]
+	for _, s := range q["slave"] {
+		host, port := splitServerPort(s)
+		if host == "" {
+			continue
+		}
+		acc.Slaves = append(acc.Slaves, config.Slave{Server: host, Port: port})
+	}
+	// 优先使用主节点（查询参数 preferprimary）：接受 strconv.ParseBool 认可的值
+	//（1/t/true/TRUE/… 为真），缺省/非法保持 false。
+	if b, err := strconv.ParseBool(q.Get("preferprimary")); err == nil {
+		acc.PreferPrimary = b
+	}
 	return acc, nil
+}
+
+// splitServerPort 解析 "host[:port]"（port 可省略，此时返回 0 = 用主服务器端口）。
+// 支持 IPv6 字面量（去括号）。
+func splitServerPort(s string) (string, int) {
+	s = strings.TrimSpace(s)
+	if h, p, err := net.SplitHostPort(s); err == nil {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 && port < 65536 {
+			return strings.Trim(h, "[]"), port
+		}
+		return strings.Trim(h, "[]"), 0
+	}
+	return strings.Trim(s, "[]"), 0
 }
 
 // SplitURL 从单个命令行参数中提取 sip:// / sips:// URL。

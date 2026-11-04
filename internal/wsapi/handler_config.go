@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"mti-sip-phone/internal/config"
 	"mti-sip-phone/internal/core"
 	"mti-sip-phone/internal/logx"
 )
@@ -51,25 +52,27 @@ func (s *Server) dispatchConfig(c *wsConn, msg Message) (Message, bool) {
 		// account、改几个字段再整份回传。password 缺省 = 不改密码，
 		// clearPassword = 显式清空（两者二选一，clearPassword 优先）。
 		var p struct {
-			Enabled       *bool   `json:"enabled"`
-			Server        *string `json:"server"`
-			Port          *int    `json:"port"`
-			Expires       *int    `json:"expires"`
-			CTIHeartbeat  *int    `json:"ctiHeartbeat"`
-			RPort         *bool   `json:"rport"`
-			STUNEnabled   *bool   `json:"stunEnabled"`
-			STUNServer    *string `json:"stunServer"`
-			Proxy         *string `json:"proxy"`
-			Transport     *string `json:"transport"`
-			TLSVerify     *bool   `json:"tlsVerify"`
-			SRTP          *string `json:"srtp"`
-			Domain        *string `json:"domain"`
-			PublicIP      *string `json:"publicIP"`
-			Account       *string `json:"account"`
-			AuthUser      *string `json:"authUser"`
-			DisplayName   *string `json:"displayName"`
-			Password      *string `json:"password"`
-			ClearPassword bool    `json:"clearPassword"`
+			Enabled       *bool           `json:"enabled"`
+			Server        *string         `json:"server"`
+			Port          *int            `json:"port"`
+			Expires       *int            `json:"expires"`
+			CTIHeartbeat  *int            `json:"ctiHeartbeat"`
+			RPort         *bool           `json:"rport"`
+			STUNEnabled   *bool           `json:"stunEnabled"`
+			STUNServer    *string         `json:"stunServer"`
+			Proxy         *string         `json:"proxy"`
+			Transport     *string         `json:"transport"`
+			TLSVerify     *bool           `json:"tlsVerify"`
+			SRTP          *string         `json:"srtp"`
+			Domain        *string         `json:"domain"`
+			PublicIP      *string         `json:"publicIP"`
+			Account       *string         `json:"account"`
+			AuthUser      *string         `json:"authUser"`
+			DisplayName   *string         `json:"displayName"`
+			Slaves        *[]config.Slave `json:"slaves"`
+			PreferPrimary *bool           `json:"preferPrimary"`
+			Password      *string         `json:"password"`
+			ClearPassword bool            `json:"clearPassword"`
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil {
 			return errMessage(msg.ID, CodeInvalidParams, fmt.Errorf("参数格式错误")), true
@@ -81,7 +84,9 @@ func (s *Server) dispatchConfig(c *wsConn, msg Message) (Message, bool) {
 			STUNServer: p.STUNServer, Proxy: p.Proxy, Transport: p.Transport,
 			TLSVerify: p.TLSVerify, SRTP: p.SRTP, Domain: p.Domain, PublicIP: p.PublicIP,
 			Account: p.Account, AuthUser: p.AuthUser, DisplayName: p.DisplayName,
-			Password: p.Password, ClearPassword: p.ClearPassword,
+			Slaves:        p.Slaves,
+			PreferPrimary: p.PreferPrimary,
+			Password:      p.Password, ClearPassword: p.ClearPassword,
 		})
 		if err != nil {
 			return errMessage(msg.ID, codeOf(err), err), true

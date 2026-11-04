@@ -41,7 +41,7 @@ func (p *Phone) udpMappingKeepalive(ctx context.Context, ln net.PacketConn, kick
 	logged := false
 	for {
 		if p.udpMappingWanted() {
-			if target := p.registrationUDPAddr(); target != nil {
+			for _, target := range p.registrationUDPAddrs() {
 				if _, err := ln.WriteTo([]byte(udpKeepalivePayload), target); err == nil && !logged {
 					logged = true
 					logx.Logger().Info("UDP 监听端口映射保活已启动（防止 NAT 丢弃对端的 BYE/INFO）",
@@ -73,30 +73,51 @@ func (p *Phone) kickUDPMapping() {
 	}
 }
 
-// udpMappingWanted 是否需要监听端口映射保活：UDP 传输 + 宣告的是 NAT 地址
-// （声明 IP 或 STUN 公网 IP —— 与 Contact/SDP 用的是同一个地址来源）。
+// udpMappingWanted 是否需要监听端口映射保活：UDP 传输即需要。
+//
+// 之前只在「UDP + 宣告了 NAT 地址（声明 IP 或 STUN 公网 IP）」时保活——那套
+// 假定「没宣告 NAT 地址就是平网、服务端能直连本机」。但多服务器 + NAT 场景下，
+// 话机可能没配声明 IP 却在 NAT 后面，此时唯一在维持监听端口 NAT 映射的只有
+// MSP_HEARTBEAT，而心跳又可能被服务端关掉（MSP_UNSUPPORTED / 退出坐席）——一停，
+// 监听端口的 NAT 映射就过期、呼入全断。所以 UDP 一律从监听 socket 发 CRLF 保活
+// （2 字节 / 20 秒，代价可忽略），与心跳解耦。
 func (p *Phone) udpMappingWanted() bool {
 	p.mu.Lock()
-	acc, pub := p.acc, p.publicIP
+	tr := config.NormalizeTransport(p.acc.Transport)
 	p.mu.Unlock()
-	if config.NormalizeTransport(acc.Transport) != config.TransportUDP {
-		return false
-	}
-	return p.declaredIP() != "" || pub != ""
+	return tr == config.TransportUDP
 }
 
-// registrationUDPAddr 注册服务器的 UDP 地址（保活包的目的地）。
-// 解析失败返回 nil（下一轮再试）。
-func (p *Phone) registrationUDPAddr() *net.UDPAddr {
+// registrationUDPAddrs 全部 UDP 注册服务器的地址（保活包的目的地）。
+// 多注册（REQ-ACC-038）时对每个 UDP 注册目标都发保活，维持各自服务端把
+// in-dialog 请求送回监听端口的 NAT 映射。解析失败的跳过（下一轮再试）。
+func (p *Phone) registrationUDPAddrs() []*net.UDPAddr {
 	p.mu.Lock()
-	server, port := p.acc.Server, p.acc.Port
+	registrars := p.registrars
+	if len(registrars) == 0 {
+		registrars = []config.Account{p.acc}
+	}
 	p.mu.Unlock()
-	if server == "" || port <= 0 {
-		return nil
+
+	var out []*net.UDPAddr
+	seen := map[string]bool{}
+	for _, acc := range registrars {
+		if config.NormalizeTransport(acc.Transport) != config.TransportUDP {
+			continue
+		}
+		if acc.Server == "" || acc.Port <= 0 {
+			continue
+		}
+		key := net.JoinHostPort(acc.Server, strconv.Itoa(acc.Port))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		addr, err := net.ResolveUDPAddr("udp", key)
+		if err != nil {
+			continue
+		}
+		out = append(out, addr)
 	}
-	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(server, strconv.Itoa(port)))
-	if err != nil {
-		return nil
-	}
-	return addr
+	return out
 }

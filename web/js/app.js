@@ -22,6 +22,22 @@ window.SipApp = window.SipApp || {};
 
   let current = '';
 
+  // 注册徽章的服务器状态悬浮（REQ-ACC-038）：每行「服务器 绿√/红×」。
+  // 用 DOM 节点拼（服务端数据一律 textContent，防 XSS）；无列表时标记 empty 隐藏。
+  function buildRegTip(registrars) {
+    const tip = $('regTip');
+    if (!tip) return;
+    App.dom.clear(tip);
+    const list = registrars || [];
+    tip.classList.toggle('empty', list.length === 0);
+    list.forEach(function (r) {
+      const line = App.dom.el('div');
+      line.appendChild(App.dom.el('span', {}, r.server));
+      line.appendChild(App.dom.el('span', { class: r.ok ? 'ok' : 'bad' }, r.ok ? ' √' : ' ×'));
+      tip.appendChild(line);
+    });
+  }
+
 
   function show(name) {
     if (!views[name]) name = 'call';
@@ -95,6 +111,8 @@ window.SipApp = window.SipApp || {};
     const info = map[st.register.state] || ['未注册', ''];
     reg.textContent = info[0];
     reg.className = 'badge ' + info[1];
+    // 各服务器注册状态（REQ-ACC-038）：悬停徽章显示绿√/红×
+    buildRegTip(st.register.registrars);
     // 点击提示（REQ-ACC-024）：注册原因在前，动作提示在后（徽章可点击）
     const actHint = st.register.state === 'registered' ? '点击退出账号'
       : st.register.state === 'registering' ? '点击停止登录' : '点击登录账号';

@@ -58,7 +58,20 @@ type Phone struct {
 
 	regCancel context.CancelFunc
 
-	regPeerIP string // 最近一次 REGISTER 成功响应来自的 IP（CTI NOTIFY 来源校验）
+	// 多注册（REQ-ACC-038）：registrars 是展开后的注册目标列表（主账户在前，
+	// 其后是备用服务器，由 p.mu 保护）；regMu 护各目标的最近注册结果（regs）。
+	// regPeers 记每个注册目标最近一次 REGISTER 成功响应来源 IP → RegistrarKey，
+	// 用于控制 NOTIFY 来源校验。各服务器**对等**（无主从）：out-of-dialog 请求
+	//（新呼叫、MSP_HEARTBEAT、MSP_ACTION）轮询选择一个已注册服务器发送；呼入
+	// 与 in-dialog 请求仍按实际来源/通话绑定。
+	registrars []config.Account
+	regMu      sync.Mutex
+	regs       map[string]regResult
+	regPeers   map[string]string // 来源 IP → RegistrarKey
+
+	// rr 轮询游标（REQ-ACC-038）：out-of-dialog 出站（新呼叫 / NOTIFY）从已注册
+	// 目标里按序轮流选择。
+	rr atomic.Uint64
 
 	// 注册看护参数（REQ-CALL-009，测试注入用）：零值取默认值；
 	// 必须在 Register 之前设置，之后由看护 goroutine 只读。
@@ -131,10 +144,16 @@ func (p *Phone) nowClock() time.Time {
 	return time.Now()
 }
 
-// noteRegisterPeer 记录注册服务器的地址（REGISTER 成功响应的来源，形如
-// "10.168.4.40:15060"），只留 IP——CTI NOTIFY 的来源校验用它（只接受注册
-// 服务器发来的通知）。
-func (p *Phone) noteRegisterPeer(src string) {
+// regResult 单个注册目标最近一次注册的结果（多注册聚合用）。
+type regResult struct {
+	ok     bool
+	reason string
+}
+
+// noteRegisterPeer 记录某个注册目标 REGISTER 成功响应的来源地址（形如
+// "10.168.4.40:15060"），只留 IP——控制 NOTIFY 的来源校验与「话务绑定到哪个
+// 服务器」都用它（只接受已注册服务器发来的通知）。
+func (p *Phone) noteRegisterPeer(acc config.Account, src string) {
 	if src == "" {
 		return
 	}
@@ -142,8 +161,15 @@ func (p *Phone) noteRegisterPeer(src string) {
 	if h, _, err := net.SplitHostPort(src); err == nil {
 		host = h
 	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return
+	}
 	p.mu.Lock()
-	p.regPeerIP = strings.Trim(host, "[]")
+	if p.regPeers == nil {
+		p.regPeers = make(map[string]string)
+	}
+	p.regPeers[host] = config.RegistrarKey(acc)
 	p.mu.Unlock()
 }
 
@@ -499,9 +525,9 @@ func (p *Phone) handleControlNotify(req *sip.Request) {
 	go p.sink.OnRemoteCommand(cmd)
 }
 
-// notifyFromServer 判断 NOTIFY 的来源（"ip:port"）是否为注册服务器：
-// regPeerIP（最近一次 REGISTER 成功响应的来源）优先；否则解析配置里的
-// 服务器地址比对；解析不了（如域名在本机无解析）时放行并告警——此时无法
+// notifyFromServer 判断 NOTIFY 的来源（"ip:port"）是否为**任一**注册服务器：
+// 已注册过时严格只接受记录下来的服务器 IP（regPeers）；未注册时解析各注册目标
+// 的服务器地址比对；解析不了（如域名在本机无解析）时放行并告警——此时无法
 // 判断，宁可让业务通知生效（服务端也可能经代理/多 IP 送达）。
 func (p *Phone) notifyFromServer(src string) bool {
 	srcHost, _, err := net.SplitHostPort(src)
@@ -513,22 +539,32 @@ func (p *Phone) notifyFromServer(src string) bool {
 		return false
 	}
 	p.mu.Lock()
-	peer, server := p.regPeerIP, p.acc.Server
+	_, matchedPeer := p.regPeers[srcHost]
+	hasPeer := len(p.regPeers) > 0
+	registrars := p.registrars
 	p.mu.Unlock()
-	if peer != "" {
-		return srcHost == peer
+	if hasPeer {
+		// 已注册：只接受已知服务器 IP（严格，保持原口径的安全属性）
+		return matchedPeer
 	}
-	if server == "" {
+	if len(registrars) == 0 {
 		return true
 	}
-	ips, err := net.LookupHost(server)
-	if err != nil {
-		logx.Logger().Warn("无法解析注册服务器地址，注销通知来源未校验", "server", server, "err", err)
-		return true
-	}
-	for _, ip := range ips {
-		if ip == srcHost {
+	seen := map[string]bool{}
+	for _, acc := range registrars {
+		if acc.Server == "" || seen[acc.Server] {
+			continue
+		}
+		seen[acc.Server] = true
+		ips, err := net.LookupHost(acc.Server)
+		if err != nil {
+			logx.Logger().Warn("无法解析注册服务器地址，控制通知来源未校验", "server", acc.Server, "err", err)
 			return true
+		}
+		for _, ip := range ips {
+			if ip == srcHost {
+				return true
+			}
 		}
 	}
 	return false
@@ -538,28 +574,33 @@ func (p *Phone) notifyFromServer(src string) bool {
 // core.Telephony 实现
 // ---------------------------------------------------------------------------
 
-// Register 发起注册（阻塞直到第一次注册结果确定，后续续注册在后台进行）。
+// Register 发起注册（阻塞直到首次注册请求发出，结果经事件回调；后续续注册在
+// 后台进行）。多注册（REQ-ACC-038）：同时向主账户与全部备用服务器注册，**任一
+// 注册成功即上报「已注册」**（状态是全局的，注册目标各自的成/败经 noteRegResult
+// 聚合）。
 func (p *Phone) Register(ctx context.Context, acc config.Account) error {
+	registrars := acc.Registrars()
+
 	p.mu.Lock()
-	prev := p.acc                 // 换账号时要先给旧账号发 expires=0（见下）
+	prev := p.acc
+	prevRegistrars := p.registrars
 	hadLoop := p.regCancel != nil // 之前注册过（首启与沙箱空白配置没有旧注册）
-	switchAcc := hadLoop && !sameRegistrar(prev, acc)
+	switchAcc := hadLoop && !sameRegistrarSet(prev, acc)
 	p.mu.Unlock()
 
-	// 换账号（REQ-ACC-011 修订）：**先给旧账号发 expires=0 的 REGISTER**
-	// 让它立即过期，再注册新账号——否则旧账号在服务端的绑定要等自然过期
-	// （默认 300 秒）才消失，这段时间打旧号码仍会送到本机。
+	// 换账号（REQ-ACC-011 修订）：**先给旧账号的每个注册目标发 expires=0 的
+	// REGISTER** 让它立即过期，再注册新账号——否则旧账号在服务端的绑定要等
+	// 自然过期（默认 300 秒）才消失，这段时间打旧号码仍会送到本机。
 	//
 	// 顺序与口径（都不许随意调换）：
-	//   - 只在"确实换了账号"时发（服务器/端口/账号/认证 ID/传输任一不同）；
-	//     纯改密码、改显示名、改 STUN 等的重注册**不打扰服务端**；
+	//   - 只在"确实换了账号或注册目标集合"时发（服务器/端口/账号/认证 ID/传输/
+	//     备用服务器列表任一不同）；纯改密码、显示名、STUN 等的重注册不打扰服务端；
 	//   - **先停旧注册循环**（p.regCancel），否则它可能在注销之后又续注册一次；
 	//   - **在 p.acc 仍是旧账号时发注销**：Contact 由 contactFor(prev)+
 	//     localHost() 算出，必须与注册时的 Contact 一致——服务端按 Contact URI
-	//     匹配删除绑定，地址对不上旧绑定就删不掉（静默取消循环后 p.acc 未变）；
-	//   - **静默路径**（sendRegisterOpts 的 silent）：不发注册状态、不记心跳
-	//     对端——普通路径会让界面闪一下"未注册"、还会污染心跳判定；
-	//   - **尽力而为**：最多等 2 秒，超时/失败只记日志，绝不阻断新账号注册。
+	//     匹配删除绑定，地址对不上旧绑定就删不掉；
+	//   - **静默路径**（sendRegisterOpts 的 silent）：不发注册状态、不记心跳对端；
+	//   - **尽力而为**：每个目标最多等 2 秒，超时/失败只记日志，绝不阻断新注册。
 	if switchAcc {
 		p.mu.Lock()
 		if p.regCancel != nil {
@@ -567,24 +608,29 @@ func (p *Phone) Register(ctx context.Context, acc config.Account) error {
 			p.regCancel = nil
 		}
 		p.mu.Unlock()
-		unregCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		if _, err := p.sendRegisterOpts(unregCtx, prev, 0, sendRegisterOpts{silent: true}); err != nil {
-			logx.Logger().Warn("旧账号注销失败（旧绑定将等待自然过期）",
-				"account", prev.Account, "server", prev.Server, "err", err)
-		} else {
-			logx.Logger().Info("旧账号已注销（expires=0）",
-				"account", prev.Account, "server", prev.Server)
+		for _, pa := range prevRegistrars {
+			unregCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			if _, err := p.sendRegisterOpts(unregCtx, pa, 0, sendRegisterOpts{silent: true}); err != nil {
+				logx.Logger().Warn("旧账号注销失败（旧绑定将等待自然过期）",
+					"account", pa.Account, "server", pa.Server, "err", err)
+			} else {
+				logx.Logger().Info("旧账号已注销（expires=0）",
+					"account", pa.Account, "server", pa.Server)
+			}
+			cancel()
 		}
-		cancel()
 	}
 
 	p.mu.Lock()
 	p.acc = acc
+	p.registrars = registrars
+	p.regPeers = make(map[string]string)
 	// STUN 未启用时清空旧公网地址：否则用户关掉 STUN 重新注册后，
 	// Contact 仍会带上一次探测到的公网地址（localHost 无条件优先 publicIP）。
 	if !acc.STUNEnabled || acc.STUNServer == "" {
 		p.publicIP = ""
 	}
+	localPort := p.localPort
 	p.mu.Unlock()
 
 	// 声明 IP（REQ-ACC-023）：保存账户即生效——Via 的 sent-by 在这里改写，
@@ -599,24 +645,45 @@ func (p *Phone) Register(ctx context.Context, acc config.Account) error {
 		p.ensureTLSListener()
 	}
 
+	// 出站复用本地监听 socket（REQ-ACC-038 修订，NAT + rport 正解）：UDP 下让
+	// 出站请求的源端口 = 监听端口，服务端 received/rport 重写后的 Contact 才会
+	// 指向监听端口，呼入与保活才对得上。TCP/TLS 走连接复用（;ob），必须清空，
+	// 否则出站会误走 TCP 监听器。
+	if config.NormalizeTransport(acc.Transport) == config.TransportUDP {
+		setClientConnAddr(p.client, "0.0.0.0", localPort)
+	} else {
+		setClientConnAddr(p.client, "", 0)
+	}
+
+	// 重置各注册目标的结果（多注册聚合状态从零开始）
+	p.regMu.Lock()
+	p.regs = make(map[string]regResult)
+	p.regMu.Unlock()
+
 	if p.regCancel != nil {
 		p.regCancel()
 	}
 	regCtx, cancel := context.WithCancel(ctx)
 	p.regCancel = cancel
 
+	// 一次「注册中」（多注册聚合前的整体状态）
+	p.sink.OnRegisterState(core.RegRegistering, "")
+
 	// 立即重新注册信号（REQ-CALL-009）：注册看护（系统休眠唤醒/网络变化，
-	// 见 netwatch.go）与初始 STUN 探测都经这里通知注册循环。
+	// 见 netwatch.go）与初始 STUN 探测都经这里通知注册循环。**所有注册目标
+	// 共用同一个 kickCh**：看护投递一次，各目标各自立即重新注册。
 	// 约定：buffer=1、非阻塞投递、任何一方都不 close——已有待处理信号时
 	// 合并为一次，看护永不阻塞。
 	kickCh := make(chan string, 1)
 
 	go p.watchRegistration(regCtx, acc, kickCh)
-	go p.registerLoop(regCtx, acc, kickCh)
-	// 连接型传输（TCP/TLS）的信令保活：防止服务端的连接空闲超时把连接关掉，
-	// 之后它送 in-dialog 请求（对端 BYE/ACK）就只能重新拨号、而 NAT 后面拨不进来
-	//（真机：tcp_connect_blocking_timeout + Connection refused）。
-	go p.keepaliveLoop(regCtx, acc)
+	for _, ra := range registrars {
+		go p.registerLoop(regCtx, ra, kickCh)
+		// 连接型传输（TCP/TLS）的信令保活：防止服务端的连接空闲超时把连接关掉，
+		// 之后它送 in-dialog 请求（对端 BYE/ACK）就只能重新拨号、而 NAT 后面拨不进来
+		//（真机：tcp_connect_blocking_timeout + Connection refused）。
+		go p.keepaliveLoop(regCtx, ra)
+	}
 	return nil
 }
 
@@ -626,9 +693,19 @@ func (p *Phone) Unregister(ctx context.Context) error {
 		p.regCancel()
 		p.regCancel = nil
 	}
-	// 发送 expires=0 的 REGISTER 通知服务端
-	if _, err := p.sendRegister(ctx, p.acc, 0); err != nil {
-		logx.Logger().Debug("注销 REGISTER 发送失败", "err", err)
+	// 发送 expires=0 的 REGISTER 通知各注册目标的服务端（多注册：逐个注销）。
+	// 走静默路径：不发中间「注册中」状态（最终状态由 OnRegisterState 统一发），
+	// 也不把注销响应的来源记进注册对端。
+	p.mu.Lock()
+	registrars := p.registrars
+	p.mu.Unlock()
+	if len(registrars) == 0 {
+		registrars = []config.Account{p.acc}
+	}
+	for _, ra := range registrars {
+		if _, err := p.sendRegisterOpts(ctx, ra, 0, sendRegisterOpts{silent: true}); err != nil {
+			logx.Logger().Debug("注销 REGISTER 发送失败", "server", ra.Server, "err", err)
+		}
 	}
 	p.sink.OnRegisterState(core.RegUnregistered, "")
 	return nil
@@ -662,11 +739,26 @@ func (p *Phone) DialVideo(ctx context.Context, target string) (string, error) {
 
 func (p *Phone) dial(ctx context.Context, target string, withVideo bool) (string, error) {
 	p.mu.Lock()
-	acc := p.acc
+	busy := len(p.calls) > 0
 	lookup := p.peerNameLookup
+	acc := p.acc
 	p.mu.Unlock()
+	// 单通话限制（信令层兜底）：话务中（呼出/振铃/通话中）禁止发起任何新呼叫，
+	// 与呼入直接回 486 同口径——无论轮询选到哪个 SIP 服务器都直接拒绝。core 侧
+	// 有同样的检查，这里保证绕过 core 直接调电话层时也绝不会发出第二个 INVITE。
+	if busy {
+		logx.Logger().Info("已有通话进行中，拒绝发起新呼叫", "target", target)
+		return "", fmt.Errorf("已有通话进行中，无法发起新的呼叫")
+	}
 	if acc.Server == "" || acc.Account == "" {
 		return "", fmt.Errorf("未配置 SIP 账户")
+	}
+
+	// 多注册（REQ-ACC-038）：新呼叫从**已注册**目标里轮询选择一个发起；
+	// 没有任何服务器注册成功时直接失败（不能向未注册的服务器出站）。
+	acc, ok := p.roundRobinRegistrar()
+	if !ok {
+		return "", fmt.Errorf("尚未注册到任何 SIP 服务器")
 	}
 
 	// 视频呼叫但视频功能不可用（本构建没有视频 / 总开关关闭，REQ-VIDEO-014）：
@@ -1206,7 +1298,11 @@ func (p *Phone) Close() error {
 // 状态打回"注册中"却没有触发重注册，界面会一直停留在"注册中"直到
 // 下次续注册——bug 修复）。收到信号立即重试/重注册，**不重置退避**：
 // 连续失败时退避照常翻倍，防止网络抖动击穿退避。
+//
+// 多注册（REQ-ACC-038）：每个注册目标一个循环，结果经 noteRegResult 聚合——
+// 不直接发 OnRegisterState，避免多个循环各自发状态互相覆盖。
 func (p *Phone) registerLoop(ctx context.Context, acc config.Account, kickCh <-chan string) {
+	key := config.RegistrarKey(acc)
 	backoff := time.Second
 	expires := acc.Expires // 注册到期时间（REQ-ACC-018），服务端返回值优先
 
@@ -1216,13 +1312,13 @@ func (p *Phone) registerLoop(ctx context.Context, acc config.Account, kickCh <-c
 		}
 		gotExpires, err := p.doRegister(ctx, acc)
 		if err != nil {
-			p.sink.OnRegisterState(core.RegFailed, err.Error())
-			logx.Logger().Warn("注册失败，将重试", "err", err, "backoff", backoff.String())
+			p.noteRegResult(key, regResult{ok: false, reason: err.Error()})
+			logx.Logger().Warn("注册失败，将重试", "server", acc.Server, "err", err, "backoff", backoff.String())
 			select {
 			case <-time.After(backoff):
 			case reason := <-kickCh:
 				// 网络恢复/休眠唤醒等：跳过退避立即重试
-				logx.Logger().Info("收到重新注册信号，跳过退避立即重试", "reason", reason)
+				logx.Logger().Info("收到重新注册信号，跳过退避立即重试", "server", acc.Server, "reason", reason)
 			case <-ctx.Done():
 				return
 			}
@@ -1233,11 +1329,11 @@ func (p *Phone) registerLoop(ctx context.Context, acc config.Account, kickCh <-c
 		}
 		backoff = time.Second
 		expires = gotExpires
-		p.sink.OnRegisterState(core.RegRegistered, "")
+		p.noteRegResult(key, regResult{ok: true})
 		// 日志携带本次注册的 Contact 地址，便于确认 STUN 公网地址是否
 		// 已生效（Contact host 为公网 IP 即 STUN 生效）
 		contact := p.contactFor(acc)
-		logx.Logger().Info("注册成功", "expires", expires, "contact", contact.String())
+		logx.Logger().Info("注册成功", "server", acc.Server, "expires", expires, "contact", contact.String())
 		// 注册成功立即补发一次 UDP 监听端口映射保活（NAT 场景下让对端的
 		// in-dialog 请求能打到监听端口，见 udpkeepalive.go）
 		p.kickUDPMapping()
@@ -1249,36 +1345,156 @@ func (p *Phone) registerLoop(ctx context.Context, acc config.Account, kickCh <-c
 		case <-time.After(renew):
 			// 继续循环重新注册
 		case reason := <-kickCh:
-			logx.Logger().Info("收到重新注册信号，立即重新注册", "reason", reason)
+			logx.Logger().Info("收到重新注册信号，立即重新注册", "server", acc.Server, "reason", reason)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-// doRegister 发送一次 REGISTER（含 Digest 认证），成功返回 expires。
-func (p *Phone) doRegister(ctx context.Context, acc config.Account) (int, error) {
-	return p.sendRegister(ctx, acc, acc.Expires)
+// noteRegResult 记录单个注册目标的结果并聚合发布全局注册状态（REQ-ACC-038）：
+// 任一目标成功 → 已注册；全部目标都回报过且无一成功 → 注册失败；否则保持「注册中」
+// （Register 里已先发一次 registering）。
+func (p *Phone) noteRegResult(key string, r regResult) {
+	p.regMu.Lock()
+	if p.regs == nil {
+		p.regs = make(map[string]regResult)
+	}
+	p.regs[key] = r
+	any := false
+	var reasons []string
+	for _, v := range p.regs {
+		if v.ok {
+			any = true
+			break
+		}
+	}
+	if !any {
+		for _, v := range p.regs {
+			if !v.ok {
+				reasons = append(reasons, v.reason)
+			}
+		}
+	}
+	reported := len(p.regs)
+	p.regMu.Unlock()
+
+	p.mu.Lock()
+	total := len(p.registrars)
+	p.mu.Unlock()
+
+	if any {
+		p.sink.OnRegisterState(core.RegRegistered, "")
+	} else if total > 0 && reported >= total {
+		p.sink.OnRegisterState(core.RegFailed, strings.Join(reasons, "; "))
+	}
 }
 
-// sendRegister 发送 REGISTER，expires=0 表示注销。成功返回服务端 expires。
-// 走完整路径（发布注册状态、记录心跳对端）。
-func (p *Phone) sendRegister(ctx context.Context, acc config.Account, expires int) (int, error) {
-	return p.sendRegisterOpts(ctx, acc, expires, sendRegisterOpts{})
+// roundRobinRegistrar 轮询选择一个**已注册**的服务器（REQ-ACC-038）：各服务器
+// 对等、无主从，out-of-dialog 出站（新呼叫 / MSP_HEARTBEAT / MSP_ACTION）都从
+// 已注册目标里按序轮流选择。返回 ok=false 表示还没有任何服务器注册成功——
+// **不能向未注册的服务器出站**，调用方应直接失败，不退回某个"主账户"。
+//
+// 「优先使用主节点」（account.preferPrimary）开启时改变选择口径：主节点只要
+// 注册上了，主动出站一律走主节点；只有主节点未注册，才在已注册的备用节点里轮询。
+func (p *Phone) roundRobinRegistrar() (config.Account, bool) {
+	p.mu.Lock()
+	registrars := append([]config.Account(nil), p.registrars...)
+	if len(registrars) == 0 {
+		registrars = []config.Account{p.acc}
+	}
+	preferPrimary := p.acc.PreferPrimary
+	p.mu.Unlock()
+
+	p.regMu.Lock()
+	regs := make(map[string]regResult, len(p.regs))
+	for k, v := range p.regs {
+		regs[k] = v
+	}
+	p.regMu.Unlock()
+
+	// 优先主节点：主节点已注册 → 恒走主节点；主节点未注册 → 只在备用节点里轮询。
+	if preferPrimary && len(registrars) > 0 {
+		primary := registrars[0]
+		if r, ok := regs[config.RegistrarKey(primary)]; ok && r.ok {
+			return primary, true
+		}
+		registrars = registrars[1:]
+	}
+
+	registered := make([]config.Account, 0, len(registrars))
+	for _, ra := range registrars {
+		if r, ok := regs[config.RegistrarKey(ra)]; ok && r.ok {
+			registered = append(registered, ra)
+		}
+	}
+	if len(registered) == 0 {
+		return config.Account{}, false
+	}
+	n := p.rr.Add(1) - 1
+	return registered[int(n)%len(registered)], true
+}
+
+// RegistrarStates 返回各注册目标的注册状态（REQ-ACC-038），供核心层在
+// register.state 事件与 State() 快照里下发——界面/网页据此悬浮显示「哪些
+// 服务器注册上了」（绿 √ / 红 ×）。电话层未注册时返回空列表。
+func (p *Phone) RegistrarStates() []core.RegistrarStatus {
+	p.mu.Lock()
+	registrars := p.registrars
+	if len(registrars) == 0 {
+		registrars = []config.Account{p.acc}
+	}
+	p.mu.Unlock()
+
+	p.regMu.Lock()
+	regs := make(map[string]regResult, len(p.regs))
+	for k, v := range p.regs {
+		regs[k] = v
+	}
+	p.regMu.Unlock()
+
+	out := make([]core.RegistrarStatus, 0, len(registrars))
+	for _, acc := range registrars {
+		host := strings.TrimSpace(acc.Server)
+		if host == "" {
+			continue
+		}
+		server := host
+		if acc.Port != 0 && acc.Port != config.DefaultPortForTransport(acc.Transport) {
+			server = net.JoinHostPort(host, strconv.Itoa(acc.Port))
+		}
+		st := core.RegistrarStatus{Server: server, Domain: acc.Domain}
+		if r, ok := regs[config.RegistrarKey(acc)]; ok {
+			st.OK = r.ok
+			st.Reason = r.reason
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// doRegister 发送一次 REGISTER（含 Digest 认证），成功返回 expires。
+// 不发布注册状态（多注册聚合由 registerLoop 的 noteRegResult 统一发）。
+func (p *Phone) doRegister(ctx context.Context, acc config.Account) (int, error) {
+	return p.sendRegisterOpts(ctx, acc, acc.Expires, sendRegisterOpts{noReport: true})
 }
 
 // sendRegisterOpts REGISTER 的可选行为：
-//   - silent：**不发注册状态、不通知心跳对端**——换账号时给旧账号发
+//   - silent：**不发注册状态、不通知对端**——换账号时给旧账号发
 //     expires=0 注销用（见 Register）：复用普通路径会让界面闪一下"未注册"、
-//     还会把旧的注册服务器地址记进心跳判定（REQ-ACC-021）。
+//     还会把旧的注册服务器地址记进来源判定；
+//   - noReport：**不发布 OnRegisterState**——多注册的每个目标循环自己聚合发布，
+//     不让单个循环直接发「注册中/已注册/失败」（但仍记录对端来源，供来源校验）。
 type sendRegisterOpts struct {
-	silent bool
+	silent   bool
+	noReport bool
 }
 
-// sameRegistrar 两个账户配置是否指向**同一个注册身份**（服务器/端口/传输/
-// 账号/认证 ID 都相同）。换账号判定用它：纯改密码、显示名、STUN、域名等
-// 重注册不打扰服务端。
-func sameRegistrar(a, b config.Account) bool {
+// sameRegistrarSet 两个账户配置的**注册身份**是否完全相同（账号/认证 ID +
+// 注册目标集合：服务器/端口/传输 + 备用服务器列表）。换账号判定用它：纯改密码、
+// 显示名、STUN、域名等重注册不打扰服务端；改账号/认证 ID 或增删备用服务器
+// 则要注销旧绑定。
+func sameRegistrarSet(a, b config.Account) bool {
 	authA, authB := a.AuthUser, b.AuthUser
 	if authA == "" {
 		authA = a.Account
@@ -1286,15 +1502,25 @@ func sameRegistrar(a, b config.Account) bool {
 	if authB == "" {
 		authB = b.Account
 	}
-	return a.Server == b.Server && a.Port == b.Port &&
-		config.NormalizeTransport(a.Transport) == config.NormalizeTransport(b.Transport) &&
-		a.Account == b.Account && authA == authB
+	if a.Account != b.Account || authA != authB {
+		return false
+	}
+	as, bs := a.Registrars(), b.Registrars()
+	if len(as) != len(bs) {
+		return false
+	}
+	for i := range as {
+		if config.RegistrarKey(as[i]) != config.RegistrarKey(bs[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // sendRegisterOpts 发送 REGISTER（可静默），expires=0 表示注销。
 // 成功返回服务端 expires。
 func (p *Phone) sendRegisterOpts(ctx context.Context, acc config.Account, expires int, opts sendRegisterOpts) (int, error) {
-	if !opts.silent {
+	if !opts.silent && !opts.noReport {
 		p.sink.OnRegisterState(core.RegRegistering, "")
 	}
 
@@ -1376,7 +1602,7 @@ func (p *Phone) sendRegisterOpts(ctx context.Context, acc config.Account, expire
 		switch res.StatusCode {
 		case 200:
 			if !opts.silent {
-				p.noteRegisterPeer(res.Source()) // 记注册服务器地址（心跳只统计它发来的探测）
+				p.noteRegisterPeer(acc, res.Source()) // 记注册服务器地址（来源校验 / 话务绑定）
 			}
 			return parseRegisterExpires(res, expires), nil
 		case 401, 407:
@@ -1389,7 +1615,7 @@ func (p *Phone) sendRegisterOpts(ctx context.Context, acc config.Account, expire
 			}
 			if res2.StatusCode == 200 {
 				if !opts.silent {
-					p.noteRegisterPeer(res2.Source())
+					p.noteRegisterPeer(acc, res2.Source())
 				}
 				// 认证路径同样解析服务端 expires（此前一律回退传入值：
 				// 配置 Expires=0 时 registerLoop 会算出 0 秒续注册周期而无限重发）

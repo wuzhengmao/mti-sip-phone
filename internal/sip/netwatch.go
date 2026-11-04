@@ -128,7 +128,7 @@ func (p *Phone) watchRegistration(ctx context.Context, acc config.Account, kickC
 		logx.Logger().Info("检测到需要立即重新注册", "reason", reason)
 		// 网络已变：STUN 公网地址与 TCP 信令连接都可能失效，先刷新再通知注册循环
 		p.refreshPublicIP(ctx, acc)
-		p.resetClientConnection(ctx, acc)
+		p.resetClientConnections(ctx)
 		p.sendKick(kickCh, reason)
 	}
 }
@@ -150,15 +150,17 @@ func (p *Phone) refreshPublicIP(ctx context.Context, acc config.Account) {
 }
 
 // applyPublicIP 写入 STUN 公网地址。必须校验上下文与账户：配置切换
-// （重新 Register）或退出后，旧看护的探测结果不得污染新账户的 Contact
-// （config.Account 是纯值结构，可直接比较）。
+// （重新 Register）或退出后，旧看护的探测结果不得污染新账户的 Contact。
+// 注：config.Account 现含 Slaves 切片，不能用 == 比较——这里按「注册身份 +
+// STUN 配置」逐字段比较（STUN 相关字段才影响 publicIP 的适用性）。
 func (p *Phone) applyPublicIP(ctx context.Context, acc config.Account, ip string) {
 	if ctx.Err() != nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.acc != acc {
+	if p.acc.Server != acc.Server || p.acc.Account != acc.Account ||
+		p.acc.STUNEnabled != acc.STUNEnabled || p.acc.STUNServer != acc.STUNServer {
 		return
 	}
 	p.publicIP = ip
@@ -192,6 +194,20 @@ func (p *Phone) resetClientConnection(ctx context.Context, acc config.Account) {
 		return
 	}
 	logx.Logger().Info("网络变化：已丢弃旧信令连接，下次注册重新建连", "transport", tr, "remote", addr)
+}
+
+// resetClientConnections 网络变化后丢弃**所有注册目标**（TCP/TLS）的旧连接
+//（多注册 REQ-ACC-038：每个服务器各有一条连接，都要丢）。
+func (p *Phone) resetClientConnections(ctx context.Context) {
+	p.mu.Lock()
+	registrars := p.registrars
+	if len(registrars) == 0 {
+		registrars = []config.Account{p.acc}
+	}
+	p.mu.Unlock()
+	for _, ra := range registrars {
+		p.resetClientConnection(ctx, ra)
+	}
 }
 
 // serverConnKey 解析 sipgo 连接池里本注册所用连接的键（"IP:端口"）。

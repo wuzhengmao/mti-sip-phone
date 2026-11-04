@@ -1,10 +1,12 @@
 package sip
 
 import (
+	"net"
 	"reflect"
 	"unsafe"
 
 	"github.com/emiago/sipgo"
+	"github.com/emiago/sipgo/sip"
 
 	"mti-sip-phone/internal/logx"
 )
@@ -42,4 +44,37 @@ func setClientHost(client *sipgo.Client, host string) {
 		return
 	}
 	logx.Logger().Info("Via 声明地址已切换", "host", host)
+}
+
+// setClientConnAddr 动态设置 sipgo Client 的出站**本地绑定地址**（`connAddr`，
+// REQ-ACC-038 修订：UDP 下让出站请求复用本地 SIP 监听 socket，源端口 = 监听
+// 端口，服务端 received/rport 重写后的 Contact 才指向监听端口）。
+//
+// host 为空/port 为 0 时清空（回退 sipgo 默认临时端口，TCP/TLS 用）。sipgo 把
+// `connAddr` 在**每次构建请求时**写进 `req.Laddr`，传输层据此优先
+// `GetConnection(laddr)` 复用监听 socket，故反射写入即可运行中切换——
+// 与 setClientHost / setClientRPort 同一手法、同一降级策略（版本不匹配只告警）。
+func setClientConnAddr(client *sipgo.Client, host string, port int) {
+	if client == nil {
+		return
+	}
+	v := reflect.ValueOf(client)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	f := v.FieldByName("connAddr")
+	if !f.IsValid() || !f.CanAddr() {
+		logx.Logger().Warn("sipgo 版本不匹配，出站复用监听 socket 不可用（回退临时端口）")
+		return
+	}
+	addr := sip.Addr{Port: port, Hostname: host}
+	if host != "" {
+		addr.IP = net.ParseIP(host)
+	}
+	*(*sip.Addr)(unsafe.Pointer(f.UnsafeAddr())) = addr
+	if host == "" {
+		logx.Logger().Info("出站已回退临时端口（非 UDP 传输）")
+		return
+	}
+	logx.Logger().Info("出站将复用本地 SIP 监听 socket", "host", host, "port", port)
 }

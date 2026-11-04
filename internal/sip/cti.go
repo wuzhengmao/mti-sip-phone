@@ -80,7 +80,7 @@ func (p *Phone) SendCTICommand(action string, params map[string]any) (string, er
 // none/normal/dial_out/monitor）、置忙状态、话后整理态（isWork）、离席（isLeave）、
 // 显示名与话务状态，expires 告诉 CTI「这么久没收到新心跳就当作不可用」。
 // 心跳没有业务回执；**SIP 响应不是 200 时返回 core.ErrCTINotifyUnsupported**
-//（服务端不支持 NOTIFY，核心层据此停止心跳并退出坐席模式）。
+// （服务端不支持 NOTIFY，核心层据此停止心跳并退出坐席模式）。
 func (p *Phone) SendHeartbeat(agentMode string, isBusy bool, displayName, status string, isWork, leave bool, expires time.Duration) error {
 	p.ctiMu.Lock()
 	p.ctiHeartbeatSeq++
@@ -196,11 +196,12 @@ func (p *Phone) sendCTINotifyWait(event string, payload []byte) (int, error) {
 // 时域名只用于 URI（报文仍发服务器）。From/To 都是本机 AOR（与协议示例一致），
 // From 必须带 tag。
 func (p *Phone) startCTINotify(event string, payload []byte) (sip.ClientTransaction, context.CancelFunc, error) {
-	p.mu.Lock()
-	acc := p.acc
-	p.mu.Unlock()
-	if acc.Server == "" || acc.Account == "" {
-		return nil, func() {}, errors.New("未配置账户")
+	// 各服务器对等、无主从（REQ-ACC-038 修订）：out-of-dialog NOTIFY（MSP_HEARTBEAT /
+	// MSP_ACTION）轮询选择一个**已注册**服务器发送，让两个域都能收到心跳/指令。
+	// 没有任何服务器注册成功时直接失败（不能向未注册的服务器出站）。
+	acc, ok := p.roundRobinRegistrar()
+	if !ok {
+		return nil, func() {}, errors.New("尚未注册到任何 SIP 服务器")
 	}
 
 	rhost := uriHostOf(acc)

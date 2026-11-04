@@ -47,6 +47,89 @@ type Account struct {
 	DisplayName  string `json:"displayName"` // 显示名
 	PasswordEnc  string `json:"passwordEnc"` // 加密后的密码（base64，AES-256-GCM）
 	Password     string `json:"-"`           // 明文密码，仅内存，不落盘
+
+	// Slaves 备用 SIP 服务器（多注册，REQ-ACC-038）：账号/密码/认证 ID/显示名/
+	// 传输/STUN/SRTP 等全部共享主账户，只有服务器地址（与可选端口、SIP 域名）
+	// 单独指定。注册时同时向主账户与全部备用服务器注册，任一成功即视为已注册。
+	Slaves []Slave `json:"slaves,omitempty"`
+	// PreferPrimary 优先使用主节点（默认 false，REQ-ACC-038 修订）：勾选后主动
+	// 发起的 out-of-dialog 出站请求（新呼叫 / MSP_HEARTBEAT / MSP_ACTION）只要
+	// 主节点已注册就走主节点；仅当主节点未注册时，才在已注册的备用节点里轮询。
+	PreferPrimary bool `json:"preferPrimary,omitempty"`
+}
+
+// Slave 备用 SIP 服务器（多注册）。Port 为 0 时沿用主账户端口（仍为 0 则按传输
+// 默认 5060/5061）；Domain 为可选 SIP 域名（URI 主机），留空 = 用 Server 作域名。
+type Slave struct {
+	Server string `json:"server"` // SIP 服务器地址（host），如 10.168.4.41
+	Port   int    `json:"port"`   // 0 = 用主账户端口（或按传输默认）
+	Domain string `json:"domain"` // 可选 SIP 域名；留空 = 用 Server
+}
+
+// NormalizeSlaves 规范化备用服务器列表：去掉空白，丢弃地址为空的条目，
+// 并按 RegistrarKey 去重（含与主账户重复的）。
+func (a Account) NormalizeSlaves() []Slave {
+	seen := map[string]bool{RegistrarKey(a): true}
+	out := make([]Slave, 0, len(a.Slaves))
+	for _, s := range a.Slaves {
+		server := strings.TrimSpace(s.Server)
+		if server == "" {
+			continue
+		}
+		s.Server = server
+		s.Domain = NormalizeDomain(s.Domain)
+		c := a
+		c.Server = s.Server
+		c.Domain = s.Domain
+		c.Port = s.Port
+		if c.Port == 0 {
+			c.Port = a.Port
+		}
+		if c.Port == 0 {
+			c.Port = DefaultPortForTransport(c.Transport)
+		}
+		k := RegistrarKey(c)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// Registrars 展开注册目标列表：主账户在前，其后是每个备用服务器。每个条目都是
+// 完整 Account（账号/密码/认证/传输/STUN/SRTP 等共享主账户，只有 Server/Port/
+// Domain 单独指定），供注册/呼叫/保活按服务器分别处理。地址为空或与主账户重复的
+// 备用服务器被跳过。
+func (a Account) Registrars() []Account {
+	out := []Account{a}
+	for _, s := range a.NormalizeSlaves() {
+		c := a
+		c.Server = s.Server
+		c.Domain = s.Domain
+		c.Port = s.Port
+		if c.Port == 0 {
+			c.Port = a.Port
+		}
+		if c.Port == 0 {
+			c.Port = DefaultPortForTransport(c.Transport)
+		}
+		c.Slaves = nil // 展开后不再递归
+		out = append(out, c)
+	}
+	return out
+}
+
+// RegistrarKey 注册目标的唯一键（transport://server:port），用于去重与
+// 注册状态跟踪（多个备用服务器分别注册时按它对齐状态）。
+func RegistrarKey(a Account) string {
+	port := a.Port
+	if port == 0 {
+		port = DefaultPortForTransport(a.Transport)
+	}
+	return strings.ToLower(NormalizeTransport(a.Transport)) + "://" +
+		strings.ToLower(strings.TrimSpace(a.Server)) + ":" + strconv.Itoa(port)
 }
 
 // WSConfig 本地 WebSocket 服务配置。
@@ -420,6 +503,8 @@ func Load(path string) (*Config, error) {
 	}
 	// 传输协议：空或非法值一律回退 udp（旧配置没有 tls，零值行为不变）
 	cfg.Account.Transport = NormalizeTransport(cfg.Account.Transport)
+	// 备用服务器规范化（去空白、丢空、去重）
+	cfg.Account.Slaves = cfg.Account.NormalizeSlaves()
 	if cfg.WS.Port == 0 {
 		cfg.WS.Port = 8765
 	}

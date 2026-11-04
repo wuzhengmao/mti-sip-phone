@@ -18,6 +18,10 @@ window.SipApp.views = window.SipApp.views || {};
   // fillURIFromConfig 里取配置快照缓存，设置页（或其它网页）保存新站点后
   // 经 store 的 updateConfig 事件即时刷新。
   let lastUpdateSite = '';
+  // 当前配置里的备用服务器（REQ-ACC-038）：生成拉起链接时自动附加 slave= 参数。
+  let lastSlaves = [];
+  // 优先使用主节点（REQ-ACC-038 修订）：勾选时自动附加 preferprimary=1。
+  let lastPreferPrimary = false;
 
   const TRANSPORTS = [
     { value: 'udp', label: 'udp（默认）' },
@@ -102,6 +106,9 @@ window.SipApp.views = window.SipApp.views || {};
       $('uriInstance').value = store.state.instance || 0;
       // 更新站点（REQ-UPD-022）：配置里配了就自动附加到生成链接
       lastUpdateSite = String((snap.update && snap.update.url) || '').trim();
+      // 备用服务器（REQ-ACC-038）：配置里配了就自动附加 slave= 参数
+      lastSlaves = (a.slaves || []);
+      lastPreferPrimary = !!a.preferPrimary;
       if (a.passwordSet) {
         addLog('拉起链接', '已按当前配置生成（密码不下发，需要带密码时请手填一次再点「生成拉起链接」）');
       }
@@ -136,6 +143,14 @@ window.SipApp.views = window.SipApp.views || {};
     // 更新站点按当前配置自动附加（REQ-UPD-022）；百分号编码保证 URL 里的
     // :/&? 不破坏参数结构（服务端 Query().Get 自动解码）。
     if (lastUpdateSite) params.push('updatesite=' + encodeURIComponent(lastUpdateSite));
+    // 备用服务器（REQ-ACC-038）：每台一个 slave=host[:port]，端口缺省省略
+    //（软电话按主服务器端口沿用）。域名是配置里的扩展属性，URI 里不带。
+    (lastSlaves || []).forEach(function (s) {
+      if (!s || !s.server) return;
+      params.push('slave=' + encodeURIComponent(s.server + (s.port ? ':' + s.port : '')));
+    });
+    // 优先使用主节点（REQ-ACC-038 修订）：勾选时自动附加。
+    if (lastPreferPrimary) params.push('preferprimary=1');
     if (params.length) uri += '?' + params.join('&');
 
     const line = $('uriLine');

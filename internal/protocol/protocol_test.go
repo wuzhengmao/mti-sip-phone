@@ -115,6 +115,64 @@ func TestParseSipURLUpdateSite(t *testing.T) {
 	}
 }
 
+// TestParseSipURLSlaves sip:// 的 slave 查询参数（可重复，REQ-ACC-038）：
+// 每个 slave=host[:port]，端口缺省 0（用主服务器端口）；空/无端口项跳过。
+func TestParseSipURLSlaves(t *testing.T) {
+	acc, err := ParseSipURL("sip://2999:pwd@10.168.4.40:5060?slave=10.168.4.41&slave=10.168.4.42:5061&slave=")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(acc.Slaves) != 2 {
+		t.Fatalf("期望 2 个备用服务器（空项跳过），实际 %d", len(acc.Slaves))
+	}
+	if acc.Slaves[0].Server != "10.168.4.41" || acc.Slaves[0].Port != 0 {
+		t.Errorf("备用服务器 0 错误：%+v", acc.Slaves[0])
+	}
+	if acc.Slaves[1].Server != "10.168.4.42" || acc.Slaves[1].Port != 5061 {
+		t.Errorf("备用服务器 1 错误：%+v", acc.Slaves[1])
+	}
+	// 无 slave 参数 → 空列表
+	acc2, err := ParseSipURL("sip://2999:pwd@10.168.4.40:5060")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(acc2.Slaves) != 0 {
+		t.Errorf("无 slave 参数应返回空列表，实际 %d", len(acc2.Slaves))
+	}
+}
+
+// TestParseSipURLPreferPrimary sip:// 的 preferprimary 查询参数（REQ-ACC-038 修订）：
+// 1/true 等真值 → 优先使用主节点；缺省/非法保持 false。
+func TestParseSipURLPreferPrimary(t *testing.T) {
+	for _, raw := range []string{
+		"sip://2999:pwd@10.168.4.40:5060?preferprimary=1",
+		"sip://2999:pwd@10.168.4.40:5060?preferprimary=true",
+		"sip://2999:pwd@10.168.4.40:5060?preferprimary=TRUE",
+	} {
+		acc, err := ParseSipURL(raw)
+		if err != nil {
+			t.Fatalf("解析 %q 失败: %v", raw, err)
+		}
+		if !acc.PreferPrimary {
+			t.Errorf("%q 应解析为 PreferPrimary=true", raw)
+		}
+	}
+	// 缺省 / 非法值 → false
+	for _, raw := range []string{
+		"sip://2999:pwd@10.168.4.40:5060",
+		"sip://2999:pwd@10.168.4.40:5060?preferprimary=0",
+		"sip://2999:pwd@10.168.4.40:5060?preferprimary=maybe",
+	} {
+		acc, err := ParseSipURL(raw)
+		if err != nil {
+			t.Fatalf("解析 %q 失败: %v", raw, err)
+		}
+		if acc.PreferPrimary {
+			t.Errorf("%q 应解析为 PreferPrimary=false", raw)
+		}
+	}
+}
+
 // TestSplitURL Windows 协议拉起时参数带启动器前缀，sip:// 与 sips:// 都要能识别
 // （sips:// 里不含 "sip://" 子串，前缀匹配必须两个都查，且 sips 在前）。
 func TestSplitURL(t *testing.T) {

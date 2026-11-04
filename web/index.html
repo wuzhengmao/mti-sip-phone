@@ -22,7 +22,7 @@
     <!-- 坐席模式徽章（REQ-ACC-028 / REQ-ACC-034）：空闲绿、置忙黄，点击切换 -->
     <span id="agentBadge" class="badge" hidden></span>
     <span id="connBadge" class="badge">未连接</span>
-    <span id="regBadge" class="badge">未注册</span>
+    <span class="badge-wrap" id="regBadgeWrap"><span id="regBadge" class="badge">未注册</span><span id="regTip" class="badge-tip"></span></span>
     <span class="acct" id="localAccount">—</span>
     <!-- 全局更新提醒（REQ-UPD-020）：有可用更新/正在下载/待安装/失败时出现，
          点它跳到「通话」页并把那张更新卡片滚进视野——原来只有通话页能看到。 -->
@@ -273,6 +273,8 @@
         <div class="field"><label>出站代理（可选）</label><input type="text" id="accProxy" placeholder="host:port"></div>
         <div class="field"><label>STUN 服务器</label><input type="text" id="accStunServer"></div>
       </div>
+      <div class="field"><label>备用服务器（多注册，每行 host[:端口][;域名]）</label><textarea id="accSlaves" rows="3" placeholder="每行一个：host[:端口][;域名]&#10;如 10.168.4.41&#10;10.168.4.42:5061"></textarea></div>
+      <label class="chk"><input type="checkbox" id="accPreferPrimary"> 优先使用主节点</label>
       <label class="chk"><input type="checkbox" id="accRPort"> 启用 rport（NAT 穿透）</label>
       <label class="chk"><input type="checkbox" id="accStunEnabled"> 启用 STUN 公网地址探测</label>
       <label class="chk"><input type="checkbox" id="accTLSVerify"> 校验服务器证书（仅 TLS）</label>

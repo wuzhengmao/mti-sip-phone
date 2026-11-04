@@ -15,7 +15,7 @@ window.SipApp = window.SipApp || {};
   const listeners = {};      // eventName -> [fn]
   const state = {
     connected: false,
-    register: { state: 'unregistered', account: '', reason: '' },
+    register: { state: 'unregistered', account: '', reason: '', registrars: [] },
     call: null,              // 当前通话（core.Call 快照，含 video/audio 字段）
     // 通话面板快照（call.panel，REQ-WS-023）：页面据此直接渲染面板，
     // {callPanel,conferencePanel}；无通话时两个面板为 null（坐席状态走 cti.agent）。
@@ -169,6 +169,7 @@ window.SipApp = window.SipApp || {};
         state: data.state || 'unregistered',
         account: data.account || '',
         reason: data.reason || '',
+        registrars: data.registrars || [],
       };
       emit('register', state.register);
     });

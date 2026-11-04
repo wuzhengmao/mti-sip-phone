@@ -146,6 +146,60 @@ func TestDomainNormalize(t *testing.T) {
 	}
 }
 
+// TestAccountRegistrars 多注册展开：主账户在前，备用服务器补 Server/Port/Domain，
+// 空地址与重复条目跳过（REQ-ACC-038）。
+func TestAccountRegistrars(t *testing.T) {
+	base := Account{
+		Server: "10.168.4.40", Port: 5060, Transport: TransportUDP,
+		Account: "2999", AuthUser: "2999",
+		Slaves: []Slave{
+			{Server: "10.168.4.41"},                             // 端口继承主账户
+			{Server: "10.168.4.42", Port: 5061},                 // 端口单独
+			{Server: "10.168.4.43", Domain: "voip.example.com"}, // 独立域名
+			{Server: "   "},                                     // 空地址：跳过
+			{Server: "10.168.4.41"},                             // 与第一个重复：跳过
+		},
+	}
+	regs := base.Registrars()
+	if len(regs) != 4 {
+		t.Fatalf("期望 4 个注册目标，实际 %d", len(regs))
+	}
+	if regs[0].Server != "10.168.4.40" || regs[0].Account != "2999" {
+		t.Errorf("主账户不匹配：%+v", regs[0])
+	}
+	if regs[1].Server != "10.168.4.41" || regs[1].Port != 5060 || regs[1].Account != "2999" {
+		t.Errorf("备用服务器端口继承错误：%+v", regs[1])
+	}
+	if regs[2].Server != "10.168.4.42" || regs[2].Port != 5061 {
+		t.Errorf("备用服务器端口错误：%+v", regs[2])
+	}
+	if regs[3].Server != "10.168.4.43" || regs[3].Domain != "voip.example.com" {
+		t.Errorf("备用服务器域名错误：%+v", regs[3])
+	}
+	// 展开后的备用服务器不应再带 Slaves（防递归）
+	for i := 1; i < len(regs); i++ {
+		if len(regs[i].Slaves) != 0 {
+			t.Errorf("备用服务器 %d 不应再带 Slaves", i)
+		}
+	}
+}
+
+// TestRegistrarKey 注册目标唯一键（transport://server:port）。
+func TestRegistrarKey(t *testing.T) {
+	a := Account{Server: "10.168.4.40", Port: 5060, Transport: TransportUDP}
+	b := Account{Server: "10.168.4.40", Port: 5060, Transport: TransportTLS}
+	c := Account{Server: "10.168.4.40", Transport: TransportUDP} // Port 0 → 默认 5060
+	if RegistrarKey(a) != "udp://10.168.4.40:5060" {
+		t.Errorf("RegistrarKey(a) = %q", RegistrarKey(a))
+	}
+	if RegistrarKey(a) == RegistrarKey(b) {
+		t.Errorf("不同传输不应同键")
+	}
+	if RegistrarKey(a) != RegistrarKey(c) {
+		t.Errorf("Port 0 应按默认端口折叠：%q vs %q", RegistrarKey(a), RegistrarKey(c))
+	}
+}
+
 // TestPublicIPNormalize 声明 IP 只接受 IP 字面量（SDP 的 c= 行必须写 IP）。
 func TestPublicIPNormalize(t *testing.T) {
 	cases := map[string]string{
