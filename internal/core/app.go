@@ -260,6 +260,11 @@ func (a *App) UpdateAccount(acc config.Account) error {
 		}
 	}
 	logx.Logger().Info("账户配置已更新", "account", acc.Account, "server", acc.Server)
+	// 账户配置变化统一从这里广播（URI 拉起 / 网页 PatchAccount / 托盘登录注销 /
+	// 桌面保存都走 UpdateAccount）：网页配置页与桌面配置页据此同步表单。
+	a.bus.Publish("system.config", map[string]any{
+		"section": "account", "values": a.ConfigSnapshot().Account,
+	})
 	if a.tel == nil {
 		return nil
 	}

@@ -262,11 +262,8 @@ func (a *App) SetRegistered(on bool) error {
 	if err := a.UpdateAccount(acc); err != nil {
 		return err
 	}
-	// 广播账户配置变化（与 PatchAccount 一致）：网页配置页的「启用账户」
-	// 勾选随之自动更新（桌面配置页在 register.state 事件里同步）。
-	a.bus.Publish("system.config", map[string]any{
-		"section": "account", "values": a.ConfigSnapshot().Account,
-	})
+	// 账户配置变化由 UpdateAccount 统一广播 system.config（section=account），
+	// 网页配置页的「启用账户」勾选随之自动更新（桌面配置页也在该事件里同步）。
 	return nil
 }
 
@@ -385,8 +382,8 @@ func (a *App) PatchAccount(p AccountPatch) (AccountSnapshot, error) {
 	if err := a.UpdateAccount(acc); err != nil {
 		return AccountSnapshot{}, err
 	}
+	// 账户配置变化由 UpdateAccount 统一广播 system.config（section=account）。
 	snap := a.ConfigSnapshot()
-	a.bus.Publish("system.config", map[string]any{"section": "account", "values": snap.Account})
 	return snap.Account, nil
 }
 

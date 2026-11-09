@@ -85,6 +85,8 @@ window.SipApp = window.SipApp || {};
   // 从配置派生出 sip:// 拉起地址交给引导器：软电话退出后断线重连时用它重新拉起。
   // 密码拿不到（配置快照只回 passwordSet），故不带密码——软电话自身配置里已有密码，
   // 拉起只会重新启用账户。instance 取本进程槽位（0 = 主实例）。
+  // **备用服务器与优先主节点必须一并带上**（REQ-ACC-038）：sip:// 拉起是整份覆盖
+  // 账户语义，不带 slave=/preferprimary= 会把已保存的备用服务器/优先主节点清掉。
   function syncLaunchUri(instance) {
     sdk.getConfig().then(function (cfg) {
       const a = cfg && cfg.account;
@@ -94,6 +96,11 @@ window.SipApp = window.SipApp || {};
       const params = [];
       if (a.transport === 'tcp') params.push('transport=tcp');
       if (instance > 0) params.push('instance=' + instance);
+      (a.slaves || []).forEach(function (s) {
+        if (!s || !s.server) return;
+        params.push('slave=' + encodeURIComponent(s.server + (s.port ? ':' + s.port : '')));
+      });
+      if (a.preferPrimary) params.push('preferprimary=1');
       SipPhoneBootstrap.setLaunchUri(uri + (params.length ? '?' + params.join('&') : ''));
     }).catch(function () {
       // 拿不到配置就跳过：断线重连仍能探测，只是无法自动拉起

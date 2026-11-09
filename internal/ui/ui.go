@@ -2111,6 +2111,16 @@ func (a *App) onEvent(ev core.Event) {
 			a.loadUpdateConfigIntoForm()
 		}
 
+	case "system.config":
+		// 配置变化（账户由 URI 拉起 / 网页 PatchAccount / 托盘登录注销 / 本页保存，
+		// 均经 core.UpdateAccount 广播）：账户段回填配置页表单，让 GUI 配置页与
+		// 网页控制台保持一致（REQ-ACC-024）。
+		if data, ok := ev.Data.(map[string]any); ok {
+			if section, _ := data["section"].(string); section == "account" {
+				a.loadAccountIntoForm()
+			}
+		}
+
 	case "system.autoAnswer":
 		// 自动接听开关变化（本地按钮点击或网页 system.setAutoAnswer 设置）
 		if st, ok := ev.Data.(core.AutoAnswerState); ok {

@@ -9,13 +9,15 @@ import (
 )
 
 // newTestApp 构造最小可用的 core.App：tel 为 nil（UpdateAccount 仍落盘、跳过注册），
-// 配置保存路径指向临时目录（UpdateAccount / SetUpdateConfig 都写它）。
-func newTestApp(t *testing.T) (*core.App, *config.Config) {
+// 配置保存路径指向临时目录（UpdateAccount / SetUpdateConfig 都写它）。返回的
+// path 用于落盘后重新 Load 校验。
+func newTestApp(t *testing.T) (*core.App, *config.Config, string) {
 	t.Helper()
 	cfg := config.Default()
 	app := core.New(cfg, nil, core.NewBus())
-	app.SetConfigPath(filepath.Join(t.TempDir(), "config.json"))
-	return app, cfg
+	path := filepath.Join(t.TempDir(), "config.json")
+	app.SetConfigPath(path)
+	return app, cfg, path
 }
 
 // TestHandleLaunchArgsUpdateSite sip:// 链接的 updatesite 参数（REQ-UPD-022）：
@@ -25,7 +27,7 @@ func TestHandleLaunchArgsUpdateSite(t *testing.T) {
 	const site = "https://update.wuzm219.cn"
 
 	// 带 updatesite：只改 URL，其余字段保持原值
-	app, cfg := newTestApp(t)
+	app, cfg, _ := newTestApp(t)
 	if err := app.SetUpdateConfig(config.UpdateConfig{URL: "", AppID: "x-app", IntervalMins: 30, Prerelease: true}); err != nil {
 		t.Fatalf("预置更新配置失败: %v", err)
 	}
@@ -42,7 +44,7 @@ func TestHandleLaunchArgsUpdateSite(t *testing.T) {
 	}
 
 	// 省略 updatesite：更新配置一字不变
-	app2, cfg2 := newTestApp(t)
+	app2, cfg2, _ := newTestApp(t)
 	if err := app2.SetUpdateConfig(config.UpdateConfig{URL: site, AppID: "x-app", IntervalMins: 30, Prerelease: true}); err != nil {
 		t.Fatalf("预置更新配置失败: %v", err)
 	}
@@ -53,7 +55,7 @@ func TestHandleLaunchArgsUpdateSite(t *testing.T) {
 	}
 
 	// 非法站点（ftp://）：更新配置不变，账户照常更新
-	app3, cfg3 := newTestApp(t)
+	app3, cfg3, _ := newTestApp(t)
 	if err := app3.SetUpdateConfig(config.UpdateConfig{URL: site, AppID: "x-app", IntervalMins: 30, Prerelease: true}); err != nil {
 		t.Fatalf("预置更新配置失败: %v", err)
 	}
@@ -67,7 +69,7 @@ func TestHandleLaunchArgsUpdateSite(t *testing.T) {
 	}
 
 	// 与 transport/instance 组合（带启动器前缀，模拟 Windows 协议拉起）
-	app4, cfg4 := newTestApp(t)
+	app4, cfg4, _ := newTestApp(t)
 	handleLaunchArgs(app4, cfg4,
 		[]string{"mti-sip-phone:sips://2999:pwd@10.168.4.40?transport=udp&instance=2&updatesite=" + site}, nil)
 	if got := app4.UpdateConfig(); got.URL != site {
@@ -80,7 +82,7 @@ func TestHandleLaunchArgsUpdateSite(t *testing.T) {
 // 链接带密码（含 ?password= 参数形式）时以链接为准。
 func TestHandleLaunchArgsKeepsPassword(t *testing.T) {
 	// 1. 已保存密码 + 链接无密码 → 保留原密码
-	app, cfg := newTestApp(t)
+	app, cfg, _ := newTestApp(t)
 	cfg.Account.Password = "stored-pwd"
 	handleLaunchArgs(app, cfg, []string{"sip://10.0.0.1:5060?account=1001&listen=8765"}, nil)
 	if cfg.Account.Password != "stored-pwd" {
@@ -91,10 +93,37 @@ func TestHandleLaunchArgsKeepsPassword(t *testing.T) {
 	}
 
 	// 2. 链接带查询参数密码 → 覆盖
-	app2, cfg2 := newTestApp(t)
+	app2, cfg2, _ := newTestApp(t)
 	cfg2.Account.Password = "stored-pwd"
 	handleLaunchArgs(app2, cfg2, []string{"sip://10.0.0.1:5060?account=1001&password=new-pwd"}, nil)
 	if cfg2.Account.Password != "new-pwd" {
 		t.Fatalf("链接带密码时应覆盖，实际 %q", cfg2.Account.Password)
+	}
+}
+
+// TestHandleLaunchArgsClearsSlaves 链接不传 slave= 时**必须清空**已保存的备用
+// 服务器（sip:// 拉起是整份覆盖账户语义）；带 slave= 时整份替换。
+func TestHandleLaunchArgsClearsSlaves(t *testing.T) {
+	// 1. 已有备用服务器 + 链接不带 slave → 清空（内存 + 落盘）
+	app, cfg, path := newTestApp(t)
+	cfg.Account.Slaves = []config.Slave{{Server: "10.0.0.2"}, {Server: "10.0.0.3"}}
+	handleLaunchArgs(app, cfg, []string{"sip://1001:pwd@10.0.0.1:5060"}, nil)
+	if len(cfg.Account.Slaves) != 0 {
+		t.Fatalf("链接不带 slave 应清空备用服务器（内存），实际 %+v", cfg.Account.Slaves)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("重新加载配置失败: %v", err)
+	}
+	if len(reloaded.Account.Slaves) != 0 {
+		t.Fatalf("链接不带 slave 应清空备用服务器（落盘），实际 %+v", reloaded.Account.Slaves)
+	}
+
+	// 2. 已有备用服务器 + 链接带 slave → 整份替换
+	app2, cfg2, _ := newTestApp(t)
+	cfg2.Account.Slaves = []config.Slave{{Server: "10.0.0.2"}}
+	handleLaunchArgs(app2, cfg2, []string{"sip://1001:pwd@10.0.0.1:5060?slave=10.0.0.3&slave=10.0.0.4:5061"}, nil)
+	if len(cfg2.Account.Slaves) != 2 || cfg2.Account.Slaves[0].Server != "10.0.0.3" || cfg2.Account.Slaves[1].Server != "10.0.0.4" {
+		t.Fatalf("链接带 slave 应整份替换，实际 %+v", cfg2.Account.Slaves)
 	}
 }
