@@ -22,6 +22,16 @@
   桌面保存四条路径共用），桌面配置页在 `system.config` 事件里回填账户表单，与
   网页控制台保持一致。
 
+### 构建与发布
+
+- **GitHub Actions 构建产物用完即删（省存储）**：`linux-binaries` / `darwin-binaries` /
+  `macos-dmg` 三个大产物（历史累计曾达 2.3 GB）不再长期滞留——CI 全量发布在
+  `publish` job 上传更新站点后由新增的 `cleanup` job 删除本次运行的产物；构建失败
+  或取消时同样清理已上传的产物；本地发布（`--darwin-ci`）则在 `release.sh` 下载完
+  darwin 产物后自行删除。产物 `retention-days` 从 14 天降到 1 天兜底（孤儿产物
+  最迟次日自动过期）。**第三方静态库走 `actions/cache`，不在清理之列**（保住首轮
+  之后的增量构建速度）；`macos-smoke` 调试产物很小，保留 14 天供失败排查。
+
 ## [1.0.22] - 2026-11-04
 
 ### 新增

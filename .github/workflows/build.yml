@@ -158,7 +158,7 @@ jobs:
             dist/sip-phone-no-ui-linux-amd64
             dist/sip-phone-no-ui-linux-arm64
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   # ---------------------------------------------------------------------------
   # macOS：两个架构的裸二进制 + universal DMG
@@ -318,7 +318,7 @@ jobs:
             dist/sip-phone-no-ui-darwin-amd64
             dist/sip-phone-no-ui-darwin-arm64
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
       # 首次安装用：universal DMG（完整版 + 无 UI 版各一个）
       - uses: actions/upload-artifact@v4
@@ -326,7 +326,7 @@ jobs:
           name: macos-dmg
           path: dist/macos/*.dmg
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
       # 冒烟测试的截图与运行日志（失败也上传，方便排查）
       - uses: actions/upload-artifact@v4
@@ -400,3 +400,33 @@ jobs:
           [ -n "$INPUT_CHANNEL" ] && args+=(--channel "$INPUT_CHANNEL")
           [ "$INPUT_MANDATORY" = "true" ] && args+=(--mandatory)
           ./scripts/release.sh "${args[@]}"
+
+  # ---------------------------------------------------------------------------
+  # 清理：上传到更新站点后（或构建失败/取消时）删除本次运行的构建产物 artifact，
+  # 避免大体积产物在 GitHub Actions 存储里累积（第三方库走 actions/cache，不在此列）。
+  # 本地发布流程（publish=false）的 darwin 产物由 release.sh 下载后自行删除，这里
+  # 不抢删——只在「CI 全量发布」或「失败/取消」时动手。
+  # ---------------------------------------------------------------------------
+  cleanup:
+    name: 清理构建产物
+    needs: [linux, macos, publish]
+    if: always() && ((inputs.publish == 'true' && inputs.build_linux == 'true') || failure() || cancelled())
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: 删除本次运行的构建产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          for name in linux-binaries darwin-binaries macos-dmg; do
+            ids="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+              --jq ".artifacts[] | select(.name == \"$name\") | .id" 2>/dev/null || true)"
+            for id in $ids; do
+              echo "删除 artifact $name (id=$id)"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null 2>&1 \
+                && echo "  已删除" || echo "  删除失败（忽略）"
+            done
+          done
+          echo "清理完成"

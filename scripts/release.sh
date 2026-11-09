@@ -223,6 +223,7 @@ GH_REF="${GH_REF:-}"
 GH_API="https://api.github.com"
 GH_BODY="$(mktemp)"
 CI_WORKDIR=""
+CI_RUN_ID=""
 cleanup_gh() {
     rm -f "$GH_BODY"
     if [ -n "$CI_WORKDIR" ]; then
@@ -386,6 +387,7 @@ collect_darwin_ci() {
         exit 1
     fi
     echo "运行 ID：$run_id${CI_SHA:+（$CI_SHA）}"
+    CI_RUN_ID="$run_id"
 
     run_status=""
     for i in $(seq 1 240); do
@@ -474,6 +476,42 @@ collect_darwin_ci() {
     cp -f "$full_dmg" "$ROOT/dist/macos-dmg-full.dmg"
     cp -f "$no_dmg" "$ROOT/dist/macos-dmg-no-ui.dmg"
     echo "已收进 dist/：darwin 裸二进制 ×4、DMG ×2（已另存 dist/macos-dmg-{full,no-ui}.dmg）"
+}
+
+# delete_darwin_artifacts 删除指定运行里 darwin-binaries / macos-dmg 两个 artifact。
+# 本地发布流程在 collect_darwin_ci 下载完成、产物已落进 dist/ 后调用，避免这两个
+# 大产物继续占 GitHub Actions 存储（第三方库走 actions/cache，不在此列）。
+# 失败/取消的清理由 workflow 的 cleanup job 负责；这里只尽力而为，删不掉也不影响发布。
+delete_darwin_artifacts() {
+    local run_id="$1" arts name id
+    [ -n "$run_id" ] || return 0
+    echo "清理 GitHub Actions 上的 darwin 构建产物（run $run_id）…"
+    gh_api GET "/repos/$GH_REPO/actions/runs/$run_id/artifacts"
+    if [ "$GH_CODE" != 200 ]; then
+        echo "  读取 artifact 列表失败（HTTP $GH_CODE），跳过清理" >&2
+        return 0
+    fi
+    # artifact 对象顺序 id → name → size_in_bytes（workflow_run.id 在 size 之后，
+    # 不污染配对，与 collect_darwin_ci 里同一份口径）
+    arts="$(awk '
+        /"id": [0-9]+,?$/ { id=$2; gsub(/,/,"",id) }
+        /"name": "[^"]+"/ { n=$2; gsub(/[",]/,"",n); cur=n }
+        /"size_in_bytes": [0-9]+/ {
+            s=$2; gsub(/,/,"",s)
+            if (cur=="darwin-binaries" || cur=="macos-dmg") print cur, id
+        }' "$GH_BODY")"
+    if [ -z "$arts" ]; then
+        echo "  没有需要清理的 artifact，跳过"
+        return 0
+    fi
+    echo "$arts" | while read -r name id; do
+        gh_api DELETE "/repos/$GH_REPO/actions/artifacts/$id"
+        if [ "$GH_CODE" = 204 ]; then
+            echo "  已删除 $name（id=$id）"
+        else
+            echo "  删除 $name 失败（HTTP $GH_CODE），忽略" >&2
+        fi
+    done
 }
 
 # wait_ci_run_only 只等 Actions 跑完并打印结果（--ci 用）：
@@ -586,6 +624,7 @@ fi
 
 if [ "$DARWIN_CI" = 1 ]; then
     collect_darwin_ci
+    delete_darwin_artifacts "${CI_RUN_ID:-}"
 fi
 
 # publish_app 发布**一个**应用（完整版或仅托盘无 UI 版）：
