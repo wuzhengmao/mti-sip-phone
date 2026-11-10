@@ -277,6 +277,12 @@ func (m *Manager) PlayBusy() {
 	m.enqueue(func() { m.playTone(busy, false, false) }) // 遇忙音：扬声器（同回铃音）
 }
 
+// PlayBeep 播放自动接听接通提示音（"嘀"，一次）：来电被自动接听、接通瞬间
+// 给用户一个听觉提示（不经过通话媒体流，走独立的提示音播放设备）。
+func (m *Manager) PlayBeep() {
+	m.enqueue(func() { m.playTone(beep, false, false) }) // 接通提示音：扬声器
+}
+
 // PlayDTMF 播放按键回显音（REQ-UI-029）：拨号盘按钮 / 主窗体敲数字时本机响一声。
 //
 // 走**独立的提示音播放设备**（同回铃音/遇忙音，目标 = 当前选择的扬声器），

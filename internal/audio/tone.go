@@ -74,6 +74,40 @@ func buildDTMFTones() map[string]*wavPCM {
 	return out
 }
 
+// ---- 自动接听接通提示音（"嘀"）----
+
+const (
+	beepSampleRate = 8000 // 与 DTMF / 通话管线一致
+	beepFrequency  = 1000 // 单频正弦，清晰的一声"嘀"
+	beepDurationMS = 200  // 够听清、不拖泥带水
+	beepFadeMS     = 5    // 首尾淡入淡出，避免爆音
+	// 单正弦峰值就是 1×，0.5 满幅足够响亮且不刺耳
+	beepAmplitude = 0.5
+)
+
+// beep 自动接听接通提示音：与 DTMF 同理**合成**短音，不额外加 WAV 资源。
+var beep = buildBeep()
+
+// buildBeep 合成 16bit PCM 单频短音。
+func buildBeep() *wavPCM {
+	n := beepSampleRate * beepDurationMS / 1000
+	fade := beepSampleRate * beepFadeMS / 1000
+	pcm := make([]int16, n)
+	for i := 0; i < n; i++ {
+		tt := float64(i) / float64(beepSampleRate)
+		v := math.Sin(2 * math.Pi * beepFrequency * tt)
+		gain := 1.0
+		switch {
+		case fade > 0 && i < fade:
+			gain = float64(i) / float64(fade)
+		case fade > 0 && i >= n-fade:
+			gain = float64(n-i-1) / float64(fade)
+		}
+		pcm[i] = int16(v * beepAmplitude * gain * math.MaxInt16)
+	}
+	return &wavPCM{sampleRate: beepSampleRate, channels: 1, pcm: pcm}
+}
+
 // mustLoadWAV 加载内嵌 WAV（仅支持 PCM 16bit），失败直接 panic
 // （资源损坏属于构建问题，运行期不恢复）。
 func mustLoadWAV(name string) *wavPCM {

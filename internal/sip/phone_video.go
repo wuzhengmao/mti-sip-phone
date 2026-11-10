@@ -241,10 +241,12 @@ func (p *Phone) AnswerVideo(callID string) error {
 	if !p.videoUsable() {
 		return p.videoUnavailableErr()
 	}
-	return p.answerIncoming(callID, answerSendRecv)
+	return p.answerIncoming(callID, answerSendRecv, false)
 }
 
 // answerIncoming 接听呼入，按 mode 决定视频段方向与是否开摄像头。
+// auto=true 表示是自动接听（本地开关 / answer-after 头），接通后播一声"嘀"
+// 提示音；手动接听（Answer/AnswerVideo）传 false，不播。
 //
 // ⚠️ 三个概念别混：`m=video 0` 是**拒绝视频**（对端也不发，answerNoVideo）；
 // `recvonly` 是**只收不发**（能看对方，不开摄像头——摄像头被禁用/不可用时
@@ -254,7 +256,7 @@ func (p *Phone) AnswerVideo(callID string) error {
 // 注意：sipgo 的 RespondSDP 发送 200 后按 RFC 6026 阻塞等待对端 ACK
 // （最长 64*T1=32 秒），必须放在后台 goroutine 执行，否则阻塞 UI 线程
 // 导致界面一直停留在振铃状态。
-func (p *Phone) answerIncoming(callID string, mode answerMode) error {
+func (p *Phone) answerIncoming(callID string, mode answerMode, auto bool) error {
 	cs := p.getCall(callID)
 	if cs == nil || cs.dialogS == nil {
 		return core.ErrCallNotFound
@@ -283,6 +285,11 @@ func (p *Phone) answerIncoming(callID string, mode answerMode) error {
 		cs.engine.Start()
 		p.startVideo(cs, mode == answerSendRecv)
 		p.logMediaEncryption(cs)
+		// 自动接听接通：给用户一个"嘀"提示音（手动接听不播）。走独立的提示音
+		// 播放设备、不经过通话媒体流，所以不会干扰刚建立的通话音频。
+		if auto && p.audio != nil {
+			p.audio.PlayBeep()
+		}
 		p.sink.OnEstablished(cs.id)
 	}()
 	logx.Logger().Info("已接听来电（后台发送 200 OK）", "callId", callID, "视频", mode.String())

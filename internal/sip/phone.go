@@ -870,7 +870,7 @@ func (p *Phone) videoOfferDirection(v *media.VideoEngine) string {
 //
 // 实现见 phone_video.go 的 answerIncoming（后台发送 200 OK 的原因见那里）。
 func (p *Phone) Answer(callID string) error {
-	return p.answerIncoming(callID, answerNoVideo)
+	return p.answerIncoming(callID, answerNoVideo, false)
 }
 
 // attachAudio 接通后把媒体引擎对接音频设备（audio 为 nil 时跳过）。
@@ -2116,7 +2116,7 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 					// 处理（用户要求）——answerSendRecv 打开摄像头双向视频；
 					// 摄像头被禁用/不可用时 videoAnswerDirection 自动退化成 recvonly。
 					// 这里曾传 false（= 拒绝视频），表现为自动接听只接通音频。
-					_ = p.answerIncoming(cs.id, answerSendRecv)
+					_ = p.answerIncoming(cs.id, answerSendRecv, true)
 				}
 			case <-ctx.Done():
 			}
@@ -2124,7 +2124,7 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 	} else if answerAfter == 0 || p.autoAnswer.Load() {
 		// 立即自动接听（自动接听开关）：视频呼叫按**视频接听**处理（用户要求）
 		logx.Logger().Info("自动接听来电", "callId", callID, "answerAfter", answerAfter)
-		_ = p.answerIncoming(cs.id, answerSendRecv)
+		_ = p.answerIncoming(cs.id, answerSendRecv, true)
 	} else {
 		p.respondRinging(dlg)
 	}
