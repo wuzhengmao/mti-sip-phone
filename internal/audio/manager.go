@@ -110,6 +110,10 @@ func (m *Manager) initBackend() {
 		// 初始化期间接通的通话：补启动音频流（队列保证与后续操作顺序一致）
 		m.enqueue(func() { m.startStreamFor(engine) })
 	}
+	if err == nil {
+		// 预热提示音设备：避免重启后首通自动接听的「嘀」静默（见 warmUpTone）。
+		m.enqueue(m.warmUpTone)
+	}
 	for _, cb := range cbs {
 		if cb != nil {
 			cb()
@@ -281,6 +285,27 @@ func (m *Manager) PlayBusy() {
 // 给用户一个听觉提示（不经过通话媒体流，走独立的提示音播放设备）。
 func (m *Manager) PlayBeep() {
 	m.enqueue(func() { m.playTone(beep, false, false) }) // 接通提示音：扬声器
+}
+
+// warmUpTone 预热提示音设备：miniaudio/WASAPI 首次创建 Playback 设备可能静默
+//（真机现象：重启后首通自动接听听不到"嘀"，第二通才正常）。后端初始化完成后
+// 用一段 50ms 静音把设备走一遍"创建→启动"，随后按既有逻辑空闲自动关闭；
+// 之后真正的提示音（"嘀"/挂断音/回铃音等）都正常。不写 Info 日志（这是启动
+// 预热，不是用户触发的提示音，避免刷日志）。
+func (m *Manager) warmUpTone() {
+	m.mu.Lock()
+	backend := m.backend
+	device := m.speakerID
+	m.mu.Unlock()
+	if backend == nil {
+		return
+	}
+	if device == "" {
+		device = "系统默认"
+	}
+	if err := backend.PlayTone(warmUpSilence, false, device); err != nil {
+		logx.Logger().Debug("预热提示音设备失败（不影响后续提示音）", "err", err)
+	}
 }
 
 // PlayDTMF 播放按键回显音（REQ-UI-029）：拨号盘按钮 / 主窗体敲数字时本机响一声。

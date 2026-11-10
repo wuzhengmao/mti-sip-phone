@@ -88,6 +88,12 @@ const (
 // beep 自动接听接通提示音：与 DTMF 同理**合成**短音，不额外加 WAV 资源。
 var beep = buildBeep()
 
+// warmUpSilence 启动预热用的短静音（听不见）：只用来触发提示音设备的首次
+// 创建/启动。miniaudio/WASAPI 首次创建 Playback 设备可能静默——真机现象是
+// 重启后首通自动接听的「嘀」听不见、第二通才正常（先播一次静音把设备走一遍
+// 即可）。50ms（400 样本 @ 8kHz）。
+var warmUpSilence = &wavPCM{sampleRate: 8000, channels: 1, pcm: make([]int16, 400)}
+
 // buildBeep 合成 16bit PCM 单频短音。
 func buildBeep() *wavPCM {
 	n := beepSampleRate * beepDurationMS / 1000
