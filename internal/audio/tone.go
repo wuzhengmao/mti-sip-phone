@@ -79,7 +79,7 @@ func buildDTMFTones() map[string]*wavPCM {
 const (
 	beepSampleRate = 8000 // 与 DTMF / 通话管线一致
 	beepFrequency  = 1000 // 单频正弦，清晰的一声"嘀"
-	beepDurationMS = 200  // 够听清、不拖泥带水
+	beepDurationMS = 300  // 够听清、不拖泥带水（用户实测 200ms 太短）
 	beepFadeMS     = 5    // 首尾淡入淡出，避免爆音
 	// 单正弦峰值就是 1×，0.5 满幅足够响亮且不刺耳
 	beepAmplitude = 0.5
