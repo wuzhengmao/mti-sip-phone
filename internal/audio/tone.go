@@ -76,43 +76,10 @@ func buildDTMFTones() map[string]*wavPCM {
 
 // ---- 自动接听接通提示音（"嘀"）----
 
-const (
-	beepSampleRate = 8000 // 与 DTMF / 通话管线一致
-	beepFrequency  = 800  // 单频正弦：800Hz 清晰但不尖（1000Hz 用户反馈太尖）
-	beepDurationMS = 300  // 够听清、不拖泥带水（用户实测 200ms 太短）
-	beepFadeMS     = 5    // 首尾淡入淡出，避免爆音
-	// 单正弦峰值就是 1×，0.4 满幅足够响亮且不刺耳
-	beepAmplitude = 0.4
-)
-
-// beep 自动接听接通提示音：与 DTMF 同理**合成**短音，不额外加 WAV 资源。
-var beep = buildBeep()
-
-// warmUpSilence 启动预热用的短静音（听不见）：只用来触发提示音设备的首次
-// 创建/启动。miniaudio/WASAPI 首次创建 Playback 设备可能静默——真机现象是
-// 重启后首通自动接听的「嘀」听不见、第二通才正常（先播一次静音把设备走一遍
-// 即可）。50ms（400 样本 @ 8kHz）。
-var warmUpSilence = &wavPCM{sampleRate: 8000, channels: 1, pcm: make([]int16, 400)}
-
-// buildBeep 合成 16bit PCM 单频短音。
-func buildBeep() *wavPCM {
-	n := beepSampleRate * beepDurationMS / 1000
-	fade := beepSampleRate * beepFadeMS / 1000
-	pcm := make([]int16, n)
-	for i := 0; i < n; i++ {
-		tt := float64(i) / float64(beepSampleRate)
-		v := math.Sin(2 * math.Pi * beepFrequency * tt)
-		gain := 1.0
-		switch {
-		case fade > 0 && i < fade:
-			gain = float64(i) / float64(fade)
-		case fade > 0 && i >= n-fade:
-			gain = float64(n-i-1) / float64(fade)
-		}
-		pcm[i] = int16(v * beepAmplitude * gain * math.MaxInt16)
-	}
-	return &wavPCM{sampleRate: beepSampleRate, channels: 1, pcm: pcm}
-}
+// beep 自动接听接通提示音：走 WAV 资源（与振铃/挂断音同一路径）。曾用合成
+// 单频正弦，首通静默时排查过「合成 PCM 是否有问题」——改成 WAV 与其它提示音
+// 完全一致（800Hz/300ms/8000Hz 单声道，见 assets/beep.wav）。
+var beep = mustLoadWAV("assets/beep.wav")
 
 // mustLoadWAV 加载内嵌 WAV（仅支持 PCM 16bit），失败直接 panic
 // （资源损坏属于构建问题，运行期不恢复）。

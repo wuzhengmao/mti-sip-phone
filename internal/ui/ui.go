@@ -2287,9 +2287,11 @@ func (a *App) onEvent(ev core.Event) {
 			a.activeCall = call
 			a.savedNumber = call.Remote
 			a.setCallUI(uiInCall, call)
-			// 通话建立：停止振铃音（含本地回铃音）
+			// 通话建立：停止振铃音（含本地回铃音）。立即自动接听的通话没播过
+			// 振铃音，且接通「嘀」是在流设备之前播的——这里再 StopRing 会把「嘀」
+			// 一起停掉，故自动接听不调（手动/延迟接听照旧停振铃）。
 			a.ringbackOn = false
-			if a.audioMgr != nil {
+			if a.audioMgr != nil && !call.AutoAnswer {
 				a.audioMgr.StopRing()
 			}
 		}

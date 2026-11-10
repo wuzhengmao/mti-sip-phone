@@ -2095,7 +2095,7 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 	//   2) 本地自动接听开关开启：立即接听；
 	//   3) 否则回 180 等待用户操作。
 	answerAfter := parseAnswerAfter(req)
-	immediateAuto := answerAfter == 0 || p.autoAnswer.Load()
+	immediateAuto := answerAfter == 0 || (answerAfter < 0 && p.autoAnswer.Load())
 
 	// 上报来电事件（核心层会弹窗/推送 WS 事件）
 	p.sink.OnIncoming(callID, core.IncomingCall{

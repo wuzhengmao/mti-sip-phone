@@ -2,7 +2,6 @@ package sip
 
 import (
 	"image"
-	"time"
 
 	"mti-sip-phone/internal/config"
 	"mti-sip-phone/internal/core"
@@ -228,10 +227,6 @@ const (
 	answerSendRecv                   // 接受视频，摄像头可用则双向（点「视频接听」、自动接听）
 )
 
-// beepPlayDelay 自动接听接通提示音的延迟：等 UI 的 StopRing（StopTone）先入队，
-// 让"嘀"落在振铃音停止之后（振铃音与提示音共用提示音播放设备，立刻播会被停掉）。
-const beepPlayDelay = 400 * time.Millisecond
-
 // String 日志用。摄像头被禁用/不可用时 answerSendRecv 会退化成"只收不发"
 // （方向由 videoAnswerDirection 算），所以这里只说接听方的**意图**。
 func (m answerMode) String() string {
@@ -286,23 +281,20 @@ func (p *Phone) answerIncoming(callID string, mode answerMode, auto bool) error 
 			return
 		}
 		cs.established = true
+		// 自动接听接通：给用户一个"嘀"提示音（手动接听不播）。走独立的提示音
+		// 播放设备、不经过通话媒体流。
+		//
+		// ⚠️ 必须在**启动音频流之前**播：提示音设备（Playback）若在全双工流设备
+		// （Duplex）运行期间创建，首通会静默（真机：首通"嘀"听不见、挂断音却正常
+		// ——挂断音是在流设备停止之后播的）。在流之前播则与振铃音同一条路径，
+		// 首通也正常。自动接听无振铃音，UI 侧也不会再 StopRing（见 call.established）。
+		if auto && p.audio != nil {
+			p.audio.PlayBeep()
+		}
 		p.attachAudio(cs.engine)
 		cs.engine.Start()
 		p.startVideo(cs, mode == answerSendRecv)
 		p.logMediaEncryption(cs)
-		// 自动接听接通：给用户一个"嘀"提示音（手动接听不播）。走独立的提示音
-		// 播放设备、不经过通话媒体流，所以不会干扰刚建立的通话音频。
-		//
-		// 但振铃音与提示音共用同一个提示音设备：establish 事件会触发 UI 立即
-		// StopRing（StopTone 停整个提示音设备），若这里立刻 PlayBeep，"嘀"刚起
-		// 就被 UI 的 StopTone 停掉（用户实测：有铃声时听不见）。因此延迟一小段，
-		// 等 UI 的 StopTone 先入队，让"嘀"落在停止之后。
-		if auto && p.audio != nil {
-			go func() {
-				time.Sleep(beepPlayDelay)
-				p.audio.PlayBeep()
-			}()
-		}
 		p.sink.OnEstablished(cs.id)
 	}()
 	logx.Logger().Info("已接听来电（后台发送 200 OK）", "callId", callID, "视频", mode.String())
