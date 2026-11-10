@@ -267,11 +267,24 @@ package_one() {
 
     local dmg="$OUT_DIR/${dmg_stem}-${APP_VERSION}-darwin-${ARCH}.dmg"
     rm -f "$dmg"
-    hdiutil create \
-        -volname "$app_display" \
-        -srcfolder "$stage" \
-        -ov -format UDZO \
-        "$dmg" >/dev/null
+    # hdiutil 偶发 "Resource busy"（codesign 刚改完 .app、文件句柄未释放 / runner
+    # 文件系统忙），失败时稍等重试几次，避免偶发失败打断整个发布。
+    local hdi_attempt
+    for hdi_attempt in 1 2 3 4 5; do
+        if hdiutil create \
+            -volname "$app_display" \
+            -srcfolder "$stage" \
+            -ov -format UDZO \
+            "$dmg" >/dev/null; then
+            break
+        fi
+        echo "hdiutil 打包失败（第 $hdi_attempt 次），稍后重试…" >&2
+        sleep 3
+    done
+    if [ ! -f "$dmg" ]; then
+        echo "hdiutil 打包 DMG 失败（重试后仍失败）" >&2
+        exit 1
+    fi
 
     echo "已生成："
     echo "  $app_path"
