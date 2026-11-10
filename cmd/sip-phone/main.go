@@ -116,23 +116,6 @@ func main() {
 	}
 	defer logx.Close()
 
-	// 崩溃现场记录：托盘版是 GUI 子系统构建（没有控制台），未捕获的 panic、
-	// 运行期致命错误、cgo 里的非法访问都只会写 stderr——那里没人接，Windows
-	// 事件日志也不会有记录（进程是「自己退出」的），表现为「软件凭空消失、
-	// 日志停在半截」。这里把运行期崩溃输出另存一份，并把没有控制台时的
-	// stderr 一并落到日志目录（有控制台时不动，控制台输出照旧）。
-	crashPath, archivedCrash, crashErr := logx.InstallCrashHandler(logDir, fmt.Sprintf(
-		"mti-sip-phone %s (%s) pid=%d 实例=%d 参数=%q",
-		core.Version, core.Platform(), os.Getpid(), slot, os.Args[1:]))
-	if crashErr != nil {
-		logx.Logger().Warn("崩溃记录未启用（崩溃时可能没有现场可查）", "err", crashErr)
-	} else {
-		logx.Logger().Info("崩溃记录已启用", "file", crashPath)
-		if archivedCrash != "" {
-			logx.Logger().Warn("上次运行的崩溃现场已归档（上次是异常退出）", "file", archivedCrash)
-		}
-	}
-
 	// 2.5 自安装（REQ-UPD-024）：首次从"临时位置"（下载目录等）运行时，把自身
 	// 复制到固定数据目录、在桌面生成指向副本的快捷方式，并从固定目录重启——
 	// 固定自更新的替换目标与自启/协议注册目标，避免下载产物被清理后程序
@@ -183,6 +166,28 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "单实例检查失败: %v\n", err)
 		os.Exit(1)
+	}
+
+	// 崩溃现场记录：托盘版是 GUI 子系统构建（没有控制台），未捕获的 panic、
+	// 运行期致命错误、cgo 里的非法访问都只会写 stderr——那里没人接，Windows
+	// 事件日志也不会有记录（进程是「自己退出」的），表现为「软件凭空消失、
+	// 日志停在半截」。这里把运行期崩溃输出另存一份，并把没有控制台时的
+	// stderr 一并落到日志目录（有控制台时不动，控制台输出照旧）。
+	//
+	// ⚠️ 必须放在**单实例检查之后**：第二实例走到 single.Run 会转发参数后退出，
+	// 若它在退出前也装一遍崩溃记录，会把**正在运行的实例**刚写好的 crash.log
+	// 标题行冲掉（O_TRUNC），导致真正崩溃的那个实例现场丢失（真机踩过：多实例
+	// 场景下挂机崩溃，crash.log 里只剩转发实例的标题、没有崩溃内容）。
+	crashPath, archivedCrash, crashErr := logx.InstallCrashHandler(logDir, fmt.Sprintf(
+		"mti-sip-phone %s (%s) pid=%d 实例=%d 参数=%q",
+		core.Version, core.Platform(), os.Getpid(), slot, os.Args[1:]))
+	if crashErr != nil {
+		logx.Logger().Warn("崩溃记录未启用（崩溃时可能没有现场可查）", "err", crashErr)
+	} else {
+		logx.Logger().Info("崩溃记录已启用", "file", crashPath)
+		if archivedCrash != "" {
+			logx.Logger().Warn("上次运行的崩溃现场已归档（上次是异常退出）", "file", archivedCrash)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
