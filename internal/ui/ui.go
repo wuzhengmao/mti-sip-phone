@@ -2176,7 +2176,9 @@ func (a *App) onEvent(ev core.Event) {
 			a.localVideoEver = false
 			a.videoSized = false
 			a.setCallUI(uiRinging, call)
-			if a.audioMgr != nil {
+			// 立即自动接听（本地开关 / answer-after=0）不播振铃音：话机马上会
+			// 自动接通并播"嘀"，振铃音既没必要、又会和"嘀"抢提示音设备。
+			if a.audioMgr != nil && !call.AutoAnswer {
 				a.audioMgr.PlayRing()
 			}
 		}

@@ -175,6 +175,10 @@ type IncomingCall struct {
 	// 接通后通话面板第一行不显示咨询/转移/会议入口（这通本身就是咨询的一方）。
 	Consult  bool
 	HasVideo bool // 对端 offer 里含可用的视频段（决定是否显示「视频接听」）
+	// AutoAnswer 立即自动接听（本地「自动接听」开关开启，或 Call-Info 的
+	// answer-after=0）：话机马上自动接听，界面**不播振铃音**（振铃音会与接通
+	// 提示音"嘀"抢提示音设备）。answer-after>0 是"延迟接听"，仍先振铃。
+	AutoAnswer bool
 }
 
 // EventSink 电话层向核心层上报事件的回调接口，由 App 实现。

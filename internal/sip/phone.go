@@ -2088,6 +2088,15 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 		}
 	}
 
+	// 自动接听决策（answerAfter 提前到 OnIncoming 之前解析，好把"立即自动接听"
+	// 随来电事件带出去，界面据此跳过振铃音——振铃音会和接通提示音"嘀"抢设备）：
+	//   1) INVITE 携带 Call-Info: <...>;answer-after=x（REQ-CALL-015）：
+	//      x=0 立即接听，x>0 延迟 x 秒接听（期间先回 180）；
+	//   2) 本地自动接听开关开启：立即接听；
+	//   3) 否则回 180 等待用户操作。
+	answerAfter := parseAnswerAfter(req)
+	immediateAuto := answerAfter == 0 || p.autoAnswer.Load()
+
 	// 上报来电事件（核心层会弹窗/推送 WS 事件）
 	p.sink.OnIncoming(callID, core.IncomingCall{
 		Remote:     remote,
@@ -2095,14 +2104,9 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 		PeerName:   ci.DisplayName,
 		Consult:    strings.EqualFold(ci.CallType, "consult"),
 		HasVideo:   hasVideo,
+		AutoAnswer: immediateAuto,
 	})
 
-	// 自动接听决策：
-	//   1) INVITE 携带 Call-Info: <...>;answer-after=x（REQ-CALL-015）：
-	//      x=0 立即接听，x>0 延迟 x 秒接听（期间先回 180）；
-	//   2) 本地自动接听开关开启：立即接听；
-	//   3) 否则回 180 等待用户操作。
-	answerAfter := parseAnswerAfter(req)
 	if answerAfter > 0 {
 		// 延迟自动接听：先振铃，x 秒后自动接听
 		p.respondRinging(dlg)
@@ -2121,7 +2125,7 @@ func (p *Phone) handleIncoming(req *sip.Request, tx sip.ServerTransaction) {
 			case <-ctx.Done():
 			}
 		}()
-	} else if answerAfter == 0 || p.autoAnswer.Load() {
+	} else if immediateAuto {
 		// 立即自动接听（自动接听开关）：视频呼叫按**视频接听**处理（用户要求）
 		logx.Logger().Info("自动接听来电", "callId", callID, "answerAfter", answerAfter)
 		_ = p.answerIncoming(cs.id, answerSendRecv, true)

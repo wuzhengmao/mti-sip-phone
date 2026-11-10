@@ -47,6 +47,8 @@ type Call struct {
 	Consult bool      `json:"consult,omitempty"`
 	State   CallState `json:"state"`
 	Muted   bool      `json:"muted"`
+	// AutoAnswer 立即自动接听（本地开关 / answer-after=0）：界面据此不播振铃音。
+	AutoAnswer bool `json:"autoAnswer,omitempty"`
 	// MicMuted / SpeakerMuted 麦克风与扬声器静音（纯本地动作，REQ-UI-023；
 	// 桌面通话面板与网页控制共用同一份状态，变更时发 call.audio 事件）。
 	MicMuted     bool `json:"micMuted"`
@@ -828,6 +830,7 @@ func (a *App) OnIncoming(callID string, info IncomingCall) {
 		Consult:    info.Consult,
 		State:      CallRinging,
 		HasVideo:   info.HasVideo,
+		AutoAnswer: info.AutoAnswer,
 	})
 	// 通话记录（REQ-CALL-007）：来电的起点即振铃开始时刻。
 	// 主叫就是本机分机号的通话不记（平台监听/会议等场景会以本机号码回呼话机，
