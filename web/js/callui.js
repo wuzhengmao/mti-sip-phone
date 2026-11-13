@@ -247,7 +247,8 @@ window.SipApp = window.SipApp || {};
     btn.classList.add('has-ico');
     const ico = App.dom.el('span', { class: 'btn-ico' });
     if (spec.img) {
-      ico.appendChild(App.dom.el('img', { src: spec.img, alt: '' }));
+      // cls 给个别图标挂微调样式（如「结束会议」上移 1px、「退出会议」压扁 2px）
+      ico.appendChild(App.dom.el('img', { src: spec.img, alt: '', class: spec.cls }));
     } else {
       // currentColor：颜色跟着按钮文字走（用户要求图标与文字同色）
       ico.innerHTML = App.icons.svg(App.icons.PATH[spec.svg] || App.icons.PATH.phone, 'currentColor', 16);
@@ -650,7 +651,8 @@ window.SipApp = window.SipApp || {};
     if (conf && owner) {
       add('btnAddMember', '添加成员', '', { img: '/img/add-member.png' }, false,
         function (ev) { App.dialpad.open('conference', ev.clientX, ev.clientY); });
-      add('btnFinishConference', '结束会议', 'red', { img: '/img/end-conference.png' }, true,
+      add('btnFinishConference', '结束会议', 'red',
+        { img: '/img/end-conference.png', cls: 'icon-end-conference' }, true,
         function () { return sdk.finishConference(); });
     }
     // 保持（仅两方通话）
@@ -666,7 +668,7 @@ window.SipApp = window.SipApp || {};
       const label = conf ? '退出会议' : st === 'three-way' ? '退出三方'
         : (st === 'monitoring' || st === 'whispering') ? '结束监听' : '挂断';
       const icon = (conf || st === 'three-way')
-        ? { img: '/img/exit-conference.png' } : { svg: 'stop' };
+        ? { img: '/img/exit-conference.png', cls: 'icon-exit-conference' } : { svg: 'stop' };
       add('btnHangup', label, 'red', icon, false, function () { return sdk.hangup(); });
     }
     return out;

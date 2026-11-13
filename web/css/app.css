@@ -504,6 +504,13 @@ details.diag .body { margin-top: 10px; }
   /* 文字按钮的图标：颜色随文字（currentColor / 白色 PNG） */
   .btn-ico { display: inline-flex; align-items: center; margin-right: 6px; }
   .btn-ico img { width: 16px; height: 16px; display: block; }
+  /* 「结束会议」图标：宽高各放大 1px（16→17），并相对上一轮再左移、上移各 1px
+     （桌面 Fyne 侧用 SetIconSize + SetIconOffset 同口径） */
+  .btn-ico img.icon-end-conference {
+    width: 17px; height: 17px; transform: translate(-1px, -2px);
+  }
+  /* 「退出会议」（也用于「退出三方」）图标高度压缩 1px，宽度不变 */
+  .btn-ico img.icon-exit-conference { height: 15px; }
   .btn-ico svg { display: block; }
   /* MSP_ACTION 在途：圆圈旋转（与 UI 一致），按钮禁用 */
   .cti-spin {

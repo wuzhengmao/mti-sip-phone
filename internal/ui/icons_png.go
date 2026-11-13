@@ -152,6 +152,57 @@ func newIconPNGFit(name string, margin float64) fyne.Resource {
 	return fyne.NewStaticResource(name+".png", out.Bytes())
 }
 
+// newIconPNGSqueezeY 把图标内容**纵向压扁** displayDelta 个显示像素、宽度不变：
+// 个别图标视觉上偏高（如「退出会议」），用它按显示尺寸微调。
+//
+// 折算口径与 canvas.ImageFillContain 一致——图标在 boxSize×boxSize 方框里
+// 按整图宽高比等比铺满，所以 1 个显示像素 = 1/scale 个源像素。画布尺寸不变
+// （渲染缩放因此不变），只把内容按内容外接框的中心就地压扁。
+func newIconPNGSqueezeY(name string, boxSize, displayDelta float64) fyne.Resource {
+	b, err := iconPNGFiles.ReadFile("assets/" + name + ".png")
+	if err != nil {
+		return fyne.NewStaticResource(name+".png", b)
+	}
+	src, err := png.Decode(bytes.NewReader(b))
+	if err != nil {
+		return fyne.NewStaticResource(name+".png", b)
+	}
+	bounds := src.Bounds()
+	minX, minY, maxX, maxY := contentBox(src)
+	cw, ch := maxX-minX+1, maxY-minY+1
+	if cw <= 0 || ch <= 0 {
+		return fyne.NewStaticResource(name+".png", b)
+	}
+	scale := math.Min(boxSize/float64(bounds.Dx()), boxSize/float64(bounds.Dy()))
+	if scale <= 0 {
+		return fyne.NewStaticResource(name+".png", b)
+	}
+	newH := int(math.Round(float64(ch) - displayDelta/scale))
+	if newH <= 0 || newH >= ch {
+		return fyne.NewStaticResource(name+".png", b)
+	}
+	crop := image.NewNRGBA(image.Rect(0, 0, cw, ch))
+	for y := 0; y < ch; y++ {
+		for x := 0; x < cw; x++ {
+			crop.SetNRGBA(x, y, nrgbaAt(src, minX+x, minY+y))
+		}
+	}
+	squeezed := image.NewNRGBA(image.Rect(0, 0, cw, newH))
+	draw.CatmullRom.Scale(squeezed, squeezed.Bounds(), crop, crop.Bounds(), draw.Over, nil)
+	dst := image.NewNRGBA(bounds)
+	offY := minY + (ch-newH)/2
+	for y := 0; y < newH; y++ {
+		for x := 0; x < cw; x++ {
+			dst.SetNRGBA(minX+x, offY+y, squeezed.NRGBAAt(x, y))
+		}
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, dst); err != nil {
+		return fyne.NewStaticResource(name+".png", b)
+	}
+	return fyne.NewStaticResource(name+".png", out.Bytes())
+}
+
 // contentBox 非透明像素（alpha > 0x1000）的外接框（含端点）。
 func contentBox(img image.Image) (minX, minY, maxX, maxY int) {
 	b := img.Bounds()

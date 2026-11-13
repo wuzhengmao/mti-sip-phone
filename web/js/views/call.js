@@ -434,7 +434,7 @@ window.SipApp.views = window.SipApp.views || {};
       dec($('btnIntervene'), { img: '/img/intervene.png' });
       dec($('btnIntercept'), { img: '/img/intercept.png' });
       dec($('btnAddMember'), { img: '/img/add-member.png' });
-      dec($('btnFinishConference'), { img: '/img/end-conference.png' });
+      dec($('btnFinishConference'), { img: '/img/end-conference.png', cls: 'icon-end-conference' });
       dec($('btnAnswer'), { img: '/img/phone-out.png' });
       dec($('btnAnswerVideo'), { img: '/img/video-out.png' });
       dec($('btnReject'), { svg: 'stop' });

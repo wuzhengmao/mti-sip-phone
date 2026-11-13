@@ -194,8 +194,9 @@ var (
 	IconCTIAddMember = newIconPNG("add-member")
 	// IconHost 会议 owner 标记（蓝色主持人图标）。
 	IconHost = newIconPNG("host")
-	// IconCTIExitConference 退出会议（也用作「结束咨询」——两者都是"离开当前话务"）。
-	IconCTIExitConference = newIconPNG("exit-conference")
+	// IconCTIExitConference 退出会议（也用作「退出三方」）：图标视觉高度偏高，
+	// 在显示层压缩 1px、宽度不变（调用面板图标框 = callPanelButtonSize/2）。
+	IconCTIExitConference = newIconPNGSqueezeY("exit-conference", float64(callPanelButtonSize)/2, 1)
 	// IconCTIEndConference 结束会议（owner）。
 	IconCTIEndConference = newIconPNG("end-conference")
 

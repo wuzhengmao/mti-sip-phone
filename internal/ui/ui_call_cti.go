@@ -86,7 +86,9 @@ func (a *App) buildCTIButtons() {
 	a.finishConferenceBtn = newIconButton(IconCTIEndConference, colorDangerRed, func() {
 		a.runCTI(a.finishConferenceBtn, "finishConference", nil)
 	})
-	a.finishConferenceBtn.SetIconOffset(1, 2) // 与退出咨询同款图标偏移（右 1、下 2）
+	// 结束会议图标：比默认 18px 宽高各放大 1px；相对上一轮的「右 1、下 1」再
+	// 左移、上移各 1px（即回到居中）
+	a.finishConferenceBtn.SetIconSize(19)
 
 	for _, t := range []struct {
 		btn *compactButton
